@@ -7,15 +7,18 @@ use dwm_lut_config::LutManifest;
 
 use crate::minhook::MinHookRuntime;
 use crate::profile::{BuildProfile, HookProfile};
+use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
     HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime, HookState,
-    InitializationStage, LoggerState, ManifestLoadState, install_state,
+    InitializationStage, LoggerState, ManifestLoadState, SignatureResolutionState, install_state,
+    is_initialized,
 };
 
 #[derive(Debug)]
 pub enum HookError {
     AlreadyInitialized,
     InvalidPath,
+    Resolve(HookResolveError),
 }
 
 impl fmt::Display for HookError {
@@ -23,11 +26,18 @@ impl fmt::Display for HookError {
         match self {
             Self::AlreadyInitialized => write!(f, "hook is already initialized"),
             Self::InvalidPath => write!(f, "manifest path must not be empty"),
+            Self::Resolve(error) => write!(f, "{error}"),
         }
     }
 }
 
 impl std::error::Error for HookError {}
+
+impl From<HookResolveError> for HookError {
+    fn from(value: HookResolveError) -> Self {
+        Self::Resolve(value)
+    }
+}
 
 #[repr(u32)]
 enum InitializeStatus {
@@ -35,6 +45,14 @@ enum InitializeStatus {
     NullManifestPath = 1,
     InvalidManifestPath = 2,
     AlreadyInitialized = 3,
+    DwmcoreModuleNotLoaded = 4,
+    DwmcoreImageInvalid = 5,
+    PresentSignatureNotFound = 6,
+    PresentSignatureAmbiguous = 7,
+    DirectFlipSignatureNotFound = 8,
+    DirectFlipSignatureAmbiguous = 9,
+    OverlaysEnabledSignatureNotFound = 10,
+    OverlaysEnabledSignatureAmbiguous = 11,
 }
 
 pub fn build_profile() -> BuildProfile {
@@ -42,7 +60,26 @@ pub fn build_profile() -> BuildProfile {
 }
 
 pub fn initialize(config: HookConfig, manifest: LutManifest) -> Result<(), HookError> {
+    if is_initialized() {
+        return Err(HookError::AlreadyInitialized);
+    }
+
+    if config.manifest_path.as_os_str().is_empty() {
+        return Err(HookError::InvalidPath);
+    }
+
     let state = prepare_initial_state(config, manifest)?;
+    install_state(state).map_err(|_| HookError::AlreadyInitialized)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn initialize_with_resolution(
+    config: HookConfig,
+    manifest: LutManifest,
+    profile: HookProfile,
+    resolution: SignatureResolutionReport,
+) -> Result<(), HookError> {
+    let state = prepare_initial_state_with_resolution(config, manifest, profile, resolution)?;
     install_state(state).map_err(|_| HookError::AlreadyInitialized)
 }
 
@@ -61,6 +98,7 @@ pub(crate) fn ffi_initialize(manifest_path: *const u16) -> u32 {
         Ok(()) => InitializeStatus::Success as u32,
         Err(HookError::InvalidPath) => InitializeStatus::InvalidManifestPath as u32,
         Err(HookError::AlreadyInitialized) => InitializeStatus::AlreadyInitialized as u32,
+        Err(HookError::Resolve(error)) => map_resolve_status(error) as u32,
     }
 }
 
@@ -73,13 +111,28 @@ pub(crate) fn prepare_initial_state(
     }
 
     let profile = HookProfile::for_build(config.profile);
-    let registration_plan = HookRegistrationPlan::from_profile(&profile);
+    let resolution = resolve_profile(&profile)?;
+    prepare_initial_state_with_resolution(config, manifest, profile, resolution)
+}
 
+pub(crate) fn prepare_initial_state_with_resolution(
+    config: HookConfig,
+    manifest: LutManifest,
+    profile: HookProfile,
+    resolution: SignatureResolutionReport,
+) -> Result<HookState, HookError> {
+    if config.manifest_path.as_os_str().is_empty() {
+        return Err(HookError::InvalidPath);
+    }
+
+    let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
     let initialization_trace = vec![
         InitializationStage::LoggerReady,
         InitializationStage::ManifestLoadDeferred,
         InitializationStage::MinHookBoundaryReady,
         InitializationStage::ProfileSelected,
+        InitializationStage::TargetModuleResolved,
+        InitializationStage::SignaturesResolved,
         InitializationStage::HookRegistrationDeferred,
         InitializationStage::GlobalStateCommitted,
     ];
@@ -94,10 +147,36 @@ pub(crate) fn prepare_initial_state(
                 manifest_path: config.manifest_path,
             },
             minhook: MinHookRuntime::boundary_defined(),
+            resolution: SignatureResolutionState::Resolved(resolution),
             hook_registration: HookRegistrationState::Deferred(registration_plan),
             initialization_trace,
         },
     })
+}
+
+fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
+    match error {
+        HookResolveError::ModuleNotLoaded { .. } => InitializeStatus::DwmcoreModuleNotLoaded,
+        HookResolveError::InvalidModuleImage { .. } => InitializeStatus::DwmcoreImageInvalid,
+        HookResolveError::SignatureNotFound { target, .. } => match target {
+            crate::profile::HookTarget::Present => InitializeStatus::PresentSignatureNotFound,
+            crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
+                InitializeStatus::DirectFlipSignatureNotFound
+            }
+            crate::profile::HookTarget::OverlaysEnabled => {
+                InitializeStatus::OverlaysEnabledSignatureNotFound
+            }
+        },
+        HookResolveError::SignatureAmbiguous { target, .. } => match target {
+            crate::profile::HookTarget::Present => InitializeStatus::PresentSignatureAmbiguous,
+            crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
+                InitializeStatus::DirectFlipSignatureAmbiguous
+            }
+            crate::profile::HookTarget::OverlaysEnabled => {
+                InitializeStatus::OverlaysEnabledSignatureAmbiguous
+            }
+        },
+    }
 }
 
 unsafe fn wide_path_from_ptr(ptr: *const u16) -> Option<PathBuf> {

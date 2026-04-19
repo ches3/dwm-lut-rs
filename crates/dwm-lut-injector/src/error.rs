@@ -8,6 +8,14 @@ pub(crate) enum HookInitializeStatus {
     NullManifestPath = 1,
     InvalidManifestPath = 2,
     AlreadyInitialized = 3,
+    DwmcoreModuleNotLoaded = 4,
+    DwmcoreImageInvalid = 5,
+    PresentSignatureNotFound = 6,
+    PresentSignatureAmbiguous = 7,
+    DirectFlipSignatureNotFound = 8,
+    DirectFlipSignatureAmbiguous = 9,
+    OverlaysEnabledSignatureNotFound = 10,
+    OverlaysEnabledSignatureAmbiguous = 11,
 }
 
 impl HookInitializeStatus {
@@ -17,6 +25,14 @@ impl HookInitializeStatus {
             1 => Some(Self::NullManifestPath),
             2 => Some(Self::InvalidManifestPath),
             3 => Some(Self::AlreadyInitialized),
+            4 => Some(Self::DwmcoreModuleNotLoaded),
+            5 => Some(Self::DwmcoreImageInvalid),
+            6 => Some(Self::PresentSignatureNotFound),
+            7 => Some(Self::PresentSignatureAmbiguous),
+            8 => Some(Self::DirectFlipSignatureNotFound),
+            9 => Some(Self::DirectFlipSignatureAmbiguous),
+            10 => Some(Self::OverlaysEnabledSignatureNotFound),
+            11 => Some(Self::OverlaysEnabledSignatureAmbiguous),
             _ => None,
         }
     }
@@ -29,6 +45,27 @@ impl fmt::Display for HookInitializeStatus {
             Self::NullManifestPath => write!(f, "manifest path pointer was null"),
             Self::InvalidManifestPath => write!(f, "manifest path was empty"),
             Self::AlreadyInitialized => write!(f, "hook DLL is already initialized"),
+            Self::DwmcoreModuleNotLoaded => write!(f, "dwmcore.dll was not loaded in the target"),
+            Self::DwmcoreImageInvalid => write!(f, "dwmcore.dll was not a valid PE image"),
+            Self::PresentSignatureNotFound => write!(f, "Present signature was not found"),
+            Self::PresentSignatureAmbiguous => {
+                write!(f, "Present signature matched multiple locations")
+            }
+            Self::DirectFlipSignatureNotFound => {
+                write!(f, "IsCandidateDirectFlipCompatible signature was not found")
+            }
+            Self::DirectFlipSignatureAmbiguous => {
+                write!(
+                    f,
+                    "IsCandidateDirectFlipCompatible signature matched multiple locations"
+                )
+            }
+            Self::OverlaysEnabledSignatureNotFound => {
+                write!(f, "OverlaysEnabled signature was not found")
+            }
+            Self::OverlaysEnabledSignatureAmbiguous => {
+                write!(f, "OverlaysEnabled signature matched multiple locations")
+            }
         }
     }
 }

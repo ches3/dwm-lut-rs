@@ -5,6 +5,7 @@ use dwm_lut_config::LutManifest;
 
 use crate::minhook::MinHookRuntime;
 use crate::profile::{BuildProfile, HookProfile, HookTarget};
+use crate::resolver::SignatureResolutionReport;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookConfig {
@@ -28,25 +29,49 @@ pub enum InitializationStage {
     ManifestLoadDeferred,
     MinHookBoundaryReady,
     ProfileSelected,
+    TargetModuleResolved,
+    SignaturesResolved,
     HookRegistrationDeferred,
     GlobalStateCommitted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HookRegistrationTarget {
+    pub target: HookTarget,
+    pub capture_key: &'static str,
+    pub address: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookRegistrationPlan {
-    pub targets: Vec<HookTarget>,
+    pub module_name: &'static str,
+    pub module_base_address: usize,
+    pub module_size: usize,
+    pub targets: Vec<HookRegistrationTarget>,
 }
 
 impl HookRegistrationPlan {
-    pub fn from_profile(profile: &HookProfile) -> Self {
+    pub fn from_resolution(resolution: &SignatureResolutionReport) -> Self {
         Self {
-            targets: profile
-                .signatures
+            module_name: resolution.module.module_name,
+            module_base_address: resolution.module.base_address,
+            module_size: resolution.module.size,
+            targets: resolution
+                .targets
                 .iter()
-                .map(|signature| signature.target)
+                .map(|target| HookRegistrationTarget {
+                    target: target.target,
+                    capture_key: target.capture_key,
+                    address: target.address,
+                })
                 .collect(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureResolutionState {
+    Resolved(SignatureResolutionReport),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +84,7 @@ pub struct HookRuntime {
     pub logger: LoggerState,
     pub manifest_load: ManifestLoadState,
     pub minhook: MinHookRuntime,
+    pub resolution: SignatureResolutionState,
     pub hook_registration: HookRegistrationState,
     pub initialization_trace: Vec<InitializationStage>,
 }
@@ -96,6 +122,14 @@ pub fn hook_profile() -> Option<HookProfile> {
     let state = STATE.get()?;
     let guard = state.lock().ok()?;
     Some(guard.profile.clone())
+}
+
+pub fn signature_resolution() -> Option<SignatureResolutionReport> {
+    let state = STATE.get()?;
+    let guard = state.lock().ok()?;
+    match &guard.runtime.resolution {
+        SignatureResolutionState::Resolved(report) => Some(report.clone()),
+    }
 }
 
 pub fn initialization_trace() -> Option<Vec<InitializationStage>> {

@@ -1,3 +1,5 @@
+use AobToken::{Exact, Wildcard};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildProfile {
     Windows11_25H2,
@@ -10,6 +12,16 @@ pub enum HookTarget {
     OverlaysEnabled,
 }
 
+impl HookTarget {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Present => "Present",
+            Self::IsCandidateDirectFlipCompatible => "IsCandidateDirectFlipCompatible",
+            Self::OverlaysEnabled => "OverlaysEnabled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AobToken {
     Exact(u8),
@@ -18,24 +30,44 @@ pub enum AobToken {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureLocator {
-    DeferredAob {
+    Aob {
         module_name: &'static str,
         capture_key: &'static str,
         tokens: &'static [AobToken],
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignatureStage {
-    Phase4Required,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookSignature {
     pub target: HookTarget,
     pub locator: SignatureLocator,
-    pub stage: SignatureStage,
     pub note: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwapChainPathHypothesis {
+    pub accessor_key: &'static str,
+    pub vtable_offset: usize,
+    pub note: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipBoxOwner {
+    OverlayContextStateObject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipBoxPathHypothesis {
+    pub accessor_key: &'static str,
+    pub owner: ClipBoxOwner,
+    pub offset: usize,
+    pub note: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProfileHypotheses {
+    pub swap_chain: SwapChainPathHypothesis,
+    pub clip_box: ClipBoxPathHypothesis,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +75,7 @@ pub struct HookProfile {
     pub build: BuildProfile,
     pub module_name: &'static str,
     pub signatures: Vec<HookSignature>,
+    pub hypotheses: ProfileHypotheses,
 }
 
 impl HookProfile {
@@ -53,9 +86,104 @@ impl HookProfile {
     }
 }
 
-const PRESENT_AOB: &[AobToken] = &[];
-const DIRECT_FLIP_AOB: &[AobToken] = &[];
-const OVERLAYS_ENABLED_AOB: &[AobToken] = &[];
+const PRESENT_AOB: &[AobToken] = &[
+    Exact(0x40),
+    Exact(0x55),
+    Exact(0x53),
+    Exact(0x56),
+    Exact(0x57),
+    Exact(0x41),
+    Exact(0x54),
+    Exact(0x41),
+    Exact(0x55),
+    Exact(0x41),
+    Exact(0x56),
+    Exact(0x41),
+    Exact(0x57),
+    Exact(0x48),
+    Exact(0x8D),
+    Exact(0x6C),
+    Exact(0x24),
+    Exact(0xF9),
+    Exact(0x48),
+    Exact(0x81),
+    Exact(0xEC),
+    Exact(0xF8),
+    Exact(0x00),
+    Exact(0x00),
+    Exact(0x00),
+    Exact(0x48),
+    Exact(0x8B),
+    Exact(0x05),
+    Wildcard,
+    Wildcard,
+    Wildcard,
+    Wildcard,
+    Exact(0x48),
+    Exact(0x33),
+    Exact(0xC4),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x45),
+    Exact(0xEF),
+    Exact(0x4C),
+    Exact(0x8B),
+    Exact(0x65),
+    Wildcard,
+    Exact(0x48),
+    Exact(0x8B),
+    Exact(0xD9),
+];
+
+const DIRECT_FLIP_AOB: &[AobToken] = &[
+    Exact(0x48),
+    Exact(0x8B),
+    Exact(0xC4),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x58),
+    Exact(0x08),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x68),
+    Exact(0x10),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x70),
+    Exact(0x18),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x78),
+    Exact(0x20),
+    Exact(0x41),
+    Exact(0x56),
+    Exact(0x48),
+    Exact(0x83),
+    Exact(0xEC),
+    Exact(0x20),
+    Exact(0x33),
+    Exact(0xDB),
+];
+
+const OVERLAYS_ENABLED_AOB: &[AobToken] = &[
+    Exact(0x83),
+    Exact(0x3D),
+    Wildcard,
+    Wildcard,
+    Wildcard,
+    Wildcard,
+    Exact(0x05),
+    Exact(0x74),
+    Exact(0x09),
+    Exact(0x83),
+    Exact(0x79),
+    Exact(0x28),
+    Exact(0x01),
+    Exact(0x0F),
+    Exact(0x97),
+    Exact(0xC0),
+    Exact(0xC3),
+];
 
 fn windows_11_25h2() -> HookProfile {
     HookProfile {
@@ -64,34 +192,44 @@ fn windows_11_25h2() -> HookProfile {
         signatures: vec![
             HookSignature {
                 target: HookTarget::Present,
-                locator: SignatureLocator::DeferredAob {
+                locator: SignatureLocator::Aob {
                     module_name: "dwmcore.dll",
                     capture_key: "present_25h2",
                     tokens: PRESENT_AOB,
                 },
-                stage: SignatureStage::Phase4Required,
-                note: "Present hook resolution is captured as a dedicated 25H2 AOB slot.",
+                note: "Matches the 25H2 COverlayContext::Present prologue used by dwm_lut_fixed.",
             },
             HookSignature {
                 target: HookTarget::IsCandidateDirectFlipCompatible,
-                locator: SignatureLocator::DeferredAob {
+                locator: SignatureLocator::Aob {
                     module_name: "dwmcore.dll",
                     capture_key: "direct_flip_compat_25h2",
                     tokens: DIRECT_FLIP_AOB,
                 },
-                stage: SignatureStage::Phase4Required,
-                note: "DirectFlip suppression depends on a 25H2-specific AOB entry.",
+                note: "Matches the 25H2 direct-flip compatibility gate used for LUT bypass suppression.",
             },
             HookSignature {
                 target: HookTarget::OverlaysEnabled,
-                locator: SignatureLocator::DeferredAob {
+                locator: SignatureLocator::Aob {
                     module_name: "dwmcore.dll",
                     capture_key: "overlays_enabled_25h2",
                     tokens: OVERLAYS_ENABLED_AOB,
                 },
-                stage: SignatureStage::Phase4Required,
-                note: "Overlay suppression is tracked as a separate profile entry.",
+                note: "Matches the 25H2 overlay enablement check and preserves the nearby RIP-relative global access.",
             },
         ],
+        hypotheses: ProfileHypotheses {
+            swap_chain: SwapChainPathHypothesis {
+                accessor_key: "overlay_swap_chain_vtbl_0x108",
+                vtable_offset: 0x108,
+                note: "Initial 25H2 hypothesis: call the IOverlaySwapChain virtual accessor at vtable slot 0x108 to reach IDXGISwapChain.",
+            },
+            clip_box: ClipBoxPathHypothesis {
+                accessor_key: "overlay_context_state_clip_box_0x7698",
+                owner: ClipBoxOwner::OverlayContextStateObject,
+                offset: 0x7698,
+                note: "Initial 25H2 hypothesis: read the clip-box coordinates from the overlay-context state object at offset 0x7698.",
+            },
+        },
     }
 }

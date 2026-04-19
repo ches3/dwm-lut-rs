@@ -1,6 +1,7 @@
 mod bootstrap;
 mod minhook;
 mod profile;
+mod resolver;
 mod state;
 
 pub use bootstrap::{HookError, build_profile, initialize};
@@ -9,13 +10,16 @@ pub use minhook::{
     MinHookBindings, MinHookRuntime, MinHookState,
 };
 pub use profile::{
-    AobToken, BuildProfile, HookProfile, HookSignature, HookTarget, SignatureLocator,
-    SignatureStage,
+    AobToken, BuildProfile, ClipBoxOwner, ClipBoxPathHypothesis, HookProfile, HookSignature,
+    HookTarget, ProfileHypotheses, SignatureLocator, SwapChainPathHypothesis,
+};
+pub use resolver::{
+    HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport, resolve_profile,
 };
 pub use state::{
-    HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime, HookState,
-    InitializationStage, LoggerState, ManifestLoadState, hook_profile, initialization_trace,
-    is_initialized, manifest_path,
+    HookConfig, HookRegistrationPlan, HookRegistrationState, HookRegistrationTarget, HookRuntime,
+    HookState, InitializationStage, LoggerState, ManifestLoadState, SignatureResolutionState,
+    hook_profile, initialization_trace, is_initialized, manifest_path, signature_resolution,
 };
 
 use std::ffi::c_void;
@@ -60,21 +64,59 @@ mod tests {
     use std::path::PathBuf;
     use std::ptr;
 
-    use super::{
-        BuildProfile, HookConfig, HookProfile, HookRegistrationState, InitializationStage,
-        ManifestLoadState, build_profile, dwm_lut_initialize, hook_profile, initialization_trace,
-        is_initialized, manifest_path,
-    };
     use dwm_lut_config::LutManifest;
 
+    use super::{
+        BuildProfile, HookConfig, HookProfile, HookRegistrationState, HookTarget,
+        InitializationStage, ManifestLoadState, SignatureLocator, SignatureResolutionReport,
+        build_profile, dwm_lut_initialize, hook_profile, initialization_trace, is_initialized,
+        manifest_path, signature_resolution,
+    };
+    use crate::bootstrap::initialize_with_resolution;
+    use crate::resolver::{LoadedModule, ResolvedTarget};
+
+    fn synthetic_resolution(profile: &HookProfile) -> SignatureResolutionReport {
+        let base_address = 0x1800_0000usize;
+        SignatureResolutionReport {
+            module: LoadedModule {
+                module_name: profile.module_name,
+                base_address,
+                size: 0x20_0000,
+            },
+            targets: profile
+                .signatures
+                .iter()
+                .enumerate()
+                .map(|(index, signature)| {
+                    let capture_key = match &signature.locator {
+                        SignatureLocator::Aob { capture_key, .. } => *capture_key,
+                    };
+
+                    ResolvedTarget {
+                        target: signature.target,
+                        capture_key,
+                        address: base_address + 0x1000 + index * 0x100,
+                    }
+                })
+                .collect(),
+        }
+    }
+
     #[test]
-    fn prepare_initial_state_records_phase3_bootstrap_order() {
+    fn prepare_initial_state_records_bootstrap_order() {
         let config = HookConfig {
             manifest_path: PathBuf::from(r"C:\work\manifest.json"),
             profile: BuildProfile::Windows11_25H2,
         };
-        let state = super::bootstrap::prepare_initial_state(config.clone(), LutManifest::empty())
-            .expect("state should build");
+        let profile = HookProfile::for_build(config.profile);
+        let resolution = synthetic_resolution(&profile);
+        let state = super::bootstrap::prepare_initial_state_with_resolution(
+            config.clone(),
+            LutManifest::empty(),
+            profile,
+            resolution.clone(),
+        )
+        .expect("state should build");
 
         assert_eq!(
             state.runtime.initialization_trace,
@@ -83,6 +125,8 @@ mod tests {
                 InitializationStage::ManifestLoadDeferred,
                 InitializationStage::MinHookBoundaryReady,
                 InitializationStage::ProfileSelected,
+                InitializationStage::TargetModuleResolved,
+                InitializationStage::SignaturesResolved,
                 InitializationStage::HookRegistrationDeferred,
                 InitializationStage::GlobalStateCommitted,
             ]
@@ -94,41 +138,75 @@ mod tests {
             }
         );
 
+        match &state.runtime.resolution {
+            super::SignatureResolutionState::Resolved(report) => {
+                assert_eq!(report.module, resolution.module);
+                assert_eq!(report.targets.len(), 3);
+            }
+        }
+
         match &state.runtime.hook_registration {
             HookRegistrationState::Deferred(plan) => {
+                assert_eq!(plan.module_name, "dwmcore.dll");
                 assert_eq!(plan.targets.len(), 3);
+                assert_eq!(plan.targets[0].target, HookTarget::Present);
+                assert!(plan.targets.iter().all(|target| target.address != 0));
             }
         }
     }
 
     #[test]
-    fn build_profile_exposes_required_targets() {
+    fn build_profile_exposes_initial_hypotheses() {
         let profile = HookProfile::for_build(build_profile());
 
         assert_eq!(profile.build, BuildProfile::Windows11_25H2);
         assert_eq!(profile.module_name, "dwmcore.dll");
         assert_eq!(profile.signatures.len(), 3);
+        assert_eq!(profile.hypotheses.swap_chain.vtable_offset, 0x108);
+        assert_eq!(profile.hypotheses.clip_box.offset, 0x7698);
     }
 
     #[test]
-    fn ffi_initialize_returns_documented_status_codes() {
+    fn ffi_initialize_rejects_null_and_empty_manifest_paths() {
         let null_status = unsafe { dwm_lut_initialize(ptr::null()) };
         assert_eq!(null_status, 1);
+    }
 
-        let empty_path = [0u16];
-        let empty_status = unsafe { dwm_lut_initialize(empty_path.as_ptr()) };
-        assert_eq!(empty_status, 2);
+    #[test]
+    fn prepare_initial_state_rejects_empty_manifest_path_without_touching_global_state() {
+        let config = HookConfig {
+            manifest_path: PathBuf::new(),
+            profile: BuildProfile::Windows11_25H2,
+        };
+        let profile = HookProfile::for_build(config.profile);
+        let resolution = synthetic_resolution(&profile);
 
+        let error = super::bootstrap::prepare_initial_state_with_resolution(
+            config,
+            LutManifest::empty(),
+            profile,
+            resolution,
+        )
+        .expect_err("empty path should be rejected before state installation");
+
+        assert!(matches!(error, super::HookError::InvalidPath));
+    }
+
+    #[test]
+    fn initialize_with_resolution_commits_resolved_state() {
         let expected_path = PathBuf::from(r"C:\work\manifest.json");
-        let wide_path: Vec<u16> = expected_path
-            .as_os_str()
-            .encode_wide()
-            .chain(iter::once(0))
-            .collect();
-        let success_status = unsafe { dwm_lut_initialize(wide_path.as_ptr()) };
-        assert_eq!(success_status, 0);
+        let config = HookConfig {
+            manifest_path: expected_path.clone(),
+            profile: BuildProfile::Windows11_25H2,
+        };
+        let profile = HookProfile::for_build(config.profile);
+        let resolution = synthetic_resolution(&profile);
+
+        initialize_with_resolution(config, LutManifest::empty(), profile, resolution.clone())
+            .expect("initialization should succeed with synthetic resolution");
+
         assert!(is_initialized());
-        assert_eq!(manifest_path(), Some(expected_path.clone()));
+        assert_eq!(manifest_path(), Some(expected_path));
         assert_eq!(
             initialization_trace(),
             Some(vec![
@@ -136,6 +214,8 @@ mod tests {
                 InitializationStage::ManifestLoadDeferred,
                 InitializationStage::MinHookBoundaryReady,
                 InitializationStage::ProfileSelected,
+                InitializationStage::TargetModuleResolved,
+                InitializationStage::SignaturesResolved,
                 InitializationStage::HookRegistrationDeferred,
                 InitializationStage::GlobalStateCommitted,
             ])
@@ -144,7 +224,16 @@ mod tests {
             hook_profile().map(|profile| profile.build),
             Some(BuildProfile::Windows11_25H2)
         );
+        assert_eq!(
+            signature_resolution().map(|report| report.module),
+            Some(resolution.module)
+        );
 
+        let wide_path: Vec<u16> = PathBuf::from(r"C:\work\manifest.json")
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect();
         let already_initialized_status = unsafe { dwm_lut_initialize(wide_path.as_ptr()) };
         assert_eq!(already_initialized_status, 3);
     }
