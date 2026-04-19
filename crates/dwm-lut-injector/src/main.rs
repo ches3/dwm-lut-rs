@@ -1,8 +1,12 @@
-use std::env;
-use std::path::PathBuf;
+mod cli;
+mod error;
+mod injector;
+mod win32;
 
-use dwm_lut_config::{LutManifest, load_manifest};
-use dwm_lut_hook::{BuildProfile, HookConfig, initialize};
+use cli::{ParseArgsResult, parse_args};
+use error::{InjectionStep, InjectorError};
+use injector::{canonicalize_existing_file, inject_and_initialize};
+use win32::{enable_debug_privilege, find_process_id_by_name};
 
 fn main() {
     if let Err(err) = run() {
@@ -11,31 +15,33 @@ fn main() {
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_path = manifest_path_from_args()?;
-
-    let manifest = match load_manifest(&manifest_path) {
-        Ok(manifest) => manifest,
-        Err(_) => LutManifest::empty(),
+fn run() -> Result<(), InjectorError> {
+    let options = match parse_args()? {
+        ParseArgsResult::Run(options) => options,
+        ParseArgsResult::Help(message) => {
+            println!("{message}");
+            return Ok(());
+        }
     };
+    let dll_path = canonicalize_existing_file(
+        &options.dll_path,
+        InjectionStep::ResolveLocalHookDll,
+        "hook DLL",
+    )?;
+    let manifest_path = canonicalize_existing_file(
+        &options.manifest_path,
+        InjectionStep::ResolveManifestPath,
+        "manifest file",
+    )?;
+    let pid = find_process_id_by_name("dwm.exe")?;
 
-    let config = HookConfig {
-        manifest_path,
-        profile: BuildProfile::Windows11_25H2,
-    };
+    enable_debug_privilege()?;
+    inject_and_initialize(pid, &dll_path, &manifest_path)?;
 
-    initialize(config, manifest)?;
-
-    println!("injector skeleton ready");
+    println!(
+        "initialized dwm.exe (pid={pid}) with {} and {}",
+        dll_path.display(),
+        manifest_path.display()
+    );
     Ok(())
-}
-
-fn manifest_path_from_args() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let mut args = env::args_os();
-    let _program = args.next();
-
-    match args.next() {
-        Some(path) => Ok(PathBuf::from(path)),
-        None => Err("usage: dwm-lut-injector <manifest-path>".into()),
-    }
 }
