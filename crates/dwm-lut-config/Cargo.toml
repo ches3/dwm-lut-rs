@@ -1,0 +1,9 @@
+[package]
+name = "dwm-lut-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "dwm_lut_config"
+path = "src/lib.rs"
