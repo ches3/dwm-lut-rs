@@ -3,21 +3,24 @@ use std::fmt;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
-use dwm_lut_config::LutManifest;
+use dwm_lut_config::{ConfigError, LutManifest, load_manifest};
 
+use crate::lut_pipeline::{LutPipeline, LutPipelineError};
 use crate::minhook::MinHookRuntime;
 use crate::profile::{BuildProfile, HookProfile};
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
     HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime, HookState,
-    InitializationStage, LoggerState, ManifestLoadState, SignatureResolutionState, install_state,
-    is_initialized,
+    InitializationStage, LoggerState, LutPipelineState, ManifestLoadState,
+    SignatureResolutionState, install_state, is_initialized,
 };
 
 #[derive(Debug)]
 pub enum HookError {
     AlreadyInitialized,
     InvalidPath,
+    Manifest(ConfigError),
+    LutPipeline(LutPipelineError),
     Resolve(HookResolveError),
 }
 
@@ -26,6 +29,8 @@ impl fmt::Display for HookError {
         match self {
             Self::AlreadyInitialized => write!(f, "hook is already initialized"),
             Self::InvalidPath => write!(f, "manifest path must not be empty"),
+            Self::Manifest(error) => write!(f, "{error}"),
+            Self::LutPipeline(error) => write!(f, "{error}"),
             Self::Resolve(error) => write!(f, "{error}"),
         }
     }
@@ -36,6 +41,18 @@ impl std::error::Error for HookError {}
 impl From<HookResolveError> for HookError {
     fn from(value: HookResolveError) -> Self {
         Self::Resolve(value)
+    }
+}
+
+impl From<ConfigError> for HookError {
+    fn from(value: ConfigError) -> Self {
+        Self::Manifest(value)
+    }
+}
+
+impl From<LutPipelineError> for HookError {
+    fn from(value: LutPipelineError) -> Self {
+        Self::LutPipeline(value)
     }
 }
 
@@ -53,33 +70,21 @@ enum InitializeStatus {
     DirectFlipSignatureAmbiguous = 9,
     OverlaysEnabledSignatureNotFound = 10,
     OverlaysEnabledSignatureAmbiguous = 11,
+    ManifestLoadFailed = 12,
+    ManifestHasNoAssignments = 13,
+    LutPipelinePrepareFailed = 14,
 }
 
 pub fn build_profile() -> BuildProfile {
     BuildProfile::Windows11_25H2
 }
 
-pub fn initialize(config: HookConfig, manifest: LutManifest) -> Result<(), HookError> {
-    if is_initialized() {
-        return Err(HookError::AlreadyInitialized);
-    }
-
-    if config.manifest_path.as_os_str().is_empty() {
-        return Err(HookError::InvalidPath);
-    }
-
-    let state = prepare_initial_state(config, manifest)?;
-    install_state(state).map_err(|_| HookError::AlreadyInitialized)
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn initialize_with_resolution(
     config: HookConfig,
-    manifest: LutManifest,
-    profile: HookProfile,
     resolution: SignatureResolutionReport,
 ) -> Result<(), HookError> {
-    let state = prepare_initial_state_with_resolution(config, manifest, profile, resolution)?;
+    let state = prepare_initial_state_with_resolution(config, resolution)?;
     install_state(state).map_err(|_| HookError::AlreadyInitialized)
 }
 
@@ -94,42 +99,75 @@ pub(crate) fn ffi_initialize(manifest_path: *const u16) -> u32 {
         profile: build_profile(),
     };
 
-    match initialize(config, LutManifest::empty()) {
+    match initialize_from_manifest_path(config) {
         Ok(()) => InitializeStatus::Success as u32,
-        Err(HookError::InvalidPath) => InitializeStatus::InvalidManifestPath as u32,
-        Err(HookError::AlreadyInitialized) => InitializeStatus::AlreadyInitialized as u32,
-        Err(HookError::Resolve(error)) => map_resolve_status(error) as u32,
+        Err(error) => map_hook_error(error) as u32,
     }
 }
 
-pub(crate) fn prepare_initial_state(
-    config: HookConfig,
-    manifest: LutManifest,
-) -> Result<HookState, HookError> {
+fn initialize_from_manifest_path(config: HookConfig) -> Result<(), HookError> {
+    if is_initialized() {
+        return Err(HookError::AlreadyInitialized);
+    }
+
     if config.manifest_path.as_os_str().is_empty() {
         return Err(HookError::InvalidPath);
     }
 
-    let profile = HookProfile::for_build(config.profile);
-    let resolution = resolve_profile(&profile)?;
-    prepare_initial_state_with_resolution(config, manifest, profile, resolution)
+    let state = prepare_initial_state_from_manifest_path(config)?;
+    install_state(state).map_err(|_| HookError::AlreadyInitialized)
 }
 
+fn prepare_initial_state_from_manifest_path(config: HookConfig) -> Result<HookState, HookError> {
+    prepare_initial_state_from_manifest_path_with_profile_resolver(config, resolve_profile)
+}
+
+fn prepare_initial_state_from_manifest_path_with_profile_resolver<F>(
+    config: HookConfig,
+    resolver: F,
+) -> Result<HookState, HookError>
+where
+    F: FnOnce(&HookProfile) -> Result<SignatureResolutionReport, HookResolveError>,
+{
+    if config.manifest_path.as_os_str().is_empty() {
+        return Err(HookError::InvalidPath);
+    }
+
+    let manifest = load_manifest(&config.manifest_path).map_err(HookError::Manifest)?;
+    let lut_pipeline = LutPipeline::load(&manifest)?;
+    let profile = HookProfile::for_build(config.profile);
+    let resolution = resolver(&profile)?;
+    Ok(finalize_initial_state(
+        config,
+        manifest,
+        profile,
+        resolution,
+        lut_pipeline,
+    ))
+}
+
+#[cfg(test)]
 pub(crate) fn prepare_initial_state_with_resolution(
+    config: HookConfig,
+    resolution: SignatureResolutionReport,
+) -> Result<HookState, HookError> {
+    prepare_initial_state_from_manifest_path_with_profile_resolver(config, |_| Ok(resolution))
+}
+
+fn finalize_initial_state(
     config: HookConfig,
     manifest: LutManifest,
     profile: HookProfile,
     resolution: SignatureResolutionReport,
-) -> Result<HookState, HookError> {
-    if config.manifest_path.as_os_str().is_empty() {
-        return Err(HookError::InvalidPath);
-    }
-
+    lut_pipeline: LutPipeline,
+) -> HookState {
+    let assignment_count = manifest.assignments.len();
     let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
     let initialization_trace = vec![
         InitializationStage::LoggerReady,
-        InitializationStage::ManifestLoadDeferred,
         InitializationStage::MinHookBoundaryReady,
+        InitializationStage::ManifestLoaded,
+        InitializationStage::LutPipelinePrepared,
         InitializationStage::ProfileSelected,
         InitializationStage::TargetModuleResolved,
         InitializationStage::SignaturesResolved,
@@ -137,21 +175,23 @@ pub(crate) fn prepare_initial_state_with_resolution(
         InitializationStage::GlobalStateCommitted,
     ];
 
-    Ok(HookState {
+    HookState {
         manifest,
         config: config.clone(),
         profile,
         runtime: HookRuntime {
             logger: LoggerState::Ready,
-            manifest_load: ManifestLoadState::Deferred {
+            manifest_load: ManifestLoadState::Loaded {
                 manifest_path: config.manifest_path,
+                assignment_count,
             },
             minhook: MinHookRuntime::boundary_defined(),
             resolution: SignatureResolutionState::Resolved(resolution),
+            lut_pipeline: LutPipelineState::Ready(lut_pipeline),
             hook_registration: HookRegistrationState::Deferred(registration_plan),
             initialization_trace,
         },
-    })
+    }
 }
 
 fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
@@ -179,6 +219,19 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
     }
 }
 
+fn map_hook_error(error: HookError) -> InitializeStatus {
+    match error {
+        HookError::InvalidPath => InitializeStatus::InvalidManifestPath,
+        HookError::AlreadyInitialized => InitializeStatus::AlreadyInitialized,
+        HookError::Resolve(error) => map_resolve_status(error),
+        HookError::Manifest(_) => InitializeStatus::ManifestLoadFailed,
+        HookError::LutPipeline(LutPipelineError::NoAssignments) => {
+            InitializeStatus::ManifestHasNoAssignments
+        }
+        HookError::LutPipeline(_) => InitializeStatus::LutPipelinePrepareFailed,
+    }
+}
+
 unsafe fn wide_path_from_ptr(ptr: *const u16) -> Option<PathBuf> {
     if ptr.is_null() {
         return None;
@@ -195,4 +248,112 @@ unsafe fn wide_path_from_ptr(ptr: *const u16) -> Option<PathBuf> {
 
     let units = unsafe { std::slice::from_raw_parts(ptr, len) };
     Some(PathBuf::from(OsString::from_wide(units)))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use dwm_lut_config::ConfigError;
+
+    use crate::profile::HookTarget;
+    use crate::resolver::{HookResolveError, LoadedModule, SignatureResolutionReport};
+
+    use super::{
+        BuildProfile, HookConfig, HookError, InitializeStatus, map_hook_error,
+        prepare_initial_state_from_manifest_path_with_profile_resolver,
+    };
+
+    fn write_test_manifest(contents: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("dwm-lut-bootstrap-{unique}.json"));
+        fs::write(&path, contents).expect("manifest file should be written");
+        path
+    }
+
+    #[test]
+    fn manifest_failures_take_precedence_over_signature_resolution() {
+        let error = prepare_initial_state_from_manifest_path_with_profile_resolver(
+            HookConfig {
+                manifest_path: PathBuf::from(r"C:\missing\manifest.json"),
+                profile: BuildProfile::Windows11_25H2,
+            },
+            |_| {
+                Err(HookResolveError::SignatureNotFound {
+                    target: HookTarget::Present,
+                    capture_key: "present",
+                })
+            },
+        )
+        .expect_err("manifest loading should fail before resolution");
+
+        assert!(matches!(error, HookError::Manifest(ConfigError::Io(_))));
+    }
+
+    #[test]
+    fn empty_manifest_file_reports_no_assignments() {
+        let manifest_path = write_test_manifest(r#"{ "assignments": [] }"#);
+        let error = prepare_initial_state_from_manifest_path_with_profile_resolver(
+            HookConfig {
+                manifest_path: manifest_path.clone(),
+                profile: BuildProfile::Windows11_25H2,
+            },
+            |_| {
+                Ok(SignatureResolutionReport {
+                    module: LoadedModule {
+                        module_name: "dwmcore.dll",
+                        base_address: 0x1800_0000,
+                        size: 0x20_0000,
+                    },
+                    targets: Vec::new(),
+                })
+            },
+        )
+        .expect_err("empty manifest file should fail in LUT pipeline");
+
+        assert!(matches!(
+            error,
+            HookError::LutPipeline(crate::lut_pipeline::LutPipelineError::NoAssignments)
+        ));
+        let _ = fs::remove_file(manifest_path);
+    }
+
+    #[test]
+    fn manifest_validation_runs_before_signature_resolution() {
+        let manifest_path = write_test_manifest(r#"{ "assignments": [] }"#);
+        let error = prepare_initial_state_from_manifest_path_with_profile_resolver(
+            HookConfig {
+                manifest_path: manifest_path.clone(),
+                profile: BuildProfile::Windows11_25H2,
+            },
+            |_| {
+                Err(HookResolveError::SignatureNotFound {
+                    target: HookTarget::Present,
+                    capture_key: "present",
+                })
+            },
+        )
+        .expect_err("manifest validation should fail before resolution");
+
+        assert!(matches!(
+            error,
+            HookError::LutPipeline(crate::lut_pipeline::LutPipelineError::NoAssignments)
+        ));
+        let _ = fs::remove_file(manifest_path);
+    }
+
+    #[test]
+    fn no_assignments_maps_to_manifest_has_no_assignments_status() {
+        assert_eq!(
+            map_hook_error(HookError::LutPipeline(
+                crate::lut_pipeline::LutPipelineError::NoAssignments,
+            )) as u32,
+            InitializeStatus::ManifestHasNoAssignments as u32
+        );
+    }
 }

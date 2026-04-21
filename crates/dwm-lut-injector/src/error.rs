@@ -16,6 +16,9 @@ pub(crate) enum HookInitializeStatus {
     DirectFlipSignatureAmbiguous = 9,
     OverlaysEnabledSignatureNotFound = 10,
     OverlaysEnabledSignatureAmbiguous = 11,
+    ManifestLoadFailed = 12,
+    ManifestHasNoAssignments = 13,
+    LutPipelinePrepareFailed = 14,
 }
 
 impl HookInitializeStatus {
@@ -33,6 +36,9 @@ impl HookInitializeStatus {
             9 => Some(Self::DirectFlipSignatureAmbiguous),
             10 => Some(Self::OverlaysEnabledSignatureNotFound),
             11 => Some(Self::OverlaysEnabledSignatureAmbiguous),
+            12 => Some(Self::ManifestLoadFailed),
+            13 => Some(Self::ManifestHasNoAssignments),
+            14 => Some(Self::LutPipelinePrepareFailed),
             _ => None,
         }
     }
@@ -65,6 +71,13 @@ impl fmt::Display for HookInitializeStatus {
             }
             Self::OverlaysEnabledSignatureAmbiguous => {
                 write!(f, "OverlaysEnabled signature matched multiple locations")
+            }
+            Self::ManifestLoadFailed => write!(f, "manifest could not be loaded"),
+            Self::ManifestHasNoAssignments => {
+                write!(f, "manifest does not contain any LUT assignments")
+            }
+            Self::LutPipelinePrepareFailed => {
+                write!(f, "LUT pipeline resources could not be prepared")
             }
         }
     }

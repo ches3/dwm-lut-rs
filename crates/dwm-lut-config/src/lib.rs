@@ -1,6 +1,9 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorMode {
@@ -97,10 +100,100 @@ impl ConfigError {
     }
 }
 
-pub fn load_manifest(_path: &Path) -> Result<LutManifest, ConfigError> {
-    Err(ConfigError::Unsupported(
-        "manifest loader is not implemented yet",
-    ))
+#[derive(Debug, Deserialize)]
+struct ManifestDocument {
+    assignments: Vec<ManifestAssignmentDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestAssignmentDocument {
+    monitor_id: String,
+    desktop_left: i32,
+    desktop_top: i32,
+    color_mode: ManifestColorMode,
+    lut_path: PathBuf,
+    lut_size: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ManifestColorMode {
+    Sdr,
+    Hdr,
+}
+
+impl From<ManifestColorMode> for ColorMode {
+    fn from(value: ManifestColorMode) -> Self {
+        match value {
+            ManifestColorMode::Sdr => Self::Sdr,
+            ManifestColorMode::Hdr => Self::Hdr,
+        }
+    }
+}
+
+pub fn load_manifest(path: &Path) -> Result<LutManifest, ConfigError> {
+    let contents = fs::read_to_string(path)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    load_manifest_str(base_dir, &contents)
+}
+
+pub fn load_manifest_str(base_dir: &Path, contents: &str) -> Result<LutManifest, ConfigError> {
+    let document: ManifestDocument = serde_json::from_str(contents).map_err(|error| {
+        let line = match error.line() {
+            0 => None,
+            line => Some(line),
+        };
+
+        ConfigError::Parse {
+            line,
+            message: error.to_string(),
+        }
+    })?;
+
+    let mut manifest = LutManifest::empty();
+    let mut selection_keys = HashSet::new();
+    for assignment in document.assignments {
+        if assignment.monitor_id.trim().is_empty() {
+            return Err(ConfigError::parse_message("monitor_id must not be empty"));
+        }
+
+        if assignment.lut_size == 0 {
+            return Err(ConfigError::parse_message(
+                "lut_size must be greater than 0",
+            ));
+        }
+
+        let lut_path = if assignment.lut_path.is_absolute() {
+            assignment.lut_path
+        } else {
+            base_dir.join(assignment.lut_path)
+        };
+
+        let selection_key = (
+            assignment.desktop_left,
+            assignment.desktop_top,
+            assignment.color_mode,
+        );
+        if !selection_keys.insert(selection_key) {
+            return Err(ConfigError::parse_message(format!(
+                "duplicate assignment for desktop_left={}, desktop_top={}, color_mode={:?}",
+                assignment.desktop_left, assignment.desktop_top, assignment.color_mode
+            )));
+        }
+
+        manifest.add(LutAssignment {
+            target: MonitorTarget {
+                monitor_id: assignment.monitor_id,
+                desktop_left: assignment.desktop_left,
+                desktop_top: assignment.desktop_top,
+                color_mode: assignment.color_mode.into(),
+            },
+            lut_path,
+            lut_size: assignment.lut_size,
+        });
+    }
+
+    Ok(manifest)
 }
 
 pub fn parse_cube(path: &Path) -> Result<LutCube, ConfigError> {
@@ -289,7 +382,9 @@ fn expected_entry_count(size: u32) -> Result<usize, ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigError, parse_cube_str};
+    use std::path::{Path, PathBuf};
+
+    use super::{ColorMode, ConfigError, load_manifest_str, parse_cube_str};
 
     #[test]
     fn parse_cube_accepts_comments_and_fractional_values() {
@@ -426,6 +521,128 @@ DOMAIN_MAX 1.0 1.0 1.0
             } => {
                 assert!(message.contains("DOMAIN_MAX must appear before LUT data"));
             }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn load_manifest_resolves_relative_lut_paths() {
+        let manifest = load_manifest_str(
+            Path::new(r"C:\work\profiles"),
+            r#"
+{
+  "assignments": [
+    {
+      "monitor_id": "DISPLAY1",
+      "desktop_left": 0,
+      "desktop_top": 0,
+      "color_mode": "sdr",
+      "lut_path": "panel.cube",
+      "lut_size": 33
+    }
+  ]
+}
+"#,
+        )
+        .expect("manifest should parse");
+
+        assert_eq!(manifest.assignments.len(), 1);
+        assert_eq!(manifest.assignments[0].target.monitor_id, "DISPLAY1");
+        assert_eq!(manifest.assignments[0].target.color_mode, ColorMode::Sdr);
+        assert_eq!(
+            manifest.assignments[0].lut_path,
+            PathBuf::from(r"C:\work\profiles").join("panel.cube")
+        );
+        assert_eq!(manifest.assignments[0].lut_size, 33);
+    }
+
+    #[test]
+    fn load_manifest_rejects_empty_monitor_id() {
+        let error = load_manifest_str(
+            Path::new(r"C:\work\profiles"),
+            r#"
+{
+  "assignments": [
+    {
+      "monitor_id": "  ",
+      "desktop_left": 0,
+      "desktop_top": 0,
+      "color_mode": "sdr",
+      "lut_path": "panel.cube",
+      "lut_size": 33
+    }
+  ]
+}
+"#,
+        )
+        .expect_err("empty monitor_id should fail");
+
+        match error {
+            ConfigError::Parse {
+                line: None,
+                message,
+            } => assert!(message.contains("monitor_id must not be empty")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn load_manifest_requires_assignments_field() {
+        let error = load_manifest_str(Path::new(r"C:\work\profiles"), "{}")
+            .expect_err("missing assignments should fail");
+
+        match error {
+            ConfigError::Parse {
+                line: Some(1),
+                message,
+            } => assert!(message.contains("missing field `assignments`")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn load_manifest_accepts_empty_assignments_array() {
+        let manifest =
+            load_manifest_str(Path::new(r"C:\work\profiles"), r#"{ "assignments": [] }"#)
+                .expect("empty assignments array should still parse");
+
+        assert!(manifest.assignments.is_empty());
+    }
+
+    #[test]
+    fn load_manifest_rejects_duplicate_selection_keys() {
+        let error = load_manifest_str(
+            Path::new(r"C:\work\profiles"),
+            r#"
+{
+  "assignments": [
+    {
+      "monitor_id": "DISPLAY1",
+      "desktop_left": 0,
+      "desktop_top": 0,
+      "color_mode": "sdr",
+      "lut_path": "panel-a.cube",
+      "lut_size": 33
+    },
+    {
+      "monitor_id": "DISPLAY2",
+      "desktop_left": 0,
+      "desktop_top": 0,
+      "color_mode": "sdr",
+      "lut_path": "panel-b.cube",
+      "lut_size": 33
+    }
+  ]
+}
+"#,
+        )
+        .expect_err("duplicate selection keys should fail");
+
+        match error {
+            ConfigError::Parse {
+                line: None,
+                message,
+            } => assert!(message.contains("duplicate assignment")),
             other => panic!("unexpected error: {other}"),
         }
     }

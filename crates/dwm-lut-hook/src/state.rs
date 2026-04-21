@@ -1,8 +1,12 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::path::PathBuf;
+#[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
 
 use dwm_lut_config::LutManifest;
 
+use crate::lut_pipeline::{LutPipeline, LutPipelineSummary};
 use crate::minhook::MinHookRuntime;
 use crate::profile::{BuildProfile, HookProfile, HookTarget};
 use crate::resolver::SignatureResolutionReport;
@@ -20,17 +24,21 @@ pub enum LoggerState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestLoadState {
-    Deferred { manifest_path: PathBuf },
+    Loaded {
+        manifest_path: PathBuf,
+        assignment_count: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitializationStage {
     LoggerReady,
-    ManifestLoadDeferred,
     MinHookBoundaryReady,
     ProfileSelected,
     TargetModuleResolved,
     SignaturesResolved,
+    ManifestLoaded,
+    LutPipelinePrepared,
     HookRegistrationDeferred,
     GlobalStateCommitted,
 }
@@ -79,17 +87,23 @@ pub enum HookRegistrationState {
     Deferred(HookRegistrationPlan),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum LutPipelineState {
+    Ready(LutPipeline),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct HookRuntime {
     pub logger: LoggerState,
     pub manifest_load: ManifestLoadState,
     pub minhook: MinHookRuntime,
     pub resolution: SignatureResolutionState,
+    pub lut_pipeline: LutPipelineState,
     pub hook_registration: HookRegistrationState,
     pub initialization_trace: Vec<InitializationStage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HookState {
     pub manifest: LutManifest,
     pub config: HookConfig,
@@ -97,43 +111,141 @@ pub struct HookState {
     pub runtime: HookRuntime,
 }
 
+#[cfg(not(test))]
 static STATE: OnceLock<Mutex<HookState>> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
+}
+
 pub(crate) fn install_state(state: HookState) -> Result<(), Box<HookState>> {
-    STATE
-        .set(Mutex::new(state))
-        .map_err(|mutex| match mutex.into_inner() {
-            Ok(state) => Box::new(state),
-            Err(poisoned) => Box::new(poisoned.into_inner()),
+    #[cfg(not(test))]
+    {
+        STATE
+            .set(Mutex::new(state))
+            .map_err(|mutex| match mutex.into_inner() {
+                Ok(state) => Box::new(state),
+                Err(poisoned) => Box::new(poisoned.into_inner()),
+            })
+    }
+
+    #[cfg(test)]
+    {
+        STATE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_some() {
+                Err(Box::new(state))
+            } else {
+                *slot = Some(state);
+                Ok(())
+            }
         })
+    }
 }
 
 pub fn is_initialized() -> bool {
-    STATE.get().is_some()
+    #[cfg(not(test))]
+    {
+        STATE.get().is_some()
+    }
+
+    #[cfg(test)]
+    {
+        STATE.with(|slot| slot.borrow().is_some())
+    }
 }
 
 pub fn manifest_path() -> Option<PathBuf> {
-    let state = STATE.get()?;
-    let guard = state.lock().ok()?;
-    Some(guard.config.manifest_path.clone())
+    #[cfg(not(test))]
+    {
+        let state = STATE.get()?;
+        let guard = state.lock().ok()?;
+        Some(guard.config.manifest_path.clone())
+    }
+
+    #[cfg(test)]
+    {
+        STATE.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|state| state.config.manifest_path.clone())
+        })
+    }
 }
 
 pub fn hook_profile() -> Option<HookProfile> {
-    let state = STATE.get()?;
-    let guard = state.lock().ok()?;
-    Some(guard.profile.clone())
+    #[cfg(not(test))]
+    {
+        let state = STATE.get()?;
+        let guard = state.lock().ok()?;
+        Some(guard.profile.clone())
+    }
+
+    #[cfg(test)]
+    {
+        STATE.with(|slot| slot.borrow().as_ref().map(|state| state.profile.clone()))
+    }
 }
 
 pub fn signature_resolution() -> Option<SignatureResolutionReport> {
-    let state = STATE.get()?;
-    let guard = state.lock().ok()?;
-    match &guard.runtime.resolution {
-        SignatureResolutionState::Resolved(report) => Some(report.clone()),
+    #[cfg(not(test))]
+    {
+        let state = STATE.get()?;
+        let guard = state.lock().ok()?;
+        match &guard.runtime.resolution {
+            SignatureResolutionState::Resolved(report) => Some(report.clone()),
+        }
+    }
+
+    #[cfg(test)]
+    {
+        STATE.with(|slot| {
+            let slot = slot.borrow();
+            let state = slot.as_ref()?;
+            match &state.runtime.resolution {
+                SignatureResolutionState::Resolved(report) => Some(report.clone()),
+            }
+        })
     }
 }
 
 pub fn initialization_trace() -> Option<Vec<InitializationStage>> {
-    let state = STATE.get()?;
-    let guard = state.lock().ok()?;
-    Some(guard.runtime.initialization_trace.clone())
+    #[cfg(not(test))]
+    {
+        let state = STATE.get()?;
+        let guard = state.lock().ok()?;
+        Some(guard.runtime.initialization_trace.clone())
+    }
+
+    #[cfg(test)]
+    {
+        STATE.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|state| state.runtime.initialization_trace.clone())
+        })
+    }
+}
+
+pub fn lut_pipeline_summary() -> Option<LutPipelineSummary> {
+    #[cfg(not(test))]
+    {
+        let state = STATE.get()?;
+        let guard = state.lock().ok()?;
+        match &guard.runtime.lut_pipeline {
+            LutPipelineState::Ready(runtime) => Some(runtime.summary()),
+        }
+    }
+
+    #[cfg(test)]
+    {
+        STATE.with(|slot| {
+            let slot = slot.borrow();
+            let state = slot.as_ref()?;
+            match &state.runtime.lut_pipeline {
+                LutPipelineState::Ready(runtime) => Some(runtime.summary()),
+            }
+        })
+    }
 }
