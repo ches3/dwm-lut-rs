@@ -5,13 +5,14 @@ use std::path::PathBuf;
 
 use dwm_lut_config::{ConfigError, LutManifest, load_manifest};
 
+use crate::LutBypassRuntime;
 use crate::lut_pipeline::{LutPipeline, LutPipelineError};
 use crate::minhook::MinHookRuntime;
 use crate::profile::{BuildProfile, HookProfile};
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
     HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime, HookState,
-    InitializationStage, LoggerState, LutPipelineState, ManifestLoadState,
+    InitializationStage, LoggerState, LutBypassState, LutPipelineState, ManifestLoadState,
     SignatureResolutionState, install_state, is_initialized,
 };
 
@@ -73,6 +74,16 @@ enum InitializeStatus {
     ManifestLoadFailed = 12,
     ManifestHasNoAssignments = 13,
     LutPipelinePrepareFailed = 14,
+    WindowDirectFlipSignatureNotFound = 15,
+    WindowDirectFlipSignatureAmbiguous = 16,
+    CompSwapChainDirectFlipSignatureNotFound = 17,
+    CompSwapChainDirectFlipSignatureAmbiguous = 18,
+    CompVisualPromotionSignatureNotFound = 19,
+    CompVisualPromotionSignatureAmbiguous = 20,
+    OverlayTestModeNotFound = 21,
+    OverlayTestModeAmbiguous = 22,
+    CompSwapChainIndependentFlipSignatureNotFound = 23,
+    CompSwapChainIndependentFlipSignatureAmbiguous = 24,
 }
 
 pub fn build_profile() -> BuildProfile {
@@ -163,6 +174,15 @@ fn finalize_initial_state(
 ) -> HookState {
     let assignment_count = manifest.assignments.len();
     let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
+    let overlay_test_mode_address = resolution
+        .targets
+        .iter()
+        .find(|target| target.target == crate::profile::HookTarget::OverlayTestMode)
+        .map(|target| target.address);
+    let lut_bypass = LutBypassRuntime::new(
+        lut_pipeline.summary().lut_count > 0,
+        overlay_test_mode_address,
+    );
     let initialization_trace = vec![
         InitializationStage::LoggerReady,
         InitializationStage::MinHookBoundaryReady,
@@ -172,6 +192,7 @@ fn finalize_initial_state(
         InitializationStage::TargetModuleResolved,
         InitializationStage::SignaturesResolved,
         InitializationStage::HookRegistrationDeferred,
+        InitializationStage::LutBypassStatePrepared,
         InitializationStage::GlobalStateCommitted,
     ];
 
@@ -189,6 +210,7 @@ fn finalize_initial_state(
             resolution: SignatureResolutionState::Resolved(resolution),
             lut_pipeline: LutPipelineState::Ready(lut_pipeline),
             hook_registration: HookRegistrationState::Deferred(registration_plan),
+            lut_bypass: LutBypassState::Ready(lut_bypass),
             initialization_trace,
         },
     }
@@ -206,6 +228,21 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::OverlaysEnabled => {
                 InitializeStatus::OverlaysEnabledSignatureNotFound
             }
+            crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible => {
+                InitializeStatus::WindowDirectFlipSignatureNotFound
+            }
+            crate::profile::HookTarget::CompSwapChainIsCandidateDirectFlipCompatible => {
+                InitializeStatus::CompSwapChainDirectFlipSignatureNotFound
+            }
+            crate::profile::HookTarget::CompVisualIsCandidateForPromotion => {
+                InitializeStatus::CompVisualPromotionSignatureNotFound
+            }
+            crate::profile::HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible => {
+                InitializeStatus::CompSwapChainIndependentFlipSignatureNotFound
+            }
+            crate::profile::HookTarget::OverlayTestMode => {
+                InitializeStatus::OverlayTestModeNotFound
+            }
         },
         HookResolveError::SignatureAmbiguous { target, .. } => match target {
             crate::profile::HookTarget::Present => InitializeStatus::PresentSignatureAmbiguous,
@@ -214,6 +251,21 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             }
             crate::profile::HookTarget::OverlaysEnabled => {
                 InitializeStatus::OverlaysEnabledSignatureAmbiguous
+            }
+            crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible => {
+                InitializeStatus::WindowDirectFlipSignatureAmbiguous
+            }
+            crate::profile::HookTarget::CompSwapChainIsCandidateDirectFlipCompatible => {
+                InitializeStatus::CompSwapChainDirectFlipSignatureAmbiguous
+            }
+            crate::profile::HookTarget::CompVisualIsCandidateForPromotion => {
+                InitializeStatus::CompVisualPromotionSignatureAmbiguous
+            }
+            crate::profile::HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible => {
+                InitializeStatus::CompSwapChainIndependentFlipSignatureAmbiguous
+            }
+            crate::profile::HookTarget::OverlayTestMode => {
+                InitializeStatus::OverlayTestModeAmbiguous
             }
         },
     }

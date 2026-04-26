@@ -33,6 +33,7 @@ impl BackBufferFormat {
     }
 }
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClipBox {
     pub left: i32,
@@ -41,6 +42,7 @@ pub struct ClipBox {
     pub bottom: i32,
 }
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirtyRect {
     pub left: i32,

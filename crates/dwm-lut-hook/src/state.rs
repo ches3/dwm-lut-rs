@@ -6,10 +6,12 @@ use std::sync::{Mutex, OnceLock};
 
 use dwm_lut_config::LutManifest;
 
+use crate::lut_bypass::{LutBypassRuntime, PresentHookOutcome};
 use crate::lut_pipeline::{LutPipeline, LutPipelineSummary};
 use crate::minhook::MinHookRuntime;
 use crate::profile::{BuildProfile, HookProfile, HookTarget};
 use crate::resolver::SignatureResolutionReport;
+use crate::{ClipBox, DirtyRect};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookConfig {
@@ -40,6 +42,7 @@ pub enum InitializationStage {
     ManifestLoaded,
     LutPipelinePrepared,
     HookRegistrationDeferred,
+    LutBypassStatePrepared,
     GlobalStateCommitted,
 }
 
@@ -67,6 +70,7 @@ impl HookRegistrationPlan {
             targets: resolution
                 .targets
                 .iter()
+                .filter(|target| target.target.is_function_hook_target())
                 .map(|target| HookRegistrationTarget {
                     target: target.target,
                     capture_key: target.capture_key,
@@ -92,6 +96,11 @@ pub enum LutPipelineState {
     Ready(LutPipeline),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LutBypassState {
+    Ready(LutBypassRuntime),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookRuntime {
     pub logger: LoggerState,
@@ -100,6 +109,7 @@ pub struct HookRuntime {
     pub resolution: SignatureResolutionState,
     pub lut_pipeline: LutPipelineState,
     pub hook_registration: HookRegistrationState,
+    pub lut_bypass: LutBypassState,
     pub initialization_trace: Vec<InitializationStage>,
 }
 
@@ -157,95 +167,147 @@ pub fn is_initialized() -> bool {
 }
 
 pub fn manifest_path() -> Option<PathBuf> {
-    #[cfg(not(test))]
-    {
-        let state = STATE.get()?;
-        let guard = state.lock().ok()?;
-        Some(guard.config.manifest_path.clone())
-    }
-
-    #[cfg(test)]
-    {
-        STATE.with(|slot| {
-            slot.borrow()
-                .as_ref()
-                .map(|state| state.config.manifest_path.clone())
-        })
-    }
+    with_state(|state| state.config.manifest_path.clone())
 }
 
 pub fn hook_profile() -> Option<HookProfile> {
-    #[cfg(not(test))]
-    {
-        let state = STATE.get()?;
-        let guard = state.lock().ok()?;
-        Some(guard.profile.clone())
-    }
-
-    #[cfg(test)]
-    {
-        STATE.with(|slot| slot.borrow().as_ref().map(|state| state.profile.clone()))
-    }
+    with_state(|state| state.profile.clone())
 }
 
 pub fn signature_resolution() -> Option<SignatureResolutionReport> {
-    #[cfg(not(test))]
-    {
-        let state = STATE.get()?;
-        let guard = state.lock().ok()?;
-        match &guard.runtime.resolution {
-            SignatureResolutionState::Resolved(report) => Some(report.clone()),
-        }
-    }
-
-    #[cfg(test)]
-    {
-        STATE.with(|slot| {
-            let slot = slot.borrow();
-            let state = slot.as_ref()?;
-            match &state.runtime.resolution {
-                SignatureResolutionState::Resolved(report) => Some(report.clone()),
-            }
-        })
-    }
+    with_state(|state| match &state.runtime.resolution {
+        SignatureResolutionState::Resolved(report) => report.clone(),
+    })
 }
 
 pub fn initialization_trace() -> Option<Vec<InitializationStage>> {
-    #[cfg(not(test))]
-    {
-        let state = STATE.get()?;
-        let guard = state.lock().ok()?;
-        Some(guard.runtime.initialization_trace.clone())
-    }
-
-    #[cfg(test)]
-    {
-        STATE.with(|slot| {
-            slot.borrow()
-                .as_ref()
-                .map(|state| state.runtime.initialization_trace.clone())
-        })
-    }
+    with_state(|state| state.runtime.initialization_trace.clone())
 }
 
 pub fn lut_pipeline_summary() -> Option<LutPipelineSummary> {
-    #[cfg(not(test))]
-    {
-        let state = STATE.get()?;
-        let guard = state.lock().ok()?;
-        match &guard.runtime.lut_pipeline {
-            LutPipelineState::Ready(runtime) => Some(runtime.summary()),
-        }
-    }
+    with_state(|state| match &state.runtime.lut_pipeline {
+        LutPipelineState::Ready(runtime) => runtime.summary(),
+    })
+}
 
-    #[cfg(test)]
-    {
-        STATE.with(|slot| {
-            let slot = slot.borrow();
-            let state = slot.as_ref()?;
-            match &state.runtime.lut_pipeline {
-                LutPipelineState::Ready(runtime) => Some(runtime.summary()),
-            }
-        })
-    }
+pub fn lut_bypass_runtime() -> Option<LutBypassRuntime> {
+    with_state(|state| match &state.runtime.lut_bypass {
+        LutBypassState::Ready(runtime) => runtime.clone(),
+    })
+}
+
+pub fn evaluate_present_hook(
+    context_address: usize,
+    clip_box: ClipBox,
+    dxgi_format: u32,
+    dirty_rects: &[DirtyRect],
+    lut_applied: bool,
+) -> Option<PresentHookOutcome> {
+    with_state_mut(|state| {
+        let runtime = &mut state.runtime;
+        let LutPipelineState::Ready(lut_pipeline) = &runtime.lut_pipeline;
+        let LutBypassState::Ready(lut_bypass) = &mut runtime.lut_bypass;
+
+        lut_bypass.update_present(
+            lut_pipeline,
+            context_address,
+            clip_box,
+            dxgi_format,
+            dirty_rects,
+            lut_applied,
+        )
+    })
+}
+
+pub fn evaluate_overlays_enabled(context_address: usize, original_enabled: bool) -> Option<bool> {
+    with_state_mut(|state| match &mut state.runtime.lut_bypass {
+        LutBypassState::Ready(runtime) => {
+            runtime.overlays_enabled(context_address, original_enabled)
+        }
+    })
+}
+
+pub fn evaluate_direct_flip_compatible(
+    context_address: usize,
+    original_compatible: bool,
+) -> Option<bool> {
+    with_state_mut(|state| match &mut state.runtime.lut_bypass {
+        LutBypassState::Ready(runtime) => {
+            runtime.direct_flip_compatible(context_address, original_compatible)
+        }
+    })
+}
+
+pub fn evaluate_window_context_direct_flip_compatible(original_compatible: bool) -> Option<bool> {
+    with_state(|state| match &state.runtime.lut_bypass {
+        LutBypassState::Ready(runtime) => {
+            runtime.window_context_direct_flip_compatible(original_compatible)
+        }
+    })
+}
+
+pub fn evaluate_comp_swap_chain_direct_flip_compatible(original_compatible: bool) -> Option<bool> {
+    with_state(|state| match &state.runtime.lut_bypass {
+        LutBypassState::Ready(runtime) => {
+            runtime.comp_swap_chain_direct_flip_compatible(original_compatible)
+        }
+    })
+}
+
+pub fn evaluate_comp_swap_chain_independent_flip_compatible(
+    original_compatible: bool,
+) -> Option<bool> {
+    with_state(|state| match &state.runtime.lut_bypass {
+        LutBypassState::Ready(runtime) => {
+            runtime.comp_swap_chain_independent_flip_compatible(original_compatible)
+        }
+    })
+}
+
+pub fn evaluate_comp_visual_candidate_for_promotion(original_candidate: bool) -> Option<bool> {
+    with_state(|state| match &state.runtime.lut_bypass {
+        LutBypassState::Ready(runtime) => {
+            runtime.comp_visual_candidate_for_promotion(original_candidate)
+        }
+    })
+}
+
+pub fn evaluate_overlay_test_mode(original_mode: i32) -> Option<i32> {
+    with_state(|state| match &state.runtime.lut_bypass {
+        LutBypassState::Ready(runtime) => runtime.overlay_test_mode(original_mode),
+    })
+}
+
+#[cfg(not(test))]
+fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
+    let state = STATE.get()?;
+    let guard = state.lock().ok()?;
+    Some(f(&guard))
+}
+
+#[cfg(test)]
+fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
+    STATE.with(|slot| slot.borrow().as_ref().map(f))
+}
+
+#[cfg(not(test))]
+fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
+    let state = STATE.get()?;
+    let mut guard = state.lock().ok()?;
+    Some(f(&mut guard))
+}
+
+#[cfg(test)]
+fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
+    STATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        slot.as_mut().map(f)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn reset_state_for_tests() {
+    STATE.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
 }

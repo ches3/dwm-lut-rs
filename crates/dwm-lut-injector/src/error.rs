@@ -19,6 +19,16 @@ pub(crate) enum HookInitializeStatus {
     ManifestLoadFailed = 12,
     ManifestHasNoAssignments = 13,
     LutPipelinePrepareFailed = 14,
+    WindowDirectFlipSignatureNotFound = 15,
+    WindowDirectFlipSignatureAmbiguous = 16,
+    CompSwapChainDirectFlipSignatureNotFound = 17,
+    CompSwapChainDirectFlipSignatureAmbiguous = 18,
+    CompVisualPromotionSignatureNotFound = 19,
+    CompVisualPromotionSignatureAmbiguous = 20,
+    OverlayTestModeNotFound = 21,
+    OverlayTestModeAmbiguous = 22,
+    CompSwapChainIndependentFlipSignatureNotFound = 23,
+    CompSwapChainIndependentFlipSignatureAmbiguous = 24,
 }
 
 impl HookInitializeStatus {
@@ -39,6 +49,16 @@ impl HookInitializeStatus {
             12 => Some(Self::ManifestLoadFailed),
             13 => Some(Self::ManifestHasNoAssignments),
             14 => Some(Self::LutPipelinePrepareFailed),
+            15 => Some(Self::WindowDirectFlipSignatureNotFound),
+            16 => Some(Self::WindowDirectFlipSignatureAmbiguous),
+            17 => Some(Self::CompSwapChainDirectFlipSignatureNotFound),
+            18 => Some(Self::CompSwapChainDirectFlipSignatureAmbiguous),
+            19 => Some(Self::CompVisualPromotionSignatureNotFound),
+            20 => Some(Self::CompVisualPromotionSignatureAmbiguous),
+            21 => Some(Self::OverlayTestModeNotFound),
+            22 => Some(Self::OverlayTestModeAmbiguous),
+            23 => Some(Self::CompSwapChainIndependentFlipSignatureNotFound),
+            24 => Some(Self::CompSwapChainIndependentFlipSignatureAmbiguous),
             _ => None,
         }
     }
@@ -79,6 +99,44 @@ impl fmt::Display for HookInitializeStatus {
             Self::LutPipelinePrepareFailed => {
                 write!(f, "LUT pipeline resources could not be prepared")
             }
+            Self::WindowDirectFlipSignatureNotFound => write!(
+                f,
+                "CWindowContext::IsCandidateDirectFlipCompatible signature was not found"
+            ),
+            Self::WindowDirectFlipSignatureAmbiguous => write!(
+                f,
+                "CWindowContext::IsCandidateDirectFlipCompatible signature matched multiple locations"
+            ),
+            Self::CompSwapChainDirectFlipSignatureNotFound => write!(
+                f,
+                "CCompSwapChain::IsCandidateDirectFlipCompatible signature was not found"
+            ),
+            Self::CompSwapChainDirectFlipSignatureAmbiguous => write!(
+                f,
+                "CCompSwapChain::IsCandidateDirectFlipCompatible signature matched multiple locations"
+            ),
+            Self::CompVisualPromotionSignatureNotFound => {
+                write!(
+                    f,
+                    "CCompVisual::IsCandidateForPromotion signature was not found"
+                )
+            }
+            Self::CompVisualPromotionSignatureAmbiguous => write!(
+                f,
+                "CCompVisual::IsCandidateForPromotion signature matched multiple locations"
+            ),
+            Self::OverlayTestModeNotFound => write!(f, "OverlayTestMode reference was not found"),
+            Self::OverlayTestModeAmbiguous => {
+                write!(f, "OverlayTestMode reference matched multiple locations")
+            }
+            Self::CompSwapChainIndependentFlipSignatureNotFound => write!(
+                f,
+                "CCompSwapChain::IsCandidateIndependentFlipCompatible signature was not found"
+            ),
+            Self::CompSwapChainIndependentFlipSignatureAmbiguous => write!(
+                f,
+                "CCompSwapChain::IsCandidateIndependentFlipCompatible signature matched multiple locations"
+            ),
         }
     }
 }

@@ -10,6 +10,11 @@ pub enum HookTarget {
     Present,
     IsCandidateDirectFlipCompatible,
     OverlaysEnabled,
+    WindowContextIsCandidateDirectFlipCompatible,
+    CompSwapChainIsCandidateDirectFlipCompatible,
+    CompSwapChainIsCandidateIndependentFlipCompatible,
+    CompVisualIsCandidateForPromotion,
+    OverlayTestMode,
 }
 
 impl HookTarget {
@@ -18,7 +23,22 @@ impl HookTarget {
             Self::Present => "Present",
             Self::IsCandidateDirectFlipCompatible => "IsCandidateDirectFlipCompatible",
             Self::OverlaysEnabled => "OverlaysEnabled",
+            Self::WindowContextIsCandidateDirectFlipCompatible => {
+                "CWindowContext::IsCandidateDirectFlipCompatible"
+            }
+            Self::CompSwapChainIsCandidateDirectFlipCompatible => {
+                "CCompSwapChain::IsCandidateDirectFlipCompatible"
+            }
+            Self::CompSwapChainIsCandidateIndependentFlipCompatible => {
+                "CCompSwapChain::IsCandidateIndependentFlipCompatible"
+            }
+            Self::CompVisualIsCandidateForPromotion => "CCompVisual::IsCandidateForPromotion",
+            Self::OverlayTestMode => "OverlayTestMode",
         }
+    }
+
+    pub const fn is_function_hook_target(self) -> bool {
+        !matches!(self, Self::OverlayTestMode)
     }
 }
 
@@ -34,6 +54,26 @@ pub enum SignatureLocator {
         module_name: &'static str,
         capture_key: &'static str,
         tokens: &'static [AobToken],
+    },
+    AobExcludingFollowingBytes {
+        module_name: &'static str,
+        capture_key: &'static str,
+        tokens: &'static [AobToken],
+        excluded_following: &'static [&'static [u8]],
+    },
+    RipRelativeGlobalAob {
+        module_name: &'static str,
+        capture_key: &'static str,
+        tokens: &'static [AobToken],
+        displacement_offset: usize,
+        instruction_size: usize,
+    },
+    FollowingAob {
+        module_name: &'static str,
+        capture_key: &'static str,
+        anchor_tokens: &'static [AobToken],
+        tokens: &'static [AobToken],
+        search_range: usize,
     },
 }
 
@@ -165,6 +205,8 @@ const DIRECT_FLIP_AOB: &[AobToken] = &[
     Exact(0xDB),
 ];
 
+const COMP_SWAP_CHAIN_DIRECT_FLIP_FOLLOWING_BYTES: &[u8] = &[0x41, 0x8B, 0xF0];
+
 const OVERLAYS_ENABLED_AOB: &[AobToken] = &[
     Exact(0x83),
     Exact(0x3D),
@@ -185,6 +227,98 @@ const OVERLAYS_ENABLED_AOB: &[AobToken] = &[
     Exact(0xC3),
 ];
 
+const WINDOW_CONTEXT_DIRECT_FLIP_AOB: &[AobToken] = &[
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x5C),
+    Exact(0x24),
+    Exact(0x08),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x74),
+    Exact(0x24),
+    Exact(0x10),
+    Exact(0x57),
+    Exact(0x48),
+    Exact(0x83),
+    Exact(0xEC),
+    Exact(0x20),
+    Exact(0x41),
+    Exact(0x8B),
+    Exact(0xD9),
+    Exact(0x48),
+    Exact(0x8B),
+    Exact(0xF2),
+    Exact(0x4C),
+    Exact(0x8B),
+    Exact(0x01),
+    Exact(0x48),
+    Exact(0x8B),
+    Exact(0xF9),
+];
+
+const COMP_SWAP_CHAIN_DIRECT_FLIP_AOB: &[AobToken] = &[
+    Exact(0x48),
+    Exact(0x8B),
+    Exact(0xC4),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x58),
+    Exact(0x08),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x68),
+    Exact(0x10),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x70),
+    Exact(0x18),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x78),
+    Exact(0x20),
+    Exact(0x41),
+    Exact(0x56),
+    Exact(0x48),
+    Exact(0x83),
+    Exact(0xEC),
+    Exact(0x20),
+    Exact(0x33),
+    Exact(0xDB),
+    Exact(0x41),
+    Exact(0x8B),
+    Exact(0xF0),
+];
+
+const COMP_VISUAL_PROMOTION_AOB: &[AobToken] = &[
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x5C),
+    Exact(0x24),
+    Exact(0x10),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x74),
+    Exact(0x24),
+    Exact(0x18),
+    Exact(0x57),
+    Exact(0x48),
+    Exact(0x83),
+    Exact(0xEC),
+    Exact(0x20),
+    Exact(0x48),
+    Exact(0x8B),
+    Exact(0x01),
+    Exact(0x41),
+    Exact(0x8B),
+    Exact(0xD1),
+    Exact(0x48),
+    Exact(0x8B),
+    Exact(0xF1),
+];
+
+const COMP_SWAP_CHAIN_INDEPENDENT_FLIP_AOB: &[AobToken] = &[Exact(0x48), Exact(0x8D), Exact(0x05)];
+
 fn windows_11_25h2() -> HookProfile {
     HookProfile {
         build: BuildProfile::Windows11_25H2,
@@ -201,12 +335,13 @@ fn windows_11_25h2() -> HookProfile {
             },
             HookSignature {
                 target: HookTarget::IsCandidateDirectFlipCompatible,
-                locator: SignatureLocator::Aob {
+                locator: SignatureLocator::AobExcludingFollowingBytes {
                     module_name: "dwmcore.dll",
                     capture_key: "direct_flip_compat_25h2",
                     tokens: DIRECT_FLIP_AOB,
+                    excluded_following: &[COMP_SWAP_CHAIN_DIRECT_FLIP_FOLLOWING_BYTES],
                 },
-                note: "Matches the 25H2 direct-flip compatibility gate used for LUT bypass suppression.",
+                note: "Matches the 25H2 direct-flip compatibility gate while excluding the CCompSwapChain prologue that shares the same prefix.",
             },
             HookSignature {
                 target: HookTarget::OverlaysEnabled,
@@ -216,6 +351,55 @@ fn windows_11_25h2() -> HookProfile {
                     tokens: OVERLAYS_ENABLED_AOB,
                 },
                 note: "Matches the 25H2 overlay enablement check and preserves the nearby RIP-relative global access.",
+            },
+            HookSignature {
+                target: HookTarget::WindowContextIsCandidateDirectFlipCompatible,
+                locator: SignatureLocator::Aob {
+                    module_name: "dwmcore.dll",
+                    capture_key: "window_direct_flip_compat_25h2",
+                    tokens: WINDOW_CONTEXT_DIRECT_FLIP_AOB,
+                },
+                note: "Matches the 25H2 CWindowContext direct-flip gate used by dwm_lut_fixed to close promotion paths outside COverlayContext.",
+            },
+            HookSignature {
+                target: HookTarget::CompSwapChainIsCandidateDirectFlipCompatible,
+                locator: SignatureLocator::Aob {
+                    module_name: "dwmcore.dll",
+                    capture_key: "comp_swap_chain_direct_flip_compat_25h2",
+                    tokens: COMP_SWAP_CHAIN_DIRECT_FLIP_AOB,
+                },
+                note: "Matches the 25H2 CCompSwapChain direct-flip gate used by dwm_lut_fixed to suppress promotion after DWM refactors.",
+            },
+            HookSignature {
+                target: HookTarget::CompVisualIsCandidateForPromotion,
+                locator: SignatureLocator::Aob {
+                    module_name: "dwmcore.dll",
+                    capture_key: "comp_visual_promotion_25h2",
+                    tokens: COMP_VISUAL_PROMOTION_AOB,
+                },
+                note: "Matches the 25H2 CCompVisual promotion gate used by dwm_lut_fixed.",
+            },
+            HookSignature {
+                target: HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible,
+                locator: SignatureLocator::FollowingAob {
+                    module_name: "dwmcore.dll",
+                    capture_key: "comp_swap_chain_independent_flip_compat_25h2",
+                    anchor_tokens: OVERLAYS_ENABLED_AOB,
+                    tokens: COMP_SWAP_CHAIN_INDEPENDENT_FLIP_AOB,
+                    search_range: 500,
+                },
+                note: "Matches the 25H2 CCompSwapChain independent-flip gate located near the OverlaysEnabled global access in dwm_lut_fixed.",
+            },
+            HookSignature {
+                target: HookTarget::OverlayTestMode,
+                locator: SignatureLocator::RipRelativeGlobalAob {
+                    module_name: "dwmcore.dll",
+                    capture_key: "overlay_test_mode_25h2",
+                    tokens: OVERLAYS_ENABLED_AOB,
+                    displacement_offset: 2,
+                    instruction_size: 7,
+                },
+                note: "Resolves the RIP-relative OverlayTestMode global referenced by the 25H2 OverlaysEnabled check.",
             },
         ],
         hypotheses: ProfileHypotheses {
