@@ -257,6 +257,8 @@ mod tests {
                 monitor_id: "DISPLAY1".into(),
                 desktop_left: 0,
                 desktop_top: 0,
+                desktop_right: None,
+                desktop_bottom: None,
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path.clone(),

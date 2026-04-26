@@ -15,7 +15,7 @@ pub use lut_pipeline::{
     BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
     DirtyRect, LoadedLut, LutMetadata, LutPipeline, LutPipelineError, LutPipelineSummary,
     LutRenderPlan, LutShaderProgram, ShaderConstants, ShaderConstantsCBuffer, ShaderTexture3D,
-    apply_sdr_dither, cube_to_texture, tetrahedral_interpolation,
+    apply_sdr_dither, cube_to_texture, pq_to_scrgb, scrgb_to_pq, tetrahedral_interpolation,
 };
 pub use minhook::{
     MhCreateHookApi, MhDisableHookApi, MhEnableHookApi, MhInitializeApi, MhRemoveHookApi, MhStatus,

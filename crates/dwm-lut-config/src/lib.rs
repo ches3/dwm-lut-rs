@@ -16,7 +16,20 @@ pub struct MonitorTarget {
     pub monitor_id: String,
     pub desktop_left: i32,
     pub desktop_top: i32,
+    pub desktop_right: Option<i32>,
+    pub desktop_bottom: Option<i32>,
     pub color_mode: ColorMode,
+}
+
+impl MonitorTarget {
+    pub fn contains_desktop_point(&self, x: i32, y: i32) -> bool {
+        match (self.desktop_right, self.desktop_bottom) {
+            (Some(right), Some(bottom)) => {
+                x >= self.desktop_left && x < right && y >= self.desktop_top && y < bottom
+            }
+            _ => self.desktop_left == x && self.desktop_top == y,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +123,8 @@ struct ManifestAssignmentDocument {
     monitor_id: String,
     desktop_left: i32,
     desktop_top: i32,
+    desktop_right: Option<i32>,
+    desktop_bottom: Option<i32>,
     color_mode: ManifestColorMode,
     lut_path: PathBuf,
     lut_size: u32,
@@ -163,31 +178,61 @@ pub fn load_manifest_str(base_dir: &Path, contents: &str) -> Result<LutManifest,
             ));
         }
 
+        match (assignment.desktop_right, assignment.desktop_bottom) {
+            (Some(right), Some(bottom)) => {
+                if right <= assignment.desktop_left {
+                    return Err(ConfigError::parse_message(
+                        "desktop_right must be greater than desktop_left",
+                    ));
+                }
+                if bottom <= assignment.desktop_top {
+                    return Err(ConfigError::parse_message(
+                        "desktop_bottom must be greater than desktop_top",
+                    ));
+                }
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ConfigError::parse_message(
+                    "desktop_right and desktop_bottom must be specified together",
+                ));
+            }
+        }
+
         let lut_path = if assignment.lut_path.is_absolute() {
             assignment.lut_path
         } else {
             base_dir.join(assignment.lut_path)
         };
 
+        let target = MonitorTarget {
+            monitor_id: assignment.monitor_id,
+            desktop_left: assignment.desktop_left,
+            desktop_top: assignment.desktop_top,
+            desktop_right: assignment.desktop_right,
+            desktop_bottom: assignment.desktop_bottom,
+            color_mode: assignment.color_mode.into(),
+        };
+
         let selection_key = (
-            assignment.desktop_left,
-            assignment.desktop_top,
+            target.desktop_left,
+            target.desktop_top,
             assignment.color_mode,
         );
-        if !selection_keys.insert(selection_key) {
+        if !selection_keys.insert(selection_key)
+            || manifest
+                .assignments
+                .iter()
+                .any(|existing| monitor_targets_overlap(&existing.target, &target))
+        {
             return Err(ConfigError::parse_message(format!(
-                "duplicate assignment for desktop_left={}, desktop_top={}, color_mode={:?}",
+                "duplicate assignment or overlapping assignment for desktop_left={}, desktop_top={}, color_mode={:?}",
                 assignment.desktop_left, assignment.desktop_top, assignment.color_mode
             )));
         }
 
         manifest.add(LutAssignment {
-            target: MonitorTarget {
-                monitor_id: assignment.monitor_id,
-                desktop_left: assignment.desktop_left,
-                desktop_top: assignment.desktop_top,
-                color_mode: assignment.color_mode.into(),
-            },
+            target,
             lut_path,
             lut_size: assignment.lut_size,
         });
@@ -380,6 +425,36 @@ fn expected_entry_count(size: u32) -> Result<usize, ConfigError> {
         .ok_or_else(|| ConfigError::parse_message("LUT_3D_SIZE is too large"))
 }
 
+fn monitor_targets_overlap(left: &MonitorTarget, right: &MonitorTarget) -> bool {
+    if left.color_mode != right.color_mode {
+        return false;
+    }
+
+    match (
+        left.desktop_right,
+        left.desktop_bottom,
+        right.desktop_right,
+        right.desktop_bottom,
+    ) {
+        (Some(left_right), Some(left_bottom), Some(right_right), Some(right_bottom)) => {
+            left.desktop_left < right_right
+                && left_right > right.desktop_left
+                && left.desktop_top < right_bottom
+                && left_bottom > right.desktop_top
+        }
+        (Some(_), Some(_), None, None) => {
+            left.contains_desktop_point(right.desktop_left, right.desktop_top)
+        }
+        (None, None, Some(_), Some(_)) => {
+            right.contains_desktop_point(left.desktop_left, left.desktop_top)
+        }
+        (None, None, None, None) => {
+            left.desktop_left == right.desktop_left && left.desktop_top == right.desktop_top
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -549,6 +624,8 @@ DOMAIN_MAX 1.0 1.0 1.0
         assert_eq!(manifest.assignments.len(), 1);
         assert_eq!(manifest.assignments[0].target.monitor_id, "DISPLAY1");
         assert_eq!(manifest.assignments[0].target.color_mode, ColorMode::Sdr);
+        assert_eq!(manifest.assignments[0].target.desktop_right, None);
+        assert_eq!(manifest.assignments[0].target.desktop_bottom, None);
         assert_eq!(
             manifest.assignments[0].lut_path,
             PathBuf::from(r"C:\work\profiles").join("panel.cube")
@@ -607,6 +684,109 @@ DOMAIN_MAX 1.0 1.0 1.0
                 .expect("empty assignments array should still parse");
 
         assert!(manifest.assignments.is_empty());
+    }
+
+    #[test]
+    fn load_manifest_accepts_monitor_desktop_bounds() {
+        let manifest = load_manifest_str(
+            Path::new(r"C:\work\profiles"),
+            r#"
+{
+  "assignments": [
+    {
+      "monitor_id": "DISPLAY1",
+      "desktop_left": -1920,
+      "desktop_top": 0,
+      "desktop_right": 0,
+      "desktop_bottom": 1080,
+      "color_mode": "hdr",
+      "lut_path": "panel.cube",
+      "lut_size": 33
+    }
+  ]
+}
+"#,
+        )
+        .expect("manifest should parse");
+
+        let target = &manifest.assignments[0].target;
+        assert_eq!(target.desktop_right, Some(0));
+        assert_eq!(target.desktop_bottom, Some(1080));
+        assert!(target.contains_desktop_point(-1, 100));
+        assert!(!target.contains_desktop_point(0, 100));
+    }
+
+    #[test]
+    fn load_manifest_requires_complete_monitor_bounds() {
+        let error = load_manifest_str(
+            Path::new(r"C:\work\profiles"),
+            r#"
+{
+  "assignments": [
+    {
+      "monitor_id": "DISPLAY1",
+      "desktop_left": 0,
+      "desktop_top": 0,
+      "desktop_right": 1920,
+      "color_mode": "sdr",
+      "lut_path": "panel.cube",
+      "lut_size": 33
+    }
+  ]
+}
+"#,
+        )
+        .expect_err("partial bounds should fail");
+
+        match error {
+            ConfigError::Parse {
+                line: None,
+                message,
+            } => assert!(message.contains("must be specified together")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn load_manifest_rejects_overlapping_monitor_bounds_for_same_color_mode() {
+        let error = load_manifest_str(
+            Path::new(r"C:\work\profiles"),
+            r#"
+{
+  "assignments": [
+    {
+      "monitor_id": "DISPLAY1",
+      "desktop_left": 0,
+      "desktop_top": 0,
+      "desktop_right": 1920,
+      "desktop_bottom": 1080,
+      "color_mode": "sdr",
+      "lut_path": "panel-a.cube",
+      "lut_size": 33
+    },
+    {
+      "monitor_id": "DISPLAY2",
+      "desktop_left": 1280,
+      "desktop_top": 0,
+      "desktop_right": 3200,
+      "desktop_bottom": 1080,
+      "color_mode": "sdr",
+      "lut_path": "panel-b.cube",
+      "lut_size": 33
+    }
+  ]
+}
+"#,
+        )
+        .expect_err("overlapping monitor bounds should fail");
+
+        match error {
+            ConfigError::Parse {
+                line: None,
+                message,
+            } => assert!(message.contains("overlapping assignment")),
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]

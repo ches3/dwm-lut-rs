@@ -226,12 +226,13 @@ impl LutPipeline {
     pub fn select_lut_index(&self, clip_box: ClipBox, format: BackBufferFormat) -> Option<usize> {
         let color_mode = match format {
             BackBufferFormat::Bgra8Unorm => ColorMode::Sdr,
-            BackBufferFormat::Rgba16Float => return None,
+            BackBufferFormat::Rgba16Float => ColorMode::Hdr,
         };
 
         self.luts.iter().position(|lut| {
-            lut.assignment.target.desktop_left == clip_box.left
-                && lut.assignment.target.desktop_top == clip_box.top
+            lut.assignment
+                .target
+                .contains_desktop_point(clip_box.left, clip_box.top)
                 && lut.assignment.target.color_mode == color_mode
         })
     }
@@ -354,6 +355,14 @@ pub fn apply_sdr_dither(rgb: [f32; 3], pixel_x: usize, pixel_y: usize) -> [f32; 
     ]
 }
 
+pub fn scrgb_to_pq(rgb: [f32; 3]) -> [f32; 3] {
+    linear_bt2100_to_pq(multiply_matrix(SCRGB_TO_BT2100, rgb))
+}
+
+pub fn pq_to_scrgb(rgb: [f32; 3]) -> [f32; 3] {
+    multiply_matrix(BT2100_TO_SCRGB, pq_to_linear_bt2100(rgb))
+}
+
 fn build_lut_pipeline_shader_source() -> String {
     LUT_PIPELINE_SHADER_TEMPLATE.replace("__BLUE_NOISE_64X64__", &render_blue_noise_hlsl())
 }
@@ -411,6 +420,85 @@ fn lerp(a: f32, b: f32, factor: f32) -> f32 {
     a + (b - a) * factor
 }
 
+fn linear_to_pq(linear: f32) -> f32 {
+    const M1: f32 = 2610.0 / 16384.0;
+    const M2: f32 = 2523.0 / 32.0;
+    const C1: f32 = 3424.0 / 4096.0;
+    const C2: f32 = 2413.0 / 128.0;
+    const C3: f32 = 2392.0 / 128.0;
+
+    let powered = linear.clamp(0.0, 1.0).powf(M1);
+    ((C1 + C2 * powered) / (1.0 + C3 * powered)).powf(M2)
+}
+
+fn pq_to_linear(pq: f32) -> f32 {
+    const M1: f32 = 2610.0 / 16384.0;
+    const M2: f32 = 2523.0 / 32.0;
+    const C1: f32 = 3424.0 / 4096.0;
+    const C2: f32 = 2413.0 / 128.0;
+    const C3: f32 = 2392.0 / 128.0;
+
+    let powered = pq.clamp(0.0, 1.0).powf(1.0 / M2);
+    let numerator = (powered - C1).max(0.0);
+    let denominator = C2 - C3 * powered;
+    if denominator <= 0.0 {
+        return 1.0;
+    }
+
+    (numerator / denominator).powf(1.0 / M1)
+}
+
+const SCRGB_TO_BT2100: [[f32; 3]; 3] = [
+    [
+        2939026994.0 / 585553224375.0,
+        9255011753.0 / 3513319346250.0,
+        173911579.0 / 501902763750.0,
+    ],
+    [
+        76515593.0 / 138420033750.0,
+        6109575001.0 / 830520202500.0,
+        75493061.0 / 830520202500.0,
+    ],
+    [
+        12225392.0 / 93230009375.0,
+        1772384008.0 / 2517210253125.0,
+        18035212433.0 / 2517210253125.0,
+    ],
+];
+const BT2100_TO_SCRGB: [[f32; 3]; 3] = [
+    [
+        348196442125.0 / 1677558947.0,
+        -123225331250.0 / 1677558947.0,
+        -15276242500.0 / 1677558947.0,
+    ],
+    [
+        -579752563250.0 / 37238079773.0,
+        5273377093000.0 / 37238079773.0,
+        -38864558125.0 / 37238079773.0,
+    ],
+    [
+        -12183628000.0 / 5369968309.0,
+        -472592308000.0 / 37589778163.0,
+        5256599974375.0 / 37589778163.0,
+    ],
+];
+
+fn multiply_matrix(matrix: [[f32; 3]; 3], value: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0][0] * value[0] + matrix[0][1] * value[1] + matrix[0][2] * value[2],
+        matrix[1][0] * value[0] + matrix[1][1] * value[1] + matrix[1][2] * value[2],
+        matrix[2][0] * value[0] + matrix[2][1] * value[1] + matrix[2][2] * value[2],
+    ]
+}
+
+fn linear_bt2100_to_pq(rgb: [f32; 3]) -> [f32; 3] {
+    rgb.map(linear_to_pq)
+}
+
+fn pq_to_linear_bt2100(rgb: [f32; 3]) -> [f32; 3] {
+    rgb.map(pq_to_linear)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -424,7 +512,7 @@ mod tests {
     use super::{
         BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
         DirtyRect, LutPipeline, LutPipelineError, ShaderConstants, ShaderConstantsCBuffer,
-        apply_sdr_dither, normalize_sample, tetrahedral_interpolation,
+        apply_sdr_dither, normalize_sample, pq_to_scrgb, scrgb_to_pq, tetrahedral_interpolation,
     };
 
     fn identity_cube() -> LutCube {
@@ -533,6 +621,8 @@ mod tests {
                 monitor_id: "DISPLAY1".into(),
                 desktop_left: 0,
                 desktop_top: 0,
+                desktop_right: None,
+                desktop_bottom: None,
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path.clone(),
@@ -569,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn present_plan_rejects_hdr_until_hdr_pipeline_exists() {
+    fn present_plan_selects_hdr_lut_for_rgba16_float() {
         let cube_path = write_test_cube();
         let mut manifest = LutManifest::empty();
         manifest.add(LutAssignment {
@@ -577,6 +667,8 @@ mod tests {
                 monitor_id: "DISPLAY1".into(),
                 desktop_left: 0,
                 desktop_top: 0,
+                desktop_right: None,
+                desktop_bottom: None,
                 color_mode: ColorMode::Hdr,
             },
             lut_path: cube_path.clone(),
@@ -595,9 +687,77 @@ mod tests {
             &[],
         );
 
-        assert!(plan.is_none());
+        let plan = plan.expect("HDR plan should exist");
+        assert_eq!(plan.format, BackBufferFormat::Rgba16Float);
+        assert_eq!(plan.shader_constants.hdr, 1);
 
         let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn present_plan_selects_monitor_by_clip_box_inside_manifest_bounds() {
+        let cube_path_a = write_test_cube();
+        let cube_path_b = write_test_cube();
+        let mut manifest = LutManifest::empty();
+        manifest.add(LutAssignment {
+            target: MonitorTarget {
+                monitor_id: "LEFT".into(),
+                desktop_left: -1920,
+                desktop_top: 0,
+                desktop_right: Some(0),
+                desktop_bottom: Some(1080),
+                color_mode: ColorMode::Sdr,
+            },
+            lut_path: cube_path_a.clone(),
+            lut_size: 2,
+        });
+        manifest.add(LutAssignment {
+            target: MonitorTarget {
+                monitor_id: "PRIMARY".into(),
+                desktop_left: 0,
+                desktop_top: 0,
+                desktop_right: Some(2560),
+                desktop_bottom: Some(1440),
+                color_mode: ColorMode::Sdr,
+            },
+            lut_path: cube_path_b.clone(),
+            lut_size: 2,
+        });
+
+        let runtime = LutPipeline::load(&manifest).expect("runtime should load");
+        let plan = runtime
+            .build_present_plan(
+                ClipBox {
+                    left: 120,
+                    top: 64,
+                    right: 2560,
+                    bottom: 1440,
+                },
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                &[],
+            )
+            .expect("primary monitor plan should exist");
+
+        assert_eq!(plan.lut_index, 1);
+
+        let _ = fs::remove_file(cube_path_a);
+        let _ = fs::remove_file(cube_path_b);
+    }
+
+    #[test]
+    fn hdr_pq_conversion_uses_bt2100_before_pq() {
+        let values = [0.25, 0.5, 1.0];
+        let pq = scrgb_to_pq(values);
+        let expected_pq = [0.39038754, 0.41710275, 0.4801437];
+        for (actual, expected) in pq.into_iter().zip(expected_pq) {
+            assert!((actual - expected).abs() < 0.000001);
+        }
+
+        let round_trip = pq_to_scrgb(pq);
+
+        for (actual, expected) in round_trip.into_iter().zip(values) {
+            assert!((actual - expected).abs() < 0.001);
+        }
     }
 
     #[test]
@@ -609,6 +769,8 @@ mod tests {
                 monitor_id: "DISPLAY1".into(),
                 desktop_left: 0,
                 desktop_top: 0,
+                desktop_right: None,
+                desktop_bottom: None,
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path.clone(),
@@ -652,6 +814,8 @@ DOMAIN_MAX 1.0 1.0 1.0\n\
                 monitor_id: "DISPLAY1".into(),
                 desktop_left: 0,
                 desktop_top: 0,
+                desktop_right: None,
+                desktop_bottom: None,
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path.clone(),
@@ -679,6 +843,10 @@ DOMAIN_MAX 1.0 1.0 1.0\n\
         assert!(runtime.shader.source.contains("NormalizeSample"));
         assert!(runtime.shader.source.contains("BlueNoiseThreshold"));
         assert!(runtime.shader.source.contains("ApplySdrDither"));
+        assert!(runtime.shader.source.contains("ScrgbToPq"));
+        assert!(runtime.shader.source.contains("PqToScrgb"));
+        assert!(runtime.shader.source.contains("scrgb_to_bt2100"));
+        assert!(runtime.shader.source.contains("bt2100_to_scrgb"));
         assert!(runtime.shader.source.contains("blue_noise_64x64"));
         assert!(runtime.shader.source.contains("max_value - min_value"));
         assert!(!runtime.shader.source.contains("safe_range"));

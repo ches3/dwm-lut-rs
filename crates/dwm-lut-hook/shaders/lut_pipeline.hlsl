@@ -66,6 +66,56 @@ float3 ApplySdrDither(float3 rgb, float2 position) {
     );
 }
 
+float LinearToPq(float linear) {
+    const float m1 = 2610.0 / 16384.0;
+    const float m2 = 2523.0 / 32.0;
+    const float c1 = 3424.0 / 4096.0;
+    const float c2 = 2413.0 / 128.0;
+    const float c3 = 2392.0 / 128.0;
+    float powered = pow(saturate(linear), m1);
+    return pow((c1 + c2 * powered) / (1.0 + c3 * powered), m2);
+}
+
+float PqToLinear(float pq) {
+    const float m1 = 2610.0 / 16384.0;
+    const float m2 = 2523.0 / 32.0;
+    const float c1 = 3424.0 / 4096.0;
+    const float c2 = 2413.0 / 128.0;
+    const float c3 = 2392.0 / 128.0;
+    float powered = pow(saturate(pq), 1.0 / m2);
+    float numerator = max(powered - c1, 0.0);
+    float denominator = c2 - c3 * powered;
+    return denominator <= 0.0 ? 1.0 : pow(numerator / denominator, 1.0 / m1);
+}
+
+float3 ScrgbToPq(float3 rgb) {
+    const float3x3 scrgb_to_bt2100 = {
+        2939026994.0 / 585553224375.0, 9255011753.0 / 3513319346250.0, 173911579.0 / 501902763750.0,
+        76515593.0 / 138420033750.0, 6109575001.0 / 830520202500.0, 75493061.0 / 830520202500.0,
+        12225392.0 / 93230009375.0, 1772384008.0 / 2517210253125.0, 18035212433.0 / 2517210253125.0
+    };
+    float3 bt2100 = mul(scrgb_to_bt2100, rgb);
+    return float3(
+        LinearToPq(bt2100.x),
+        LinearToPq(bt2100.y),
+        LinearToPq(bt2100.z)
+    );
+}
+
+float3 PqToScrgb(float3 rgb) {
+    const float3x3 bt2100_to_scrgb = {
+        348196442125.0 / 1677558947.0, -123225331250.0 / 1677558947.0, -15276242500.0 / 1677558947.0,
+        -579752563250.0 / 37238079773.0, 5273377093000.0 / 37238079773.0, -38864558125.0 / 37238079773.0,
+        -12183628000.0 / 5369968309.0, -472592308000.0 / 37589778163.0, 5256599974375.0 / 37589778163.0
+    };
+    float3 bt2100 = float3(
+        PqToLinear(rgb.x),
+        PqToLinear(rgb.y),
+        PqToLinear(rgb.z)
+    );
+    return mul(bt2100_to_scrgb, bt2100);
+}
+
 float3 Tetrahedral(float3 rgb) {
     float3 lut_index = NormalizeSample(rgb) * (lut_size - 1);
     float3 base = floor(lut_index);
@@ -92,6 +142,11 @@ float3 Tetrahedral(float3 rgb) {
 
 float4 PS(VsOutput input) : SV_TARGET {
     float3 sample = back_buffer.Sample(point_sampler, input.texcoord).rgb;
-    float3 lut_rgb = Tetrahedral(sample);
+    float3 lut_input = hdr != 0 ? ScrgbToPq(sample) : sample;
+    float3 lut_rgb = Tetrahedral(lut_input);
+    if (hdr != 0) {
+        return float4(PqToScrgb(lut_rgb), 1.0);
+    }
+
     return float4(ApplySdrDither(lut_rgb, input.position.xy), 1.0);
 }
