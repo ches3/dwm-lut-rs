@@ -29,6 +29,11 @@ pub(crate) enum HookInitializeStatus {
     OverlayTestModeAmbiguous = 22,
     CompSwapChainIndependentFlipSignatureNotFound = 23,
     CompSwapChainIndependentFlipSignatureAmbiguous = 24,
+    MinHookLoadFailed = 25,
+    MinHookGetProcAddressFailed = 26,
+    MinHookInitializeFailed = 27,
+    MinHookCreateHookFailed = 28,
+    MinHookEnableHookFailed = 29,
 }
 
 impl HookInitializeStatus {
@@ -59,6 +64,11 @@ impl HookInitializeStatus {
             22 => Some(Self::OverlayTestModeAmbiguous),
             23 => Some(Self::CompSwapChainIndependentFlipSignatureNotFound),
             24 => Some(Self::CompSwapChainIndependentFlipSignatureAmbiguous),
+            25 => Some(Self::MinHookLoadFailed),
+            26 => Some(Self::MinHookGetProcAddressFailed),
+            27 => Some(Self::MinHookInitializeFailed),
+            28 => Some(Self::MinHookCreateHookFailed),
+            29 => Some(Self::MinHookEnableHookFailed),
             _ => None,
         }
     }
@@ -137,6 +147,11 @@ impl fmt::Display for HookInitializeStatus {
                 f,
                 "CCompSwapChain::IsCandidateIndependentFlipCompatible signature matched multiple locations"
             ),
+            Self::MinHookLoadFailed => write!(f, "MinHook DLL could not be loaded"),
+            Self::MinHookGetProcAddressFailed => write!(f, "MinHook exports could not be resolved"),
+            Self::MinHookInitializeFailed => write!(f, "MH_Initialize failed"),
+            Self::MinHookCreateHookFailed => write!(f, "MH_CreateHook failed"),
+            Self::MinHookEnableHookFailed => write!(f, "MH_EnableHook failed"),
         }
     }
 }

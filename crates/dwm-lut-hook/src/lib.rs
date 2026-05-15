@@ -17,10 +17,7 @@ pub use lut_pipeline::{
     LutRenderPlan, LutShaderProgram, ShaderConstants, ShaderConstantsCBuffer, ShaderTexture3D,
     apply_sdr_dither, cube_to_texture, pq_to_scrgb, scrgb_to_pq, tetrahedral_interpolation,
 };
-pub use minhook::{
-    MhCreateHookApi, MhDisableHookApi, MhEnableHookApi, MhInitializeApi, MhRemoveHookApi, MhStatus,
-    MinHookBindings, MinHookRuntime, MinHookState,
-};
+pub use minhook::{MinHookError, MinHookRuntime, MinHookState, RegisteredHook};
 pub use profile::{
     AobToken, BuildProfile, ClipBoxOwner, ClipBoxPathHypothesis, HookProfile, HookSignature,
     HookTarget, ProfileHypotheses, SignatureLocator, SwapChainPathHypothesis,
@@ -205,10 +202,9 @@ mod tests {
 
     use super::{
         BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookConfig, HookProfile,
-        HookRegistrationState, HookTarget, InitializationStage, LutBypassState, ManifestLoadState,
-        PRESENT_FLAG_HAS_PLAN, PRESENT_FLAG_OVERLAY_TEST_MODE_FORCED,
-        PRESENT_FLAG_PROMOTION_BLOCKED, SignatureLocator, SignatureResolutionReport, build_profile,
-        dwm_lut_comp_swap_chain_direct_flip_compatible,
+        HookTarget, InitializationStage, LutBypassState, ManifestLoadState, PRESENT_FLAG_HAS_PLAN,
+        PRESENT_FLAG_OVERLAY_TEST_MODE_FORCED, PRESENT_FLAG_PROMOTION_BLOCKED, SignatureLocator,
+        SignatureResolutionReport, build_profile, dwm_lut_comp_swap_chain_direct_flip_compatible,
         dwm_lut_comp_swap_chain_independent_flip_compatible,
         dwm_lut_comp_visual_candidate_for_promotion, dwm_lut_direct_flip_compatible,
         dwm_lut_initialize, dwm_lut_overlay_test_mode, dwm_lut_overlays_enabled,
@@ -317,13 +313,12 @@ mod tests {
             state.runtime.initialization_trace,
             vec![
                 InitializationStage::LoggerReady,
-                InitializationStage::MinHookBoundaryReady,
                 InitializationStage::ManifestLoaded,
                 InitializationStage::LutPipelinePrepared,
                 InitializationStage::ProfileSelected,
                 InitializationStage::TargetModuleResolved,
                 InitializationStage::SignaturesResolved,
-                InitializationStage::HookRegistrationDeferred,
+                InitializationStage::HookRegistrationEnabled,
                 InitializationStage::LutBypassStatePrepared,
                 InitializationStage::GlobalStateCommitted,
             ]
@@ -343,19 +338,29 @@ mod tests {
             }
         }
 
-        match &state.runtime.hook_registration {
-            HookRegistrationState::Deferred(plan) => {
-                assert_eq!(plan.module_name, "dwmcore.dll");
-                assert_eq!(plan.targets.len(), 7);
-                assert_eq!(plan.targets[0].target, HookTarget::Present);
-                assert!(
-                    plan.targets
-                        .iter()
-                        .all(|target| target.target != HookTarget::OverlayTestMode)
-                );
-                assert!(plan.targets.iter().all(|target| target.address != 0));
-            }
-        }
+        let hook_registration = &state.runtime.hook_registration;
+        assert_eq!(hook_registration.plan.module_name, "dwmcore.dll");
+        assert_eq!(hook_registration.plan.targets.len(), 7);
+        assert_eq!(
+            hook_registration.plan.targets[0].target,
+            HookTarget::Present
+        );
+        assert_eq!(hook_registration.hooks.len(), 7);
+        assert_eq!(hook_registration.hooks[0].target, HookTarget::Present);
+        assert!(
+            hook_registration
+                .plan
+                .targets
+                .iter()
+                .all(|target| target.target != HookTarget::OverlayTestMode)
+        );
+        assert!(
+            hook_registration
+                .plan
+                .targets
+                .iter()
+                .all(|target| target.address != 0)
+        );
 
         match &state.runtime.lut_pipeline {
             LutPipelineState::Ready(runtime) => assert_eq!(runtime.summary().lut_count, 1),
@@ -408,8 +413,13 @@ mod tests {
         };
         let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
 
-        initialize_with_resolution(config, resolution.clone())
+        initialize_with_resolution(config.clone(), resolution.clone())
             .expect("initialization should succeed with synthetic resolution");
+        let second_initialize = initialize_with_resolution(config, resolution.clone());
+        assert!(matches!(
+            second_initialize,
+            Err(super::HookError::AlreadyInitialized)
+        ));
 
         assert!(is_initialized());
         assert_eq!(manifest_path(), Some(expected_manifest_path.clone()));
@@ -417,13 +427,12 @@ mod tests {
             initialization_trace(),
             Some(vec![
                 InitializationStage::LoggerReady,
-                InitializationStage::MinHookBoundaryReady,
                 InitializationStage::ManifestLoaded,
                 InitializationStage::LutPipelinePrepared,
                 InitializationStage::ProfileSelected,
                 InitializationStage::TargetModuleResolved,
                 InitializationStage::SignaturesResolved,
-                InitializationStage::HookRegistrationDeferred,
+                InitializationStage::HookRegistrationEnabled,
                 InitializationStage::LutBypassStatePrepared,
                 InitializationStage::GlobalStateCommitted,
             ])
@@ -452,6 +461,26 @@ mod tests {
             .collect();
         let already_initialized_status = unsafe { dwm_lut_initialize(wide_path.as_ptr()) };
         assert_eq!(already_initialized_status, 3);
+        let _ = fs::remove_file(expected_manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn initialize_with_resolution_rejects_in_progress_initialization() {
+        reset_state_for_tests();
+        let _initialization = super::bootstrap::hold_initialization_for_tests()
+            .expect("test should acquire initialization guard");
+        let (expected_manifest_path, cube_path) = synthetic_manifest_paths();
+        let config = HookConfig {
+            manifest_path: expected_manifest_path.clone(),
+            profile: BuildProfile::Windows11_25H2,
+        };
+        let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
+
+        let result = initialize_with_resolution(config, resolution);
+
+        assert!(matches!(result, Err(super::HookError::AlreadyInitialized)));
+        assert!(!is_initialized());
         let _ = fs::remove_file(expected_manifest_path);
         let _ = fs::remove_file(cube_path);
     }

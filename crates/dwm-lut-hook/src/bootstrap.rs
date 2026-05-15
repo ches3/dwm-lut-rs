@@ -1,13 +1,17 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::fmt;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dwm_lut_config::{ConfigError, LutManifest, load_manifest};
 
 use crate::LutBypassRuntime;
 use crate::lut_pipeline::{LutPipeline, LutPipelineError};
-use crate::minhook::MinHookRuntime;
+use crate::minhook::{MinHookError, register_plan, unregister_registered_hooks};
 use crate::profile::{BuildProfile, HookProfile};
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
@@ -16,12 +20,85 @@ use crate::state::{
     SignatureResolutionState, install_state, is_initialized,
 };
 
+#[cfg(not(test))]
+static INITIALIZATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+thread_local! {
+    static INITIALIZATION_IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
+}
+
+struct InitializationGuard;
+
+impl Drop for InitializationGuard {
+    fn drop(&mut self) {
+        clear_initialization_in_progress();
+    }
+}
+
+fn enter_initialization() -> Result<InitializationGuard, HookError> {
+    if is_initialized() {
+        return Err(HookError::AlreadyInitialized);
+    }
+
+    if !mark_initialization_in_progress() {
+        return Err(HookError::AlreadyInitialized);
+    }
+
+    if is_initialized() {
+        clear_initialization_in_progress();
+        return Err(HookError::AlreadyInitialized);
+    }
+
+    Ok(InitializationGuard)
+}
+
+#[cfg(test)]
+pub(crate) fn hold_initialization_for_tests() -> Result<impl Drop, HookError> {
+    enter_initialization()
+}
+
+#[cfg(not(test))]
+fn mark_initialization_in_progress() -> bool {
+    INITIALIZATION_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+#[cfg(test)]
+fn mark_initialization_in_progress() -> bool {
+    INITIALIZATION_IN_PROGRESS.with(|slot| {
+        if slot.get() {
+            false
+        } else {
+            slot.set(true);
+            true
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn clear_initialization_in_progress() {
+    INITIALIZATION_IN_PROGRESS.store(false, Ordering::Release);
+}
+
+#[cfg(test)]
+fn clear_initialization_in_progress() {
+    INITIALIZATION_IN_PROGRESS.with(|slot| slot.set(false));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_initialization_guard_for_tests() {
+    clear_initialization_in_progress();
+}
+
 #[derive(Debug)]
 pub enum HookError {
     AlreadyInitialized,
     InvalidPath,
     Manifest(ConfigError),
     LutPipeline(LutPipelineError),
+    MinHook(MinHookError),
     Resolve(HookResolveError),
 }
 
@@ -32,6 +109,7 @@ impl fmt::Display for HookError {
             Self::InvalidPath => write!(f, "manifest path must not be empty"),
             Self::Manifest(error) => write!(f, "{error}"),
             Self::LutPipeline(error) => write!(f, "{error}"),
+            Self::MinHook(error) => write!(f, "{error}"),
             Self::Resolve(error) => write!(f, "{error}"),
         }
     }
@@ -54,6 +132,12 @@ impl From<ConfigError> for HookError {
 impl From<LutPipelineError> for HookError {
     fn from(value: LutPipelineError) -> Self {
         Self::LutPipeline(value)
+    }
+}
+
+impl From<MinHookError> for HookError {
+    fn from(value: MinHookError) -> Self {
+        Self::MinHook(value)
     }
 }
 
@@ -84,6 +168,11 @@ enum InitializeStatus {
     OverlayTestModeAmbiguous = 22,
     CompSwapChainIndependentFlipSignatureNotFound = 23,
     CompSwapChainIndependentFlipSignatureAmbiguous = 24,
+    MinHookLoadFailed = 25,
+    MinHookGetProcAddressFailed = 26,
+    MinHookInitializeFailed = 27,
+    MinHookCreateHookFailed = 28,
+    MinHookEnableHookFailed = 29,
 }
 
 pub fn build_profile() -> BuildProfile {
@@ -95,8 +184,9 @@ pub(crate) fn initialize_with_resolution(
     config: HookConfig,
     resolution: SignatureResolutionReport,
 ) -> Result<(), HookError> {
+    let _guard = enter_initialization()?;
     let state = prepare_initial_state_with_resolution(config, resolution)?;
-    install_state(state).map_err(|_| HookError::AlreadyInitialized)
+    install_prepared_state(state)
 }
 
 pub(crate) fn ffi_initialize(manifest_path: *const u16) -> u32 {
@@ -117,16 +207,27 @@ pub(crate) fn ffi_initialize(manifest_path: *const u16) -> u32 {
 }
 
 fn initialize_from_manifest_path(config: HookConfig) -> Result<(), HookError> {
-    if is_initialized() {
-        return Err(HookError::AlreadyInitialized);
-    }
-
+    let _guard = enter_initialization()?;
     if config.manifest_path.as_os_str().is_empty() {
         return Err(HookError::InvalidPath);
     }
 
     let state = prepare_initial_state_from_manifest_path(config)?;
-    install_state(state).map_err(|_| HookError::AlreadyInitialized)
+    install_prepared_state(state)
+}
+
+fn install_prepared_state(state: HookState) -> Result<(), HookError> {
+    install_state(state).map_err(|state| {
+        rollback_registered_state_hooks(&state);
+        HookError::AlreadyInitialized
+    })
+}
+
+fn rollback_registered_state_hooks(state: &HookState) {
+    unregister_registered_hooks(
+        &state.runtime.minhook,
+        &state.runtime.hook_registration.hooks,
+    );
 }
 
 fn prepare_initial_state_from_manifest_path(config: HookConfig) -> Result<HookState, HookError> {
@@ -148,13 +249,7 @@ where
     let lut_pipeline = LutPipeline::load(&manifest)?;
     let profile = HookProfile::for_build(config.profile);
     let resolution = resolver(&profile)?;
-    Ok(finalize_initial_state(
-        config,
-        manifest,
-        profile,
-        resolution,
-        lut_pipeline,
-    ))
+    finalize_initial_state(config, manifest, profile, resolution, lut_pipeline)
 }
 
 #[cfg(test)]
@@ -171,9 +266,10 @@ fn finalize_initial_state(
     profile: HookProfile,
     resolution: SignatureResolutionReport,
     lut_pipeline: LutPipeline,
-) -> HookState {
+) -> Result<HookState, HookError> {
     let assignment_count = manifest.assignments.len();
     let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
+    let (minhook, registered_hooks) = register_plan(&registration_plan)?;
     let overlay_test_mode_address = resolution
         .targets
         .iter()
@@ -185,18 +281,17 @@ fn finalize_initial_state(
     );
     let initialization_trace = vec![
         InitializationStage::LoggerReady,
-        InitializationStage::MinHookBoundaryReady,
         InitializationStage::ManifestLoaded,
         InitializationStage::LutPipelinePrepared,
         InitializationStage::ProfileSelected,
         InitializationStage::TargetModuleResolved,
         InitializationStage::SignaturesResolved,
-        InitializationStage::HookRegistrationDeferred,
+        InitializationStage::HookRegistrationEnabled,
         InitializationStage::LutBypassStatePrepared,
         InitializationStage::GlobalStateCommitted,
     ];
 
-    HookState {
+    Ok(HookState {
         manifest,
         config: config.clone(),
         profile,
@@ -206,14 +301,17 @@ fn finalize_initial_state(
                 manifest_path: config.manifest_path,
                 assignment_count,
             },
-            minhook: MinHookRuntime::boundary_defined(),
+            minhook,
             resolution: SignatureResolutionState::Resolved(resolution),
             lut_pipeline: LutPipelineState::Ready(lut_pipeline),
-            hook_registration: HookRegistrationState::Deferred(registration_plan),
+            hook_registration: HookRegistrationState {
+                plan: registration_plan,
+                hooks: registered_hooks,
+            },
             lut_bypass: LutBypassState::Ready(lut_bypass),
             initialization_trace,
         },
-    }
+    })
 }
 
 fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
@@ -281,6 +379,21 @@ fn map_hook_error(error: HookError) -> InitializeStatus {
             InitializeStatus::ManifestHasNoAssignments
         }
         HookError::LutPipeline(_) => InitializeStatus::LutPipelinePrepareFailed,
+        HookError::MinHook(error) => match error.operation {
+            crate::minhook::MinHookOperation::LoadLibrary => InitializeStatus::MinHookLoadFailed,
+            crate::minhook::MinHookOperation::GetProcAddress => {
+                InitializeStatus::MinHookGetProcAddressFailed
+            }
+            crate::minhook::MinHookOperation::Initialize => {
+                InitializeStatus::MinHookInitializeFailed
+            }
+            crate::minhook::MinHookOperation::CreateHook(_) => {
+                InitializeStatus::MinHookCreateHookFailed
+            }
+            crate::minhook::MinHookOperation::EnableHook => {
+                InitializeStatus::MinHookEnableHookFailed
+            }
+        },
     }
 }
 

@@ -8,7 +8,7 @@ use dwm_lut_config::LutManifest;
 
 use crate::lut_bypass::{LutBypassRuntime, PresentHookOutcome};
 use crate::lut_pipeline::{LutPipeline, LutPipelineSummary};
-use crate::minhook::MinHookRuntime;
+use crate::minhook::{MinHookRuntime, RegisteredHook};
 use crate::profile::{BuildProfile, HookProfile, HookTarget};
 use crate::resolver::SignatureResolutionReport;
 use crate::{ClipBox, DirtyRect};
@@ -35,13 +35,12 @@ pub enum ManifestLoadState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitializationStage {
     LoggerReady,
-    MinHookBoundaryReady,
     ProfileSelected,
     TargetModuleResolved,
     SignaturesResolved,
     ManifestLoaded,
     LutPipelinePrepared,
-    HookRegistrationDeferred,
+    HookRegistrationEnabled,
     LutBypassStatePrepared,
     GlobalStateCommitted,
 }
@@ -87,8 +86,9 @@ pub enum SignatureResolutionState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HookRegistrationState {
-    Deferred(HookRegistrationPlan),
+pub struct HookRegistrationState {
+    pub plan: HookRegistrationPlan,
+    pub hooks: Vec<RegisteredHook>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -310,4 +310,6 @@ pub(crate) fn reset_state_for_tests() {
     STATE.with(|slot| {
         *slot.borrow_mut() = None;
     });
+    crate::bootstrap::reset_initialization_guard_for_tests();
+    crate::minhook::reset_test_minhook_behavior(None, None, None, None);
 }
