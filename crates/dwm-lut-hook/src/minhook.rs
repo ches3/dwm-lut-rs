@@ -3,6 +3,7 @@ use std::cell::RefCell;
 #[cfg(not(test))]
 use std::ffi::OsString;
 use std::ffi::c_void;
+use std::mem::{align_of, size_of};
 #[cfg(not(test))]
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 #[cfg(not(test))]
@@ -10,8 +11,9 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::profile::HookTarget;
+use crate::profile::{HookProfile, HookTarget};
 use crate::state::HookRegistrationPlan;
+use crate::{ClipBox, DirtyRect, state};
 
 pub type MhStatus = i32;
 
@@ -708,6 +710,71 @@ static COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL: AtomicPtr<c_void> =
     AtomicPtr::new(ptr::null_mut());
 static COMP_VISUAL_PROMOTION_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
+const MAX_DIRTY_RECTS: usize = 4096;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RectVec {
+    start: *const DirtyRect,
+    end: *const DirtyRect,
+    capacity_end: *const DirtyRect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PresentInputCollection {
+    MissingFormat(PresentInputsWithoutFormat),
+    HardwareProtected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PresentInputsWithoutFormat {
+    clip_box: ClipBox,
+    dirty_rects: Vec<DirtyRect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresentInputError {
+    MissingProfile,
+    NullOverlaySwapChain,
+    NullContextState,
+    InvalidDirtyRectVector,
+    UnreadableMemory,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MemoryBasicInformation {
+    base_address: *mut c_void,
+    allocation_base: *mut c_void,
+    allocation_protect: u32,
+    partition_id: u16,
+    region_size: usize,
+    state: u32,
+    protect: u32,
+    type_: u32,
+}
+
+#[cfg(not(test))]
+unsafe extern "system" {
+    fn VirtualQuery(
+        lpAddress: *const c_void,
+        lpBuffer: *mut MemoryBasicInformation,
+        dwLength: usize,
+    ) -> usize;
+}
+
+const MEM_COMMIT: u32 = 0x1000;
+const PAGE_READONLY: u32 = 0x02;
+const PAGE_READWRITE: u32 = 0x04;
+const PAGE_WRITECOPY: u32 = 0x08;
+#[cfg(test)]
+const PAGE_EXECUTE: u32 = 0x10;
+const PAGE_EXECUTE_READ: u32 = 0x20;
+const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
+const PAGE_GUARD: u32 = 0x100;
+const PAGE_PROTECTION_MASK: u32 = 0xff;
+
 fn original_pointer_for_target(target: HookTarget) -> &'static AtomicPtr<c_void> {
     match target {
         HookTarget::Present => &PRESENT_ORIGINAL,
@@ -788,7 +855,243 @@ unsafe fn forward_bool1(slot: &AtomicPtr<c_void>, this: usize) -> u8 {
     unsafe { original(this) }
 }
 
+unsafe fn collect_present_inputs(
+    this: usize,
+    overlay_swap_chain: usize,
+    rect_vec: usize,
+) -> Result<PresentInputCollection, PresentInputError> {
+    let profile = state::hook_profile().ok_or(PresentInputError::MissingProfile)?;
+    unsafe { collect_present_inputs_with_profile(&profile, this, overlay_swap_chain, rect_vec) }
+}
+
+unsafe fn collect_present_inputs_with_profile(
+    profile: &HookProfile,
+    this: usize,
+    overlay_swap_chain: usize,
+    rect_vec: usize,
+) -> Result<PresentInputCollection, PresentInputError> {
+    let hypotheses = profile.hypotheses;
+
+    if overlay_swap_chain == 0 {
+        return Err(PresentInputError::NullOverlaySwapChain);
+    }
+
+    let hardware_protected = unsafe {
+        read_memory::<u8>(checked_address(
+            overlay_swap_chain,
+            hypotheses.hardware_protected.offset,
+        )?)? != 0
+    };
+    if hardware_protected {
+        return Ok(PresentInputCollection::HardwareProtected);
+    }
+    let clip_box = unsafe {
+        read_clip_box(
+            this,
+            hypotheses.clip_box.context_state_pointer_offset,
+            hypotheses.clip_box.offset,
+        )?
+    };
+    let dirty_rects = unsafe { read_dirty_rects(rect_vec)? };
+    Ok(PresentInputCollection::MissingFormat(
+        PresentInputsWithoutFormat {
+            clip_box,
+            dirty_rects,
+        },
+    ))
+}
+
+unsafe fn read_clip_box(
+    context_address: usize,
+    context_state_pointer_offset: usize,
+    clip_box_offset: usize,
+) -> Result<ClipBox, PresentInputError> {
+    let state_pointer_address = checked_address(context_address, context_state_pointer_offset)?;
+    let state_object = unsafe { read_memory::<usize>(state_pointer_address)? };
+    if state_object == 0 {
+        return Err(PresentInputError::NullContextState);
+    }
+
+    let origin =
+        unsafe { read_memory::<[i32; 2]>(checked_address(state_object, clip_box_offset)?)? };
+    Ok(ClipBox {
+        left: origin[0],
+        top: origin[1],
+        right: origin[0],
+        bottom: origin[1],
+    })
+}
+
+unsafe fn read_dirty_rects(rect_vec: usize) -> Result<Vec<DirtyRect>, PresentInputError> {
+    if rect_vec == 0 {
+        return Err(PresentInputError::InvalidDirtyRectVector);
+    }
+
+    let rect_vec = unsafe { read_memory::<RectVec>(rect_vec)? };
+    let start = rect_vec.start as usize;
+    let end = rect_vec.end as usize;
+    let capacity_end = rect_vec.capacity_end as usize;
+    if start == 0 && end == 0 && capacity_end == 0 {
+        return Ok(Vec::new());
+    }
+    if start == 0
+        || end < start
+        || capacity_end < end
+        || !start.is_multiple_of(align_of::<DirtyRect>())
+    {
+        return Err(PresentInputError::InvalidDirtyRectVector);
+    }
+
+    let byte_len = end - start;
+    if !byte_len.is_multiple_of(size_of::<DirtyRect>()) {
+        return Err(PresentInputError::InvalidDirtyRectVector);
+    }
+    if !(capacity_end - start).is_multiple_of(size_of::<DirtyRect>()) {
+        return Err(PresentInputError::InvalidDirtyRectVector);
+    }
+
+    let count = byte_len / size_of::<DirtyRect>();
+    if count > MAX_DIRTY_RECTS {
+        return Err(PresentInputError::InvalidDirtyRectVector);
+    }
+    if count > 0 && !is_readable_range(start, byte_len) {
+        return Err(PresentInputError::UnreadableMemory);
+    }
+
+    let mut dirty_rects = Vec::with_capacity(count);
+    for index in 0..count {
+        let offset = index * size_of::<DirtyRect>();
+        dirty_rects.push(unsafe { read_memory::<DirtyRect>(checked_address(start, offset)?)? });
+    }
+
+    Ok(dirty_rects)
+}
+
+fn checked_address(base: usize, offset: usize) -> Result<usize, PresentInputError> {
+    base.checked_add(offset)
+        .ok_or(PresentInputError::UnreadableMemory)
+}
+
+unsafe fn read_memory<T: Copy>(address: usize) -> Result<T, PresentInputError> {
+    if !is_readable_range(address, size_of::<T>()) {
+        return Err(PresentInputError::UnreadableMemory);
+    }
+
+    Ok(unsafe { (address as *const T).read_unaligned() })
+}
+
+fn is_readable_range(address: usize, size: usize) -> bool {
+    if address == 0 || size == 0 {
+        return false;
+    }
+    let Some(end) = address.checked_add(size - 1) else {
+        return false;
+    };
+
+    #[cfg(test)]
+    {
+        let _ = end;
+        true
+    }
+
+    #[cfg(not(test))]
+    {
+        is_readable_range_in_process(address, end)
+    }
+}
+
+#[cfg(not(test))]
+fn is_readable_range_in_process(mut address: usize, end: usize) -> bool {
+    while address <= end {
+        let Some(info) = query_memory(address) else {
+            return false;
+        };
+        if !is_readable_memory_region(&info) {
+            return false;
+        }
+
+        let region_start = info.base_address as usize;
+        let Some(region_end) = region_start.checked_add(info.region_size.saturating_sub(1)) else {
+            return false;
+        };
+        if region_end >= end {
+            return true;
+        }
+        address = match region_end.checked_add(1) {
+            Some(next) if next > address => next,
+            _ => return false,
+        };
+    }
+
+    true
+}
+
+#[cfg(not(test))]
+fn query_memory(address: usize) -> Option<MemoryBasicInformation> {
+    let mut info = MemoryBasicInformation {
+        base_address: ptr::null_mut(),
+        allocation_base: ptr::null_mut(),
+        allocation_protect: 0,
+        partition_id: 0,
+        region_size: 0,
+        state: 0,
+        protect: 0,
+        type_: 0,
+    };
+    let written = unsafe {
+        VirtualQuery(
+            address as *const c_void,
+            &mut info,
+            size_of::<MemoryBasicInformation>(),
+        )
+    };
+    (written != 0).then_some(info)
+}
+
+fn is_readable_memory_region(info: &MemoryBasicInformation) -> bool {
+    if info.state != MEM_COMMIT || (info.protect & PAGE_GUARD) != 0 {
+        return false;
+    }
+
+    matches!(
+        info.protect & PAGE_PROTECTION_MASK,
+        PAGE_READONLY
+            | PAGE_READWRITE
+            | PAGE_WRITECOPY
+            | PAGE_EXECUTE_READ
+            | PAGE_EXECUTE_READWRITE
+            | PAGE_EXECUTE_WRITECOPY
+    )
+}
+
+fn deactivate_present_context(context_address: usize) {
+    let _ = state::evaluate_present_hook(
+        context_address,
+        ClipBox {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        0,
+        &[],
+        false,
+    );
+}
+
 unsafe extern "system" fn present_detour(
+    this: usize,
+    overlay_swap_chain: usize,
+    a3: u32,
+    rect_vec: usize,
+    a5: i32,
+    a6: usize,
+    a7: u8,
+) -> i64 {
+    unsafe { present_detour_impl(this, overlay_swap_chain, a3, rect_vec, a5, a6, a7) }
+}
+
+unsafe extern "system" fn present_detour_impl(
     this: usize,
     overlay_swap_chain: usize,
     a3: u32,
@@ -800,6 +1103,13 @@ unsafe extern "system" fn present_detour(
     let original = PRESENT_ORIGINAL.load(Ordering::Acquire);
     if original.is_null() {
         return 0;
+    }
+
+    match unsafe { collect_present_inputs(this, overlay_swap_chain, rect_vec) } {
+        Ok(
+            PresentInputCollection::HardwareProtected | PresentInputCollection::MissingFormat(_),
+        ) => deactivate_present_context(this),
+        Err(_) => deactivate_present_context(this),
     }
 
     let original: PresentOriginal = unsafe { std::mem::transmute(original) };
@@ -847,6 +1157,7 @@ unsafe extern "system" fn comp_visual_promotion_detour(this: usize, a2: usize, a
 mod tests {
     use std::ffi::c_void;
     use std::fs;
+    use std::mem::size_of;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::sync::atomic::Ordering;
@@ -1042,6 +1353,74 @@ mod tests {
             true,
         )
         .expect("present evaluation should run");
+    }
+
+    struct FakePresentObjects {
+        context: Box<usize>,
+        _context_state: Vec<usize>,
+        overlay_swap_chain: Vec<usize>,
+        dirty_rects: Vec<DirtyRect>,
+        rect_vec: super::RectVec,
+    }
+
+    impl FakePresentObjects {
+        fn new(clip_box: ClipBox, dirty_rects: Vec<DirtyRect>, hardware_protected: bool) -> Self {
+            let profile = HookProfile::for_build(BuildProfile::Windows11_25H2);
+            let context_state_len = (profile.hypotheses.clip_box.offset + size_of::<ClipBox>())
+                .div_ceil(size_of::<usize>());
+            let mut context_state = vec![0usize; context_state_len];
+            unsafe {
+                ((context_state.as_mut_ptr() as *mut u8).add(profile.hypotheses.clip_box.offset)
+                    as *mut ClipBox)
+                    .write(clip_box);
+            }
+
+            let context = Box::new(context_state.as_ptr() as usize);
+
+            let overlay_swap_chain_len =
+                (profile.hypotheses.hardware_protected.offset + 1).div_ceil(size_of::<usize>());
+            let mut overlay_swap_chain = vec![0usize; overlay_swap_chain_len];
+            unsafe {
+                (overlay_swap_chain.as_mut_ptr() as *mut u8)
+                    .add(profile.hypotheses.hardware_protected.offset)
+                    .write(u8::from(hardware_protected));
+            }
+
+            let rect_vec = if dirty_rects.is_empty() {
+                super::RectVec {
+                    start: std::ptr::null(),
+                    end: std::ptr::null(),
+                    capacity_end: std::ptr::null(),
+                }
+            } else {
+                let start = dirty_rects.as_ptr();
+                super::RectVec {
+                    start,
+                    end: unsafe { start.add(dirty_rects.len()) },
+                    capacity_end: unsafe { start.add(dirty_rects.capacity()) },
+                }
+            };
+
+            Self {
+                context,
+                _context_state: context_state,
+                overlay_swap_chain,
+                dirty_rects,
+                rect_vec,
+            }
+        }
+
+        fn context_address(&self) -> usize {
+            (&*self.context as *const usize) as usize
+        }
+
+        fn overlay_swap_chain_address(&self) -> usize {
+            self.overlay_swap_chain.as_ptr() as usize
+        }
+
+        fn rect_vec_address(&self) -> usize {
+            (&self.rect_vec as *const super::RectVec) as usize
+        }
     }
 
     #[test]
@@ -1348,7 +1727,248 @@ mod tests {
     }
 
     #[test]
-    fn present_detour_forwards_without_changing_context_state() {
+    fn present_input_collection_reads_confirmed_inputs_without_swap_chain_accessor() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        let (manifest_path, cube_path) = initialize_test_state();
+        let fake = FakePresentObjects::new(
+            ClipBox {
+                left: 120,
+                top: 80,
+                right: 1920,
+                bottom: 1080,
+            },
+            vec![DirtyRect {
+                left: 10,
+                top: 20,
+                right: 30,
+                bottom: 40,
+            }],
+            false,
+        );
+
+        let inputs = unsafe {
+            super::collect_present_inputs_with_profile(
+                &HookProfile::for_build(BuildProfile::Windows11_25H2),
+                fake.context_address(),
+                fake.overlay_swap_chain_address(),
+                fake.rect_vec_address(),
+            )
+        }
+        .expect("present inputs should be collected");
+        let super::PresentInputCollection::MissingFormat(inputs) = inputs else {
+            panic!("present inputs should be collected without format");
+        };
+
+        assert_eq!(inputs.clip_box.left, 120);
+        assert_eq!(inputs.clip_box.top, 80);
+        assert_eq!(inputs.dirty_rects, fake.dirty_rects);
+
+        let _ = fs::remove_file(manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn present_input_collection_skips_swap_chain_when_hardware_protected() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        let (manifest_path, cube_path) = initialize_test_state();
+        let fake = FakePresentObjects::new(
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            Vec::new(),
+            true,
+        );
+
+        let inputs = unsafe {
+            super::collect_present_inputs_with_profile(
+                &HookProfile::for_build(BuildProfile::Windows11_25H2),
+                fake.context_address(),
+                fake.overlay_swap_chain_address(),
+                fake.rect_vec_address(),
+            )
+        }
+        .expect("hardware protected state should be collected");
+
+        assert!(matches!(
+            inputs,
+            super::PresentInputCollection::HardwareProtected
+        ));
+
+        let _ = fs::remove_file(manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn present_input_collection_rejects_dirty_rect_vector_past_capacity() {
+        let rects = [DirtyRect {
+            left: 0,
+            top: 0,
+            right: 1,
+            bottom: 1,
+        }];
+        let rect_vec = super::RectVec {
+            start: rects.as_ptr(),
+            end: unsafe { rects.as_ptr().add(1) },
+            capacity_end: rects.as_ptr(),
+        };
+
+        let error =
+            unsafe { super::read_dirty_rects((&rect_vec as *const super::RectVec) as usize) }
+                .expect_err("end past capacity should be rejected");
+
+        assert_eq!(error, super::PresentInputError::InvalidDirtyRectVector);
+    }
+
+    #[test]
+    fn present_input_collection_rejects_misaligned_dirty_rect_vector() {
+        let start = std::ptr::dangling::<DirtyRect>() as usize + 1;
+        let rect_vec = super::RectVec {
+            start: start as *const DirtyRect,
+            end: (start + size_of::<DirtyRect>()) as *const DirtyRect,
+            capacity_end: (start + size_of::<DirtyRect>()) as *const DirtyRect,
+        };
+
+        let error =
+            unsafe { super::read_dirty_rects((&rect_vec as *const super::RectVec) as usize) }
+                .expect_err("misaligned start should be rejected");
+
+        assert_eq!(error, super::PresentInputError::InvalidDirtyRectVector);
+    }
+
+    #[test]
+    fn pointer_addition_overflow_is_not_treated_as_readable_memory() {
+        let error = super::checked_address(usize::MAX, 1)
+            .expect_err("overflowed address should be rejected");
+
+        assert_eq!(error, super::PresentInputError::UnreadableMemory);
+    }
+
+    #[test]
+    fn null_dirty_rect_vector_is_invalid_present_input() {
+        let error = unsafe { super::read_dirty_rects(0) }
+            .expect_err("null rectVec pointer should be rejected");
+
+        assert_eq!(error, super::PresentInputError::InvalidDirtyRectVector);
+    }
+
+    #[test]
+    fn memory_region_readability_requires_read_protection() {
+        let readable = super::MemoryBasicInformation {
+            base_address: std::ptr::null_mut(),
+            allocation_base: std::ptr::null_mut(),
+            allocation_protect: 0,
+            partition_id: 0,
+            region_size: 4096,
+            state: super::MEM_COMMIT,
+            protect: super::PAGE_READONLY,
+            type_: 0,
+        };
+        let execute_only = super::MemoryBasicInformation {
+            protect: super::PAGE_EXECUTE,
+            ..readable
+        };
+        let guarded = super::MemoryBasicInformation {
+            protect: super::PAGE_READWRITE | super::PAGE_GUARD,
+            ..readable
+        };
+
+        assert!(super::is_readable_memory_region(&readable));
+        assert!(!super::is_readable_memory_region(&execute_only));
+        assert!(!super::is_readable_memory_region(&guarded));
+    }
+
+    #[test]
+    fn present_detour_clears_context_when_format_is_unavailable() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        let (manifest_path, cube_path) = initialize_test_state();
+        let fake = FakePresentObjects::new(
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            vec![DirtyRect {
+                left: 0,
+                top: 0,
+                right: 64,
+                bottom: 64,
+            }],
+            false,
+        );
+        activate_context(fake.context_address());
+        super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+
+        assert_eq!(
+            unsafe {
+                super::present_detour(
+                    fake.context_address(),
+                    fake.overlay_swap_chain_address(),
+                    0,
+                    fake.rect_vec_address(),
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0x55
+        );
+        assert!(
+            state::lut_bypass_runtime()
+                .and_then(|runtime| runtime.context(fake.context_address()).cloned())
+                .is_none()
+        );
+
+        let _ = fs::remove_file(manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn present_detour_clears_context_when_hardware_protected() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        let (manifest_path, cube_path) = initialize_test_state();
+        let fake = FakePresentObjects::new(
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            Vec::new(),
+            true,
+        );
+        activate_context(fake.context_address());
+        super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+
+        assert_eq!(
+            unsafe {
+                super::present_detour(
+                    fake.context_address(),
+                    fake.overlay_swap_chain_address(),
+                    0,
+                    fake.rect_vec_address(),
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0x55
+        );
+        assert!(
+            state::lut_bypass_runtime()
+                .and_then(|runtime| runtime.context(fake.context_address()).cloned())
+                .is_none()
+        );
+
+        let _ = fs::remove_file(manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn present_detour_clears_context_when_input_acquisition_fails() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         let (manifest_path, cube_path) = initialize_test_state();
         activate_context(0x1234);
@@ -1361,7 +1981,7 @@ mod tests {
         assert!(
             state::lut_bypass_runtime()
                 .and_then(|runtime| runtime.context(0x1234).cloned())
-                .is_some()
+                .is_none()
         );
 
         let _ = fs::remove_file(manifest_path);

@@ -88,6 +88,7 @@ pub struct HookSignature {
 pub struct SwapChainPathHypothesis {
     pub accessor_key: &'static str,
     pub vtable_offset: usize,
+    pub verified: bool,
     pub note: &'static str,
 }
 
@@ -100,6 +101,14 @@ pub enum ClipBoxOwner {
 pub struct ClipBoxPathHypothesis {
     pub accessor_key: &'static str,
     pub owner: ClipBoxOwner,
+    pub context_state_pointer_offset: usize,
+    pub offset: usize,
+    pub note: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HardwareProtectedPathHypothesis {
+    pub accessor_key: &'static str,
     pub offset: usize,
     pub note: &'static str,
 }
@@ -108,6 +117,7 @@ pub struct ClipBoxPathHypothesis {
 pub struct ProfileHypotheses {
     pub swap_chain: SwapChainPathHypothesis,
     pub clip_box: ClipBoxPathHypothesis,
+    pub hardware_protected: HardwareProtectedPathHypothesis,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,13 +416,20 @@ fn windows_11_25h2() -> HookProfile {
             swap_chain: SwapChainPathHypothesis {
                 accessor_key: "overlay_swap_chain_vtbl_0x108",
                 vtable_offset: 0x108,
-                note: "Initial 25H2 hypothesis: call the IOverlaySwapChain virtual accessor at vtable slot 0x108 to reach IDXGISwapChain.",
+                verified: false,
+                note: "Unverified 25H2 hypothesis: do not call the IOverlaySwapChain virtual accessor until its ABI is confirmed for this build.",
             },
             clip_box: ClipBoxPathHypothesis {
-                accessor_key: "overlay_context_state_clip_box_0x7698",
+                accessor_key: "overlay_context_state_clip_origin_0x4d0",
                 owner: ClipBoxOwner::OverlayContextStateObject,
-                offset: 0x7698,
-                note: "Initial 25H2 hypothesis: read the clip-box coordinates from the overlay-context state object at offset 0x7698.",
+                context_state_pointer_offset: 0,
+                offset: 0x4D0,
+                note: "Initial 25H2 hypothesis: read the overlay-context state object pointer from COverlayContext + 0, then read the clip origin from state object + 0x4d0.",
+            },
+            hardware_protected: HardwareProtectedPathHypothesis {
+                accessor_key: "overlay_swap_chain_hardware_protected_0x4c",
+                offset: 0x4c,
+                note: "Initial 25H2 hypothesis: read the hardware-protected flag from IOverlaySwapChain at offset 0x4c.",
             },
         },
     }

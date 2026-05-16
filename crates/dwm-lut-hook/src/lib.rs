@@ -19,8 +19,9 @@ pub use lut_pipeline::{
 };
 pub use minhook::{MinHookError, MinHookRuntime, MinHookState, RegisteredHook};
 pub use profile::{
-    AobToken, BuildProfile, ClipBoxOwner, ClipBoxPathHypothesis, HookProfile, HookSignature,
-    HookTarget, ProfileHypotheses, SignatureLocator, SwapChainPathHypothesis,
+    AobToken, BuildProfile, ClipBoxOwner, ClipBoxPathHypothesis, HardwareProtectedPathHypothesis,
+    HookProfile, HookSignature, HookTarget, ProfileHypotheses, SignatureLocator,
+    SwapChainPathHypothesis,
 };
 pub use resolver::{
     HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport, resolve_profile,
@@ -379,7 +380,10 @@ mod tests {
         assert_eq!(profile.module_name, "dwmcore.dll");
         assert_eq!(profile.signatures.len(), 8);
         assert_eq!(profile.hypotheses.swap_chain.vtable_offset, 0x108);
-        assert_eq!(profile.hypotheses.clip_box.offset, 0x7698);
+        assert!(!profile.hypotheses.swap_chain.verified);
+        assert_eq!(profile.hypotheses.clip_box.context_state_pointer_offset, 0);
+        assert_eq!(profile.hypotheses.clip_box.offset, 0x4D0);
+        assert_eq!(profile.hypotheses.hardware_protected.offset, 0x4C);
     }
 
     #[test]
