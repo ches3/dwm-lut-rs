@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use dwm_lut_config::{ConfigError, LutManifest, load_manifest};
 
 use crate::LutBypassRuntime;
+use std::sync::Arc;
+
 use crate::lut_pipeline::{LutPipeline, LutPipelineError};
 use crate::minhook::{MinHookError, register_plan, unregister_registered_hooks};
 use crate::profile::{BuildProfile, HookProfile};
@@ -303,7 +305,7 @@ fn finalize_initial_state(
             },
             minhook,
             resolution: SignatureResolutionState::Resolved(resolution),
-            lut_pipeline: LutPipelineState::Ready(lut_pipeline),
+            lut_pipeline: LutPipelineState::Ready(Arc::new(lut_pipeline)),
             hook_registration: HookRegistrationState {
                 plan: registration_plan,
                 hooks: registered_hooks,

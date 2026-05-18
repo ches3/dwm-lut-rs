@@ -12,3 +12,6 @@ path = "src/lib.rs"
 [dependencies]
 dwm-lut-config = { path = "../dwm-lut-config" }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+
+[build-dependencies]
+cc = "1.2.62"

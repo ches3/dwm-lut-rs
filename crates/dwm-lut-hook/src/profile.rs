@@ -87,7 +87,8 @@ pub struct HookSignature {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwapChainPathHypothesis {
     pub accessor_key: &'static str,
-    pub vtable_offset: usize,
+    pub container_vtable_index: usize,
+    pub resource_vtable_index: usize,
     pub verified: bool,
     pub note: &'static str,
 }
@@ -414,10 +415,11 @@ fn windows_11_25h2() -> HookProfile {
         ],
         hypotheses: ProfileHypotheses {
             swap_chain: SwapChainPathHypothesis {
-                accessor_key: "overlay_swap_chain_vtbl_0x108",
-                vtable_offset: 0x108,
+                accessor_key: "overlay_swap_chain_back_buffer_vtbl_24_19",
+                container_vtable_index: 24,
+                resource_vtable_index: 19,
                 verified: false,
-                note: "Unverified 25H2 hypothesis: do not call the IOverlaySwapChain virtual accessor until its ABI is confirmed for this build.",
+                note: "25H2 path mirrored from ed1ii/dwm_lut_fixed: call IOverlaySwapChain vtable[24], then returned object vtable[19], then QueryInterface for ID3D11Texture2D.",
             },
             clip_box: ClipBoxPathHypothesis {
                 accessor_key: "overlay_context_state_clip_origin_0x4d0",

@@ -1,6 +1,7 @@
 #[cfg(test)]
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::sync::Arc;
 #[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
 
@@ -93,7 +94,7 @@ pub struct HookRegistrationState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LutPipelineState {
-    Ready(LutPipeline),
+    Ready(Arc<LutPipeline>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +220,29 @@ pub fn evaluate_present_hook(
     })
 }
 
+pub(crate) fn render_present_lut(
+    overlay_swap_chain: usize,
+    clip_box: ClipBox,
+    dirty_rects: &[DirtyRect],
+) -> bool {
+    let Some((lut_pipeline, swap_chain_path)) = with_state(|state| {
+        let LutPipelineState::Ready(lut_pipeline) = &state.runtime.lut_pipeline;
+        (lut_pipeline.clone(), state.profile.hypotheses.swap_chain)
+    }) else {
+        return false;
+    };
+
+    unsafe {
+        crate::d3d11_renderer::render_present_lut(
+            overlay_swap_chain,
+            swap_chain_path,
+            clip_box,
+            dirty_rects,
+            &lut_pipeline,
+        )
+    }
+}
+
 pub fn evaluate_overlays_enabled(context_address: usize, original_enabled: bool) -> Option<bool> {
     with_state_mut(|state| match &mut state.runtime.lut_bypass {
         LutBypassState::Ready(runtime) => {
@@ -311,5 +335,6 @@ pub(crate) fn reset_state_for_tests() {
         *slot.borrow_mut() = None;
     });
     crate::bootstrap::reset_initialization_guard_for_tests();
+    crate::d3d11_renderer::reset_test_render_present_lut_result();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
 }

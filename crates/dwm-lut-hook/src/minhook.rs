@@ -3,6 +3,8 @@ use std::cell::RefCell;
 #[cfg(not(test))]
 use std::ffi::OsString;
 use std::ffi::c_void;
+#[cfg(not(test))]
+use std::mem::MaybeUninit;
 use std::mem::{align_of, size_of};
 #[cfg(not(test))]
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -756,6 +758,14 @@ struct MemoryBasicInformation {
 
 #[cfg(not(test))]
 unsafe extern "system" {
+    fn GetCurrentProcess() -> *mut c_void;
+    fn ReadProcessMemory(
+        hProcess: *mut c_void,
+        lpBaseAddress: *const c_void,
+        lpBuffer: *mut c_void,
+        nSize: usize,
+        lpNumberOfBytesRead: *mut usize,
+    ) -> i32;
     fn VirtualQuery(
         lpAddress: *const c_void,
         lpBuffer: *mut MemoryBasicInformation,
@@ -977,7 +987,29 @@ unsafe fn read_memory<T: Copy>(address: usize) -> Result<T, PresentInputError> {
         return Err(PresentInputError::UnreadableMemory);
     }
 
-    Ok(unsafe { (address as *const T).read_unaligned() })
+    #[cfg(test)]
+    {
+        Ok(unsafe { (address as *const T).read_unaligned() })
+    }
+
+    #[cfg(not(test))]
+    {
+        let mut value = MaybeUninit::<T>::uninit();
+        let mut bytes_read = 0usize;
+        let success = unsafe {
+            ReadProcessMemory(
+                GetCurrentProcess(),
+                address as *const c_void,
+                value.as_mut_ptr().cast(),
+                size_of::<T>(),
+                &mut bytes_read,
+            )
+        };
+        if success == 0 || bytes_read != size_of::<T>() {
+            return Err(PresentInputError::UnreadableMemory);
+        }
+        Ok(unsafe { value.assume_init() })
+    }
 }
 
 fn is_readable_range(address: usize, size: usize) -> bool {
@@ -1106,10 +1138,18 @@ unsafe extern "system" fn present_detour_impl(
     }
 
     match unsafe { collect_present_inputs(this, overlay_swap_chain, rect_vec) } {
-        Ok(
-            PresentInputCollection::HardwareProtected | PresentInputCollection::MissingFormat(_),
-        ) => deactivate_present_context(this),
-        Err(_) => deactivate_present_context(this),
+        Ok(PresentInputCollection::MissingFormat(inputs)) => {
+            let lut_applied =
+                state::render_present_lut(overlay_swap_chain, inputs.clip_box, &inputs.dirty_rects);
+            let _ = state::evaluate_present_hook(
+                this,
+                inputs.clip_box,
+                crate::DXGI_FORMAT_B8G8R8A8_UNORM,
+                &inputs.dirty_rects,
+                lut_applied,
+            );
+        }
+        Ok(PresentInputCollection::HardwareProtected) | Err(_) => deactivate_present_context(this),
     }
 
     let original: PresentOriginal = unsafe { std::mem::transmute(original) };
@@ -1878,6 +1918,64 @@ mod tests {
         assert!(super::is_readable_memory_region(&readable));
         assert!(!super::is_readable_memory_region(&execute_only));
         assert!(!super::is_readable_memory_region(&guarded));
+    }
+
+    #[test]
+    fn present_detour_keeps_context_active_when_render_succeeds() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        let (manifest_path, cube_path) = initialize_test_state();
+        let fake = FakePresentObjects::new(
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            vec![DirtyRect {
+                left: 0,
+                top: 0,
+                right: 64,
+                bottom: 64,
+            }],
+            false,
+        );
+        crate::d3d11_renderer::set_test_render_present_lut_result(true);
+        super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+
+        assert_eq!(
+            unsafe {
+                super::present_detour(
+                    fake.context_address(),
+                    fake.overlay_swap_chain_address(),
+                    0,
+                    fake.rect_vec_address(),
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0x55
+        );
+
+        let context = state::lut_bypass_runtime()
+            .and_then(|runtime| runtime.context(fake.context_address()).cloned())
+            .expect("successful LUT render should keep the context active");
+        assert_eq!(context.lut_index, Some(0));
+        assert_eq!(context.dirty_rect_count, 1);
+        let render_call = crate::d3d11_renderer::test_render_present_lut_call()
+            .expect("renderer should be called with collected present inputs");
+        assert_eq!(
+            render_call.overlay_swap_chain,
+            fake.overlay_swap_chain_address()
+        );
+        assert_eq!(render_call.swap_chain_path.container_vtable_index, 24);
+        assert_eq!(render_call.swap_chain_path.resource_vtable_index, 19);
+        assert_eq!(render_call.clip_box.left, 0);
+        assert_eq!(render_call.clip_box.top, 0);
+        assert_eq!(render_call.dirty_rects, fake.dirty_rects);
+
+        let _ = fs::remove_file(manifest_path);
+        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
