@@ -1,5 +1,6 @@
 use crate::lut_pipeline::{
-    ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, LutPipeline, ShaderConstantsCBuffer,
+    BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    DirtyRect, LutPipeline, ShaderConstantsCBuffer,
 };
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,6 +38,7 @@ impl D3D11VtableIndex {
 
 #[derive(Clone, Debug, PartialEq)]
 struct GpuDrawPlan {
+    format: BackBufferFormat,
     lut_index: usize,
     constants: ShaderConstantsCBuffer,
     dirty_rects: Vec<DirtyRect>,
@@ -50,17 +52,25 @@ fn prepare_gpu_draw_plan(
     height: u32,
     dirty_rects: &[DirtyRect],
 ) -> Option<GpuDrawPlan> {
-    if dxgi_format != DXGI_FORMAT_B8G8R8A8_UNORM || width == 0 || height == 0 {
+    if width == 0 || height == 0 {
         return None;
     }
 
     let plan = pipeline.build_present_plan(clip_box, dxgi_format, dirty_rects)?;
     let dirty_rects = draw_rects_for_frame(&plan.dirty_rects, width, height);
     (!dirty_rects.is_empty()).then_some(GpuDrawPlan {
+        format: plan.format,
         lut_index: plan.lut_index,
         constants: plan.shader_constants.to_cbuffer(),
         dirty_rects,
     })
+}
+
+const fn dxgi_format_for_copy_texture(format: BackBufferFormat) -> u32 {
+    match format {
+        BackBufferFormat::Bgra8Unorm => DXGI_FORMAT_B8G8R8A8_UNORM,
+        BackBufferFormat::Rgba16Float => DXGI_FORMAT_R16G16B16A16_FLOAT,
+    }
 }
 
 fn draw_rects_for_frame(dirty_rects: &[DirtyRect], width: u32, height: u32) -> Vec<DirtyRect> {
@@ -218,14 +228,15 @@ pub(crate) unsafe fn render_present_lut(
 mod tests {
     use super::*;
     use crate::lut_pipeline::{
-        DXGI_FORMAT_R16G16B16A16_FLOAT, LoadedLut, LutMetadata, LutShaderProgram, ShaderTexture3D,
+        BackBufferFormat, DXGI_FORMAT_R16G16B16A16_FLOAT, LoadedLut, LutMetadata, LutShaderProgram,
+        ShaderTexture3D,
     };
     use dwm_lut_config::{ColorMode, LutAssignment, MonitorTarget};
     use std::cell::RefCell;
 
     fn test_pipeline() -> LutPipeline {
-        LutPipeline {
-            luts: vec![LoadedLut {
+        fn loaded_lut(color_mode: ColorMode) -> LoadedLut {
+            LoadedLut {
                 assignment: LutAssignment {
                     target: MonitorTarget {
                         monitor_id: "DISPLAY1".into(),
@@ -233,9 +244,12 @@ mod tests {
                         desktop_top: 0,
                         desktop_right: Some(1920),
                         desktop_bottom: Some(1080),
-                        color_mode: ColorMode::Sdr,
+                        color_mode,
                     },
-                    lut_path: "identity.cube".into(),
+                    lut_path: match color_mode {
+                        ColorMode::Sdr => "identity-sdr.cube".into(),
+                        ColorMode::Hdr => "identity-hdr.cube".into(),
+                    },
                     lut_size: 2,
                 },
                 metadata: LutMetadata {
@@ -249,7 +263,11 @@ mod tests {
                     depth: 2,
                     texels: vec![[0.0, 0.0, 0.0, 1.0]; 8],
                 },
-            }],
+            }
+        }
+
+        LutPipeline {
+            luts: vec![loaded_lut(ColorMode::Sdr), loaded_lut(ColorMode::Hdr)],
             shader: LutShaderProgram::embedded(),
         }
     }
@@ -343,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_draw_plan_accepts_only_sdr_bgra8_frames_with_size() {
+    fn gpu_draw_plan_accepts_sdr_and_hdr_frames_with_size() {
         let pipeline = test_pipeline();
         let clip_box = ClipBox {
             left: 0,
@@ -369,17 +387,18 @@ mod tests {
             )
             .is_some()
         );
-        assert!(
-            prepare_gpu_draw_plan(
-                &pipeline,
-                clip_box,
-                DXGI_FORMAT_R16G16B16A16_FLOAT,
-                1920,
-                1080,
-                &dirty_rects,
-            )
-            .is_none()
-        );
+        let hdr_plan = prepare_gpu_draw_plan(
+            &pipeline,
+            clip_box,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            1920,
+            1080,
+            &dirty_rects,
+        )
+        .expect("HDR frames should render when an HDR LUT matches");
+        assert_eq!(hdr_plan.format, BackBufferFormat::Rgba16Float);
+        assert_eq!(hdr_plan.lut_index, 1);
+        assert_eq!(hdr_plan.constants.hdr, 1);
         assert!(
             prepare_gpu_draw_plan(
                 &pipeline,
@@ -390,6 +409,18 @@ mod tests {
                 &dirty_rects,
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn copy_texture_format_matches_back_buffer_format() {
+        assert_eq!(
+            dxgi_format_for_copy_texture(BackBufferFormat::Bgra8Unorm),
+            DXGI_FORMAT_B8G8R8A8_UNORM
+        );
+        assert_eq!(
+            dxgi_format_for_copy_texture(BackBufferFormat::Rgba16Float),
+            DXGI_FORMAT_R16G16B16A16_FLOAT
         );
     }
 
@@ -527,7 +558,9 @@ mod imp {
     use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
-    use crate::lut_pipeline::{ClipBox, DirtyRect, LutPipeline, ShaderConstantsCBuffer};
+    use crate::lut_pipeline::{
+        BackBufferFormat, ClipBox, DirtyRect, LutPipeline, ShaderConstantsCBuffer,
+    };
     use crate::profile::SwapChainPathHypothesis;
 
     type Hresult = i32;
@@ -816,7 +849,7 @@ mod imp {
                 self.devices.insert(key, resources);
             }
 
-            let Some(resources) = self.devices.get(&key) else {
+            let Some(resources) = self.devices.get_mut(&key) else {
                 return false;
             };
             if draw_plan.lut_index >= resources.lut_srvs.len() {
@@ -843,13 +876,69 @@ mod imp {
         vertex_buffer: ComPtr,
         sampler: ComPtr,
         constant_buffer: ComPtr,
-        copy_texture: ComPtr,
-        copy_srv: ComPtr,
+        copy_textures: CopyTextureResources,
         lut_textures: Vec<ComPtr>,
         lut_srvs: Vec<ComPtr>,
     }
 
     unsafe impl Send for DeviceResources {}
+
+    #[derive(Default)]
+    struct CopyTextureResources {
+        sdr: Option<CopyTextureResource>,
+        hdr: Option<CopyTextureResource>,
+    }
+
+    struct CopyTextureResource {
+        texture: ComPtr,
+        srv: ComPtr,
+    }
+
+    unsafe impl Send for CopyTextureResources {}
+
+    impl CopyTextureResources {
+        unsafe fn for_format(
+            &mut self,
+            device: ComPtr,
+            width: u32,
+            height: u32,
+            format: BackBufferFormat,
+        ) -> Option<&CopyTextureResource> {
+            let slot = match format {
+                BackBufferFormat::Bgra8Unorm => &mut self.sdr,
+                BackBufferFormat::Rgba16Float => &mut self.hdr,
+            };
+            if slot.is_none() {
+                *slot =
+                    Some(unsafe { CopyTextureResource::create(device, width, height, format) }?);
+            }
+            slot.as_ref()
+        }
+    }
+
+    impl CopyTextureResource {
+        unsafe fn create(
+            device: ComPtr,
+            width: u32,
+            height: u32,
+            format: BackBufferFormat,
+        ) -> Option<Self> {
+            let (texture, srv) = unsafe { create_copy_texture(device, width, height, format) }?;
+            Some(Self {
+                texture: texture.into_raw(),
+                srv: srv.into_raw(),
+            })
+        }
+    }
+
+    impl Drop for CopyTextureResource {
+        fn drop(&mut self) {
+            unsafe {
+                release(self.srv);
+                release(self.texture);
+            }
+        }
+    }
 
     impl DeviceResources {
         unsafe fn create(
@@ -885,8 +974,6 @@ mod imp {
             let vertex_buffer = OwnedCom::new(unsafe { create_vertex_buffer(device) }?);
             let sampler = OwnedCom::new(unsafe { create_sampler(device) }?);
             let constant_buffer = OwnedCom::new(unsafe { create_constant_buffer(device) }?);
-            let (copy_texture, copy_srv) = unsafe { create_copy_texture(device, width, height) }?;
-
             let mut lut_textures = Vec::with_capacity(pipeline.luts.len());
             let mut lut_srvs = Vec::with_capacity(pipeline.luts.len());
             for lut in &pipeline.luts {
@@ -906,14 +993,20 @@ mod imp {
                 vertex_buffer: vertex_buffer.into_raw(),
                 sampler: sampler.into_raw(),
                 constant_buffer: constant_buffer.into_raw(),
-                copy_texture: copy_texture.into_raw(),
-                copy_srv: copy_srv.into_raw(),
+                copy_textures: CopyTextureResources::default(),
                 lut_textures: lut_textures.into_iter().map(OwnedCom::into_raw).collect(),
                 lut_srvs: lut_srvs.into_iter().map(OwnedCom::into_raw).collect(),
             })
         }
 
-        unsafe fn draw(&self, frame: RenderFrame, draw_plan: &super::GpuDrawPlan) -> bool {
+        unsafe fn draw(&mut self, frame: RenderFrame, draw_plan: &super::GpuDrawPlan) -> bool {
+            let Some((copy_texture, copy_srv)) = (unsafe {
+                self.copy_textures
+                    .for_format(frame.device, frame.width, frame.height, draw_plan.format)
+                    .map(|resource| (resource.texture, resource.srv))
+            }) else {
+                return false;
+            };
             let mut rtv: ComPtr = ptr::null_mut();
             if unsafe {
                 d3d11_device_create_render_target_view_from_context(
@@ -946,7 +1039,7 @@ mod imp {
                         unsafe {
                             d3d11_context_copy_subresource_region(
                                 frame.context,
-                                self.copy_texture,
+                                copy_texture,
                                 rect.left as u32,
                                 rect.top as u32,
                                 frame.back_buffer,
@@ -960,6 +1053,7 @@ mod imp {
                                 frame.context,
                                 self,
                                 rtv,
+                                copy_srv,
                                 self.lut_srvs[draw_plan.lut_index],
                             );
                             d3d11_context_update_subresource(
@@ -995,8 +1089,6 @@ mod imp {
                 for texture in self.lut_textures.drain(..) {
                     release(texture);
                 }
-                release(self.copy_srv);
-                release(self.copy_texture);
                 release(self.constant_buffer);
                 release(self.sampler);
                 release(self.vertex_buffer);
@@ -1222,13 +1314,14 @@ mod imp {
         device: ComPtr,
         width: u32,
         height: u32,
+        format: BackBufferFormat,
     ) -> Option<(OwnedCom, OwnedCom)> {
         let desc = Texture2DDesc {
             width,
             height,
             mip_levels: 1,
             array_size: 1,
-            format: super::DXGI_FORMAT_B8G8R8A8_UNORM,
+            format: super::dxgi_format_for_copy_texture(format),
             sample_count: 1,
             sample_quality: 0,
             usage: D3D11_USAGE_DEFAULT,
@@ -1343,12 +1436,13 @@ mod imp {
         context: ComPtr,
         resources: &DeviceResources,
         rtv: ComPtr,
+        copy_srv: ComPtr,
         lut_srv: ComPtr,
     ) {
         let stride = size_of::<Vertex>() as u32;
         let offset = 0u32;
         let vertex_buffers = [resources.vertex_buffer];
-        let srvs = [resources.copy_srv, lut_srv];
+        let srvs = [copy_srv, lut_srv];
         let samplers = [resources.sampler];
         let constant_buffers = [resources.constant_buffer];
         let mut rtvs = [ptr::null_mut(); D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
