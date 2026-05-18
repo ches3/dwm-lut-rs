@@ -66,13 +66,13 @@ float3 ApplySdrDither(float3 rgb, float2 position) {
     );
 }
 
-float LinearToPq(float linear) {
+float LinearToPq(float value) {
     const float m1 = 2610.0 / 16384.0;
     const float m2 = 2523.0 / 32.0;
     const float c1 = 3424.0 / 4096.0;
     const float c2 = 2413.0 / 128.0;
     const float c3 = 2392.0 / 128.0;
-    float powered = pow(saturate(linear), m1);
+    float powered = pow(saturate(value), m1);
     return pow((c1 + c2 * powered) / (1.0 + c3 * powered), m2);
 }
 
