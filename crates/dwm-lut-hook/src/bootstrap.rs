@@ -472,6 +472,7 @@ mod tests {
                         size: 0x20_0000,
                     },
                     targets: Vec::new(),
+                    skipped_signatures: Vec::new(),
                 })
             },
         )

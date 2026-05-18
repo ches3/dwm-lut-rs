@@ -25,10 +25,24 @@ pub struct ResolvedTarget {
     pub address: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkippedSignatureReason {
+    NotFound,
+    Ambiguous { matches: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkippedSignature {
+    pub target: HookTarget,
+    pub capture_key: &'static str,
+    pub reason: SkippedSignatureReason,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureResolutionReport {
     pub module: LoadedModule,
     pub targets: Vec<ResolvedTarget>,
+    pub skipped_signatures: Vec<SkippedSignature>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,12 +113,48 @@ pub(crate) fn resolve_profile_from_image(
     image: &[u8],
 ) -> Result<SignatureResolutionReport, HookResolveError> {
     let mut targets = Vec::with_capacity(profile.signatures.len());
+    let mut skipped_signatures = Vec::new();
 
     for signature in &profile.signatures {
-        targets.push(resolve_signature(module, image, signature)?);
+        match resolve_signature(module, image, signature) {
+            Ok(target) => targets.push(target),
+            Err(error) if !signature.target.is_required_signature() => {
+                skipped_signatures.push(skipped_signature_from_error(error)?);
+            }
+            Err(error) => return Err(error),
+        }
     }
 
-    Ok(SignatureResolutionReport { module, targets })
+    Ok(SignatureResolutionReport {
+        module,
+        targets,
+        skipped_signatures,
+    })
+}
+
+fn skipped_signature_from_error(
+    error: HookResolveError,
+) -> Result<SkippedSignature, HookResolveError> {
+    match error {
+        HookResolveError::SignatureNotFound {
+            target,
+            capture_key,
+        } => Ok(SkippedSignature {
+            target,
+            capture_key,
+            reason: SkippedSignatureReason::NotFound,
+        }),
+        HookResolveError::SignatureAmbiguous {
+            target,
+            capture_key,
+            matches,
+        } => Ok(SkippedSignature {
+            target,
+            capture_key,
+            reason: SkippedSignatureReason::Ambiguous { matches },
+        }),
+        error => Err(error),
+    }
 }
 
 fn resolve_signature(
@@ -505,6 +555,103 @@ mod tests {
                 target: crate::profile::HookTarget::Present,
                 capture_key: "present_25h2",
             }
+        );
+    }
+
+    #[test]
+    fn resolve_profile_records_missing_optional_signature() {
+        let image = [0xAA, 0xBB, 0xCC];
+        let module = LoadedModule {
+            module_name: "dwmcore.dll",
+            base_address: 0x2000_0000,
+            size: image.len(),
+        };
+        let profile = HookProfile {
+            build: BuildProfile::Windows11_25H2,
+            module_name: "dwmcore.dll",
+            signatures: vec![
+                crate::profile::HookSignature {
+                    target: crate::profile::HookTarget::Present,
+                    locator: crate::profile::SignatureLocator::Aob {
+                        module_name: "dwmcore.dll",
+                        capture_key: "required_present",
+                        tokens: &[AobToken::Exact(0xAA)],
+                    },
+                    note: "",
+                },
+                crate::profile::HookSignature {
+                    target:
+                        crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible,
+                    locator: crate::profile::SignatureLocator::Aob {
+                        module_name: "dwmcore.dll",
+                        capture_key: "optional_window_gate",
+                        tokens: &[AobToken::Exact(0xDD)],
+                    },
+                    note: "",
+                },
+            ],
+            hypotheses: HookProfile::for_build(BuildProfile::Windows11_25H2).hypotheses,
+        };
+
+        let report =
+            resolve_profile_from_image(&profile, module, &image).expect("optional miss is allowed");
+
+        assert_eq!(report.targets.len(), 1);
+        assert_eq!(
+            report.skipped_signatures,
+            vec![crate::resolver::SkippedSignature {
+                target: crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible,
+                capture_key: "optional_window_gate",
+                reason: crate::resolver::SkippedSignatureReason::NotFound,
+            }]
+        );
+    }
+
+    #[test]
+    fn resolve_profile_records_ambiguous_optional_signature() {
+        let image = [0xAA, 0xDD, 0xDD];
+        let module = LoadedModule {
+            module_name: "dwmcore.dll",
+            base_address: 0x2000_0000,
+            size: image.len(),
+        };
+        let profile = HookProfile {
+            build: BuildProfile::Windows11_25H2,
+            module_name: "dwmcore.dll",
+            signatures: vec![
+                crate::profile::HookSignature {
+                    target: crate::profile::HookTarget::Present,
+                    locator: crate::profile::SignatureLocator::Aob {
+                        module_name: "dwmcore.dll",
+                        capture_key: "required_present",
+                        tokens: &[AobToken::Exact(0xAA)],
+                    },
+                    note: "",
+                },
+                crate::profile::HookSignature {
+                    target: crate::profile::HookTarget::CompVisualIsCandidateForPromotion,
+                    locator: crate::profile::SignatureLocator::Aob {
+                        module_name: "dwmcore.dll",
+                        capture_key: "optional_comp_visual_gate",
+                        tokens: &[AobToken::Exact(0xDD)],
+                    },
+                    note: "",
+                },
+            ],
+            hypotheses: HookProfile::for_build(BuildProfile::Windows11_25H2).hypotheses,
+        };
+
+        let report = resolve_profile_from_image(&profile, module, &image)
+            .expect("optional ambiguity is allowed");
+
+        assert_eq!(report.targets.len(), 1);
+        assert_eq!(
+            report.skipped_signatures,
+            vec![crate::resolver::SkippedSignature {
+                target: crate::profile::HookTarget::CompVisualIsCandidateForPromotion,
+                capture_key: "optional_comp_visual_gate",
+                reason: crate::resolver::SkippedSignatureReason::Ambiguous { matches: 2 },
+            }]
         );
     }
 

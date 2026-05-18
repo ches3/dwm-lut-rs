@@ -25,7 +25,8 @@ pub use profile::{
     SwapChainPathHypothesis,
 };
 pub use resolver::{
-    HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport, resolve_profile,
+    HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport, SkippedSignature,
+    SkippedSignatureReason, resolve_profile,
 };
 pub use state::{
     HookConfig, HookRegistrationPlan, HookRegistrationState, HookRegistrationTarget, HookRuntime,
@@ -254,6 +255,7 @@ mod tests {
                     }
                 })
                 .collect(),
+            skipped_signatures: Vec::new(),
         }
     }
 

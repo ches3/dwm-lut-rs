@@ -1255,6 +1255,7 @@ mod tests {
                     }
                 })
                 .collect(),
+            skipped_signatures: Vec::new(),
         }
     }
 

@@ -40,6 +40,13 @@ impl HookTarget {
     pub const fn is_function_hook_target(self) -> bool {
         !matches!(self, Self::OverlayTestMode)
     }
+
+    pub const fn is_required_signature(self) -> bool {
+        matches!(
+            self,
+            Self::Present | Self::IsCandidateDirectFlipCompatible | Self::OverlaysEnabled
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
