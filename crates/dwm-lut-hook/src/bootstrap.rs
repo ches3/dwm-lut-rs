@@ -170,8 +170,6 @@ enum InitializeStatus {
     OverlayTestModeAmbiguous = 22,
     CompSwapChainIndependentFlipSignatureNotFound = 23,
     CompSwapChainIndependentFlipSignatureAmbiguous = 24,
-    MinHookLoadFailed = 25,
-    MinHookGetProcAddressFailed = 26,
     MinHookInitializeFailed = 27,
     MinHookCreateHookFailed = 28,
     MinHookEnableHookFailed = 29,
@@ -390,10 +388,6 @@ fn map_hook_error(error: HookError) -> InitializeStatus {
         }
         HookError::LutPipeline(_) => InitializeStatus::LutPipelinePrepareFailed,
         HookError::MinHook(error) => match error.operation {
-            crate::minhook::MinHookOperation::LoadLibrary => InitializeStatus::MinHookLoadFailed,
-            crate::minhook::MinHookOperation::GetProcAddress => {
-                InitializeStatus::MinHookGetProcAddressFailed
-            }
             crate::minhook::MinHookOperation::Initialize => {
                 InitializeStatus::MinHookInitializeFailed
             }

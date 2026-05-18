@@ -1,15 +1,9 @@
 #[cfg(test)]
 use std::cell::RefCell;
-#[cfg(not(test))]
-use std::ffi::OsString;
 use std::ffi::c_void;
 #[cfg(not(test))]
 use std::mem::MaybeUninit;
 use std::mem::{align_of, size_of};
-#[cfg(not(test))]
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
-#[cfg(not(test))]
-use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -21,7 +15,7 @@ pub type MhStatus = i32;
 
 pub const MH_OK: MhStatus = 0;
 pub const MH_ERROR_ALREADY_INITIALIZED: MhStatus = 1;
-const MH_ALL_HOOKS: *mut c_void = !0usize as *mut c_void;
+const MH_ALL_HOOKS: *mut c_void = ptr::null_mut();
 
 pub type MhInitializeApi = unsafe extern "system" fn() -> MhStatus;
 pub type MhUninitializeApi = unsafe extern "system" fn() -> MhStatus;
@@ -129,8 +123,6 @@ fn cleanup_has_remove_hook_failure(failures: &[MinHookCleanupFailure]) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) enum MinHookOperation {
-    LoadLibrary,
-    GetProcAddress,
     Initialize,
     CreateHook(HookTarget),
     EnableHook,
@@ -223,8 +215,8 @@ pub(crate) fn register_plan(
                 free_minhook_module(loaded.module_handle);
             } else {
                 // A remove failure means at least one hook may still reference
-                // MinHook state. Keep the MinHook DLL loaded for the process
-                // lifetime instead of unloading code/data that may still be used.
+                // MinHook state. Keep that state initialized for the process
+                // lifetime instead of tearing down data that may still be used.
             }
             return Err(error);
         }
@@ -362,149 +354,22 @@ fn remove_created_hooks(apis: &MinHookApis, created: &[CreatedHook]) -> Vec<MinH
 
 #[cfg(not(test))]
 fn load_minhook_apis() -> Result<LoadedMinHook, MinHookError> {
-    use windows_sys::Win32::Foundation::FreeLibrary;
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-
-    const DLL_NAMES: [&str; 2] = ["MinHook.x64.dll", "MinHook.dll"];
-
-    let hook_dir = current_hook_module_dir()?;
-    let mut export_resolution_failed = false;
-    for module_name in DLL_NAMES {
-        let dll_path = hook_dir.join(module_name);
-        let dll_path_wide = wide_null(&dll_path);
-        let module = unsafe { LoadLibraryW(dll_path_wide.as_ptr()) };
-        if module.is_null() {
-            continue;
-        }
-
-        let initialize = unsafe { GetProcAddress(module, c"MH_Initialize".as_ptr().cast()) };
-        let uninitialize = unsafe { GetProcAddress(module, c"MH_Uninitialize".as_ptr().cast()) };
-        let create_hook = unsafe { GetProcAddress(module, c"MH_CreateHook".as_ptr().cast()) };
-        let enable_hook = unsafe { GetProcAddress(module, c"MH_EnableHook".as_ptr().cast()) };
-        let disable_hook = unsafe { GetProcAddress(module, c"MH_DisableHook".as_ptr().cast()) };
-        let remove_hook = unsafe { GetProcAddress(module, c"MH_RemoveHook".as_ptr().cast()) };
-
-        let (
-            Some(initialize),
-            Some(uninitialize),
-            Some(create_hook),
-            Some(enable_hook),
-            Some(disable_hook),
-            Some(remove_hook),
-        ) = (
-            initialize,
-            uninitialize,
-            create_hook,
-            enable_hook,
-            disable_hook,
-            remove_hook,
-        )
-        else {
-            export_resolution_failed = true;
-            unsafe {
-                FreeLibrary(module);
-            }
-            continue;
-        };
-
-        return Ok(LoadedMinHook {
-            module_name,
-            module_handle: module as usize,
-            apis: MinHookApis {
-                initialize: unsafe {
-                    std::mem::transmute::<unsafe extern "system" fn() -> isize, MhInitializeApi>(
-                        initialize,
-                    )
-                },
-                uninitialize: unsafe {
-                    std::mem::transmute::<unsafe extern "system" fn() -> isize, MhUninitializeApi>(
-                        uninitialize,
-                    )
-                },
-                create_hook: unsafe {
-                    std::mem::transmute::<unsafe extern "system" fn() -> isize, MhCreateHookApi>(
-                        create_hook,
-                    )
-                },
-                enable_hook: unsafe {
-                    std::mem::transmute::<unsafe extern "system" fn() -> isize, MhEnableHookApi>(
-                        enable_hook,
-                    )
-                },
-                disable_hook: unsafe {
-                    std::mem::transmute::<unsafe extern "system" fn() -> isize, MhDisableHookApi>(
-                        disable_hook,
-                    )
-                },
-                remove_hook: unsafe {
-                    std::mem::transmute::<unsafe extern "system" fn() -> isize, MhRemoveHookApi>(
-                        remove_hook,
-                    )
-                },
-            },
-        });
-    }
-
-    if export_resolution_failed {
-        Err(MinHookError::new(MinHookOperation::GetProcAddress, None))
-    } else {
-        Err(MinHookError::new(MinHookOperation::LoadLibrary, None))
-    }
+    Ok(LoadedMinHook {
+        module_name: "minhook-sys",
+        module_handle: 0,
+        apis: MinHookApis {
+            initialize: minhook_sys::MH_Initialize,
+            uninitialize: minhook_sys::MH_Uninitialize,
+            create_hook: minhook_sys::MH_CreateHook,
+            enable_hook: minhook_sys::MH_EnableHook,
+            disable_hook: minhook_sys::MH_DisableHook,
+            remove_hook: minhook_sys::MH_RemoveHook,
+        },
+    })
 }
 
 #[cfg(not(test))]
-fn free_minhook_module(module_handle: usize) {
-    use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
-
-    if module_handle != 0 {
-        unsafe {
-            FreeLibrary(module_handle as HMODULE);
-        }
-    }
-}
-
-#[cfg(not(test))]
-fn current_hook_module_dir() -> Result<PathBuf, MinHookError> {
-    use windows_sys::Win32::Foundation::HMODULE;
-    use windows_sys::Win32::System::LibraryLoader::{
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        GetModuleFileNameW, GetModuleHandleExW,
-    };
-
-    let mut module: HMODULE = ptr::null_mut();
-    let flags =
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
-    let ok = unsafe {
-        GetModuleHandleExW(
-            flags,
-            current_hook_module_dir as *const () as *const u16,
-            &mut module,
-        )
-    };
-    if ok == 0 {
-        return Err(MinHookError::new(MinHookOperation::LoadLibrary, None));
-    }
-
-    let mut buffer = vec![0u16; 32768];
-    let len = unsafe { GetModuleFileNameW(module, buffer.as_mut_ptr(), buffer.len() as u32) };
-    if len == 0 || len as usize >= buffer.len() {
-        return Err(MinHookError::new(MinHookOperation::LoadLibrary, None));
-    }
-
-    let module_path = PathBuf::from(OsString::from_wide(&buffer[..len as usize]));
-    module_path
-        .parent()
-        .map(PathBuf::from)
-        .ok_or(MinHookError::new(MinHookOperation::LoadLibrary, None))
-}
-
-#[cfg(not(test))]
-fn wide_null(path: &std::path::Path) -> Vec<u16> {
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
+fn free_minhook_module(_module_handle: usize) {}
 
 #[cfg(test)]
 #[derive(Default)]
@@ -1489,6 +1354,11 @@ mod tests {
         );
         super::PRESENT_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
         super::OVERLAYS_ENABLED_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
+    }
+
+    #[test]
+    fn enable_all_hooks_uses_minhook_null_sentinel() {
+        assert_eq!(super::MH_ALL_HOOKS, std::ptr::null_mut());
     }
 
     #[test]

@@ -26,6 +26,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "dwm-lut-config",
+ "minhook-sys",
  "windows-sys",
 ]
 
@@ -53,6 +54,15 @@ name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+
+[[package]]
+name = "minhook-sys"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd5e3d769f50ac2ec0cbd86ec241d9aa219a080a74c0287ce781f46a8900fa18"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "proc-macro2"
