@@ -216,6 +216,8 @@ const DIRECT_FLIP_AOB: &[AobToken] = &[
 ];
 
 const COMP_SWAP_CHAIN_DIRECT_FLIP_FOLLOWING_BYTES: &[u8] = &[0x41, 0x8B, 0xF0];
+const NON_OVERLAY_DIRECT_FLIP_FOLLOWING_BYTES_25H2_2026_05: &[u8] =
+    &[0x48, 0x8D, 0xB9, 0x98, 0x01, 0x00, 0x00];
 
 const OVERLAYS_ENABLED_AOB: &[AobToken] = &[
     Exact(0x83),
@@ -349,9 +351,12 @@ fn windows_11_25h2() -> HookProfile {
                     module_name: "dwmcore.dll",
                     capture_key: "direct_flip_compat_25h2",
                     tokens: DIRECT_FLIP_AOB,
-                    excluded_following: &[COMP_SWAP_CHAIN_DIRECT_FLIP_FOLLOWING_BYTES],
+                    excluded_following: &[
+                        COMP_SWAP_CHAIN_DIRECT_FLIP_FOLLOWING_BYTES,
+                        NON_OVERLAY_DIRECT_FLIP_FOLLOWING_BYTES_25H2_2026_05,
+                    ],
                 },
-                note: "Matches the 25H2 direct-flip compatibility gate while excluding the CCompSwapChain prologue that shares the same prefix.",
+                note: "Matches the 25H2 direct-flip compatibility gate while excluding non-overlay prologues that share the same prefix.",
             },
             HookSignature {
                 target: HookTarget::OverlaysEnabled,
