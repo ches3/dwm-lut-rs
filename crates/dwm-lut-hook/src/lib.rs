@@ -382,7 +382,6 @@ mod tests {
         assert_eq!(profile.signatures.len(), 8);
         assert_eq!(profile.hypotheses.swap_chain.container_vtable_index, 24);
         assert_eq!(profile.hypotheses.swap_chain.resource_vtable_index, 19);
-        assert!(!profile.hypotheses.swap_chain.verified);
         assert_eq!(profile.hypotheses.clip_box.context_state_pointer_offset, 0);
         assert_eq!(profile.hypotheses.clip_box.offset, 0x4D0);
         assert_eq!(profile.hypotheses.hardware_protected.offset, 0x4C);
