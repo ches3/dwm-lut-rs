@@ -342,12 +342,12 @@ mod tests {
 
         let hook_registration = &state.runtime.hook_registration;
         assert_eq!(hook_registration.plan.module_name, "dwmcore.dll");
-        assert_eq!(hook_registration.plan.targets.len(), 7);
+        assert_eq!(hook_registration.plan.targets.len(), 1);
         assert_eq!(
             hook_registration.plan.targets[0].target,
             HookTarget::Present
         );
-        assert_eq!(hook_registration.hooks.len(), 7);
+        assert_eq!(hook_registration.hooks.len(), 1);
         assert_eq!(hook_registration.hooks[0].target, HookTarget::Present);
         assert!(
             hook_registration

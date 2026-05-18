@@ -249,9 +249,17 @@ where
 
     let manifest = load_manifest(&config.manifest_path).map_err(HookError::Manifest)?;
     let lut_pipeline = LutPipeline::load(&manifest)?;
-    let profile = HookProfile::for_build(config.profile);
+    let profile = present_hook_initialization_profile(config.profile);
     let resolution = resolver(&profile)?;
     finalize_initial_state(config, manifest, profile, resolution, lut_pipeline)
+}
+
+fn present_hook_initialization_profile(build: crate::profile::BuildProfile) -> HookProfile {
+    let mut profile = HookProfile::for_build(build);
+    profile
+        .signatures
+        .retain(|signature| signature.target == crate::profile::HookTarget::Present);
+    profile
 }
 
 #[cfg(test)]

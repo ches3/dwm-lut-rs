@@ -70,7 +70,7 @@ impl HookRegistrationPlan {
             targets: resolution
                 .targets
                 .iter()
-                .filter(|target| target.target.is_function_hook_target())
+                .filter(|target| target.target == HookTarget::Present)
                 .map(|target| HookRegistrationTarget {
                     target: target.target,
                     capture_key: target.capture_key,
