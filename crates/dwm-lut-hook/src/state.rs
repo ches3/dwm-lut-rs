@@ -70,7 +70,7 @@ impl HookRegistrationPlan {
             targets: resolution
                 .targets
                 .iter()
-                .filter(|target| target.target == HookTarget::Present)
+                .filter(|target| target.target.is_function_hook_target())
                 .map(|target| HookRegistrationTarget {
                     target: target.target,
                     capture_key: target.capture_key,
@@ -302,6 +302,12 @@ pub fn evaluate_overlay_test_mode(original_mode: i32) -> Option<i32> {
     })
 }
 
+pub(crate) fn restore_overlay_test_mode() {
+    let _ = with_state_mut(|state| match &mut state.runtime.lut_bypass {
+        LutBypassState::Ready(runtime) => runtime.restore_overlay_test_mode(),
+    });
+}
+
 #[cfg(not(test))]
 fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
     let state = STATE.get()?;
@@ -337,4 +343,5 @@ pub(crate) fn reset_state_for_tests() {
     crate::bootstrap::reset_initialization_guard_for_tests();
     crate::d3d11_renderer::reset_test_render_present_lut_result();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
+    crate::minhook::reset_test_original_slots();
 }

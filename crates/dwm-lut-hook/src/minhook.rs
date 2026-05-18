@@ -421,6 +421,17 @@ pub(crate) fn reset_test_minhook_behavior(
 }
 
 #[cfg(test)]
+pub(crate) fn reset_test_original_slots() {
+    PRESENT_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    OVERLAYS_ENABLED_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    WINDOW_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    COMP_VISUAL_PROMOTION_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+}
+
+#[cfg(test)]
 fn set_test_minhook_cleanup_failures(
     disable_fail_on: Option<usize>,
     remove_fail_on: Option<usize>,
@@ -1029,23 +1040,38 @@ unsafe extern "system" fn direct_flip_detour(
     a5: u32,
     a6: u8,
 ) -> u8 {
-    unsafe { forward_overlay_direct_flip(&DIRECT_FLIP_ORIGINAL, this, a2, a3, a4, a5, a6) }
+    let original =
+        unsafe { forward_overlay_direct_flip(&DIRECT_FLIP_ORIGINAL, this, a2, a3, a4, a5, a6) };
+    bool_to_u8(state::evaluate_direct_flip_compatible(this, original != 0).unwrap_or(original != 0))
 }
 
 unsafe extern "system" fn overlays_enabled_detour(this: usize) -> u8 {
-    unsafe { forward_bool1(&OVERLAYS_ENABLED_ORIGINAL, this) }
+    let original = unsafe { forward_bool1(&OVERLAYS_ENABLED_ORIGINAL, this) };
+    bool_to_u8(state::evaluate_overlays_enabled(this, original != 0).unwrap_or(original != 0))
 }
 
 unsafe extern "system" fn window_direct_flip_detour(this: usize, a2: usize, a3: u8) -> u8 {
-    unsafe { forward_bool3(&WINDOW_DIRECT_FLIP_ORIGINAL, this, a2, a3) }
+    let original = unsafe { forward_bool3(&WINDOW_DIRECT_FLIP_ORIGINAL, this, a2, a3) };
+    bool_to_u8(
+        state::evaluate_window_context_direct_flip_compatible(original != 0)
+            .unwrap_or(original != 0),
+    )
 }
 
 unsafe extern "system" fn comp_swap_chain_direct_flip_detour(this: usize, a2: usize, a3: u8) -> u8 {
-    unsafe { forward_bool3(&COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL, this, a2, a3) }
+    let original = unsafe { forward_bool3(&COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL, this, a2, a3) };
+    bool_to_u8(
+        state::evaluate_comp_swap_chain_direct_flip_compatible(original != 0)
+            .unwrap_or(original != 0),
+    )
 }
 
 unsafe extern "system" fn comp_swap_chain_independent_flip_detour(this: usize) -> u8 {
-    unsafe { forward_bool1(&COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL, this) }
+    let original = unsafe { forward_bool1(&COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL, this) };
+    bool_to_u8(
+        state::evaluate_comp_swap_chain_independent_flip_compatible(original != 0)
+            .unwrap_or(original != 0),
+    )
 }
 
 unsafe extern "system" fn comp_visual_promotion_detour(this: usize, a2: usize, a3: usize) -> u8 {
@@ -1055,7 +1081,14 @@ unsafe extern "system" fn comp_visual_promotion_detour(this: usize, a2: usize, a
     }
 
     let original: ForwardCompVisual = unsafe { std::mem::transmute(original) };
-    unsafe { original(this, a2, a3) }
+    let original = unsafe { original(this, a2, a3) };
+    bool_to_u8(
+        state::evaluate_comp_visual_candidate_for_promotion(original != 0).unwrap_or(original != 0),
+    )
+}
+
+const fn bool_to_u8(value: bool) -> u8 {
+    value as u8
 }
 
 #[cfg(test)]
@@ -1135,6 +1168,7 @@ mod tests {
     }
 
     fn reset_controlled_behavior(create_fail_on: Option<usize>, enable_fail_on: Option<usize>) {
+        super::reset_test_original_slots();
         super::reset_test_minhook_behavior(create_fail_on, enable_fail_on, None, None);
     }
 
@@ -1588,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn context_detours_forward_original_return_value_without_bypass_evaluation() {
+    fn context_detours_override_original_return_value_when_context_is_active() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         let (manifest_path, cube_path) = initialize_test_state();
         activate_context(0x1234);
@@ -1600,9 +1634,9 @@ mod tests {
 
         assert_eq!(
             unsafe { super::direct_flip_detour(0x1234, 0, 0, 0, 0, 0) },
-            1
+            0
         );
-        assert_eq!(unsafe { super::overlays_enabled_detour(0x1234) }, 1);
+        assert_eq!(unsafe { super::overlays_enabled_detour(0x1234) }, 0);
         assert!(
             state::lut_bypass_runtime()
                 .and_then(|runtime| runtime.context(0x1234).cloned())
@@ -1616,6 +1650,7 @@ mod tests {
     #[test]
     fn global_promotion_detours_forward_original_return_value() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        state::reset_state_for_tests();
         super::WINDOW_DIRECT_FLIP_ORIGINAL.store(returns_true_3 as *mut c_void, Ordering::Release);
         super::COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL
             .store(returns_true_3 as *mut c_void, Ordering::Release);
@@ -1634,6 +1669,33 @@ mod tests {
             1
         );
         assert_eq!(unsafe { super::comp_visual_promotion_detour(0, 0, 0) }, 1);
+    }
+
+    #[test]
+    fn global_promotion_detours_block_when_lut_assignments_exist() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        let (manifest_path, cube_path) = initialize_test_state();
+        super::WINDOW_DIRECT_FLIP_ORIGINAL.store(returns_true_3 as *mut c_void, Ordering::Release);
+        super::COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL
+            .store(returns_true_3 as *mut c_void, Ordering::Release);
+        super::COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL
+            .store(returns_true_1 as *mut c_void, Ordering::Release);
+        super::COMP_VISUAL_PROMOTION_ORIGINAL
+            .store(returns_true_comp_visual as *mut c_void, Ordering::Release);
+
+        assert_eq!(unsafe { super::window_direct_flip_detour(0, 0, 0) }, 0);
+        assert_eq!(
+            unsafe { super::comp_swap_chain_direct_flip_detour(0, 0, 0) },
+            0
+        );
+        assert_eq!(
+            unsafe { super::comp_swap_chain_independent_flip_detour(0) },
+            0
+        );
+        assert_eq!(unsafe { super::comp_visual_promotion_detour(0, 0, 0) }, 0);
+
+        let _ = fs::remove_file(manifest_path);
+        let _ = fs::remove_file(cube_path);
     }
 
     #[test]

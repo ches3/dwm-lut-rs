@@ -164,6 +164,10 @@ impl LutBypassRuntime {
         self.overlay_test_mode_control().apply(original_mode)
     }
 
+    pub fn restore_overlay_test_mode(&mut self) {
+        self.set_overlay_test_mode_control(OverlayTestModeControl::Unmodified);
+    }
+
     pub fn context(&self, context_address: usize) -> Option<&ContextLutState> {
         self.contexts.get(&context_address)
     }
