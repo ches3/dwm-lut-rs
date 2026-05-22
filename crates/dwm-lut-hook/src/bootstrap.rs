@@ -144,6 +144,7 @@ impl From<MinHookError> for HookError {
 }
 
 #[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InitializeStatus {
     Success = 0,
     NullManifestPath = 1,
@@ -192,8 +193,21 @@ pub(crate) fn initialize_with_resolution(
 pub(crate) fn ffi_initialize(manifest_path: *const u16) -> u32 {
     let manifest_path = match unsafe { wide_path_from_ptr(manifest_path) } {
         Some(path) => path,
-        None => return InitializeStatus::NullManifestPath as u32,
+        None => {
+            debug_log!(
+                "event=initialize_failed status={} error={}",
+                InitializeStatus::NullManifestPath as u32,
+                crate::debug_log::quoted("manifest path pointer is null")
+            );
+            return InitializeStatus::NullManifestPath as u32;
+        }
     };
+
+    debug_log!(
+        "event=initialize_start manifest_path={} profile={:?}",
+        crate::debug_log::quoted(manifest_path.display()),
+        build_profile()
+    );
 
     let config = HookConfig {
         manifest_path,
@@ -201,9 +215,29 @@ pub(crate) fn ffi_initialize(manifest_path: *const u16) -> u32 {
     };
 
     match initialize_from_manifest_path(config) {
-        Ok(()) => InitializeStatus::Success as u32,
-        Err(error) => map_hook_error(error) as u32,
+        Ok(()) => {
+            debug_log!("event=initialize_success");
+            InitializeStatus::Success as u32
+        }
+        Err(error) => finish_initialize_error(error),
     }
+}
+
+#[cfg(debug_assertions)]
+fn finish_initialize_error(error: HookError) -> u32 {
+    let error_message = error.to_string();
+    let status = map_hook_error(error);
+    debug_log!(
+        "event=initialize_failed status={} error={}",
+        status as u32,
+        crate::debug_log::quoted(error_message)
+    );
+    status as u32
+}
+
+#[cfg(not(debug_assertions))]
+fn finish_initialize_error(error: HookError) -> u32 {
+    map_hook_error(error) as u32
 }
 
 fn initialize_from_manifest_path(config: HookConfig) -> Result<(), HookError> {
@@ -246,9 +280,29 @@ where
     }
 
     let manifest = load_manifest(&config.manifest_path).map_err(HookError::Manifest)?;
+    debug_log!(
+        "event=manifest_loaded assignment_count={}",
+        manifest.assignments.len()
+    );
+
     let lut_pipeline = LutPipeline::load(&manifest)?;
+    debug_log!(
+        "event=lut_pipeline_prepared lut_count={}",
+        lut_pipeline.summary().lut_count
+    );
+
     let profile = HookProfile::for_build(config.profile);
+
     let resolution = resolver(&profile)?;
+    debug_log!(
+        "event=signatures_resolved module={} module_base=0x{:x} module_size=0x{:x} target_count={} skipped_count={}",
+        crate::debug_log::quoted(resolution.module.module_name),
+        resolution.module.base_address,
+        resolution.module.size,
+        resolution.targets.len(),
+        resolution.skipped_signatures.len()
+    );
+
     finalize_initial_state(config, manifest, profile, resolution, lut_pipeline)
 }
 
@@ -270,6 +324,11 @@ fn finalize_initial_state(
     let assignment_count = manifest.assignments.len();
     let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
     let (minhook, registered_hooks) = register_plan(&registration_plan)?;
+    debug_log!(
+        "event=hooks_registered hook_count={}",
+        registered_hooks.len()
+    );
+
     let overlay_test_mode_address = resolution
         .targets
         .iter()

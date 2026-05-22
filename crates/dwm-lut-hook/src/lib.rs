@@ -1,4 +1,6 @@
 mod blue_noise;
+#[macro_use]
+mod debug_log;
 mod bootstrap;
 mod d3d11_renderer;
 mod lut_bypass;
