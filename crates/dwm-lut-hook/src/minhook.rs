@@ -1013,23 +1013,63 @@ unsafe extern "system" fn present_detour_impl(
         return 0;
     }
 
+    let mut original_rect_vec = rect_vec;
+    let mut present_rect_storage = [DirtyRect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    }];
+    let mut present_rect_vec_storage = RectVec {
+        start: ptr::null(),
+        end: ptr::null(),
+        capacity_end: ptr::null(),
+    };
     match unsafe { collect_present_inputs(this, overlay_swap_chain, rect_vec) } {
         Ok(PresentInputCollection::MissingFormat(inputs)) => {
-            let lut_applied =
+            let _ = state::prepare_present_lut_context(
+                this,
+                inputs.clip_box,
+                crate::DXGI_FORMAT_B8G8R8A8_UNORM,
+                &inputs.dirty_rects,
+            );
+            let render_result =
                 state::render_present_lut(overlay_swap_chain, inputs.clip_box, &inputs.dirty_rects);
+            if let Some(rect) = render_result.present_dirty_rect {
+                original_rect_vec = full_present_rect_vec(
+                    rect,
+                    &mut present_rect_storage,
+                    &mut present_rect_vec_storage,
+                );
+            }
             let _ = state::evaluate_present_hook(
                 this,
                 inputs.clip_box,
                 crate::DXGI_FORMAT_B8G8R8A8_UNORM,
                 &inputs.dirty_rects,
-                lut_applied,
+                render_result.lut_applied,
             );
         }
         Ok(PresentInputCollection::HardwareProtected) | Err(_) => deactivate_present_context(this),
     }
 
     let original: PresentOriginal = unsafe { std::mem::transmute(original) };
-    unsafe { original(this, overlay_swap_chain, a3, rect_vec, a5, a6, a7) }
+    unsafe { original(this, overlay_swap_chain, a3, original_rect_vec, a5, a6, a7) }
+}
+
+fn full_present_rect_vec(
+    rect: DirtyRect,
+    rect_storage: &mut [DirtyRect; 1],
+    rect_vec_storage: &mut RectVec,
+) -> usize {
+    rect_storage[0] = rect;
+    let start = rect_storage.as_ptr();
+    *rect_vec_storage = RectVec {
+        start,
+        end: unsafe { start.add(1) },
+        capacity_end: unsafe { start.add(1) },
+    };
+    (rect_vec_storage as *const RectVec) as usize
 }
 
 unsafe extern "system" fn direct_flip_detour(
@@ -1137,15 +1177,33 @@ mod tests {
         1
     }
 
+    static LAST_ORIGINAL_PRESENT_RECTS: Mutex<Option<Vec<DirtyRect>>> = Mutex::new(None);
+
+    fn last_original_present_rects() -> Option<Vec<DirtyRect>> {
+        LAST_ORIGINAL_PRESENT_RECTS
+            .lock()
+            .ok()
+            .and_then(|rects| rects.clone())
+    }
+
+    fn reset_last_original_present_rects() {
+        if let Ok(mut rects) = LAST_ORIGINAL_PRESENT_RECTS.lock() {
+            *rects = None;
+        }
+    }
+
     unsafe extern "system" fn returns_present_status(
         _a0: usize,
         _a1: usize,
         _a2: u32,
-        _a3: usize,
+        a3: usize,
         _a4: i32,
         _a5: usize,
         _a6: u8,
     ) -> i64 {
+        if let Ok(mut rects) = LAST_ORIGINAL_PRESENT_RECTS.lock() {
+            *rects = unsafe { super::read_dirty_rects(a3) }.ok();
+        }
         0x55
     }
 
@@ -1856,6 +1914,7 @@ mod tests {
     #[test]
     fn present_detour_keeps_context_active_when_render_succeeds() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        reset_last_original_present_rects();
         let (manifest_path, cube_path) = initialize_test_state();
         let fake = FakePresentObjects::new(
             ClipBox {
@@ -1898,6 +1957,10 @@ mod tests {
         let render_call = crate::d3d11_renderer::test_render_present_lut_call()
             .expect("renderer should be called with collected present inputs");
         assert_eq!(
+            crate::d3d11_renderer::test_render_context_active(),
+            Some(true)
+        );
+        assert_eq!(
             render_call.overlay_swap_chain,
             fake.overlay_swap_chain_address()
         );
@@ -1912,8 +1975,65 @@ mod tests {
     }
 
     #[test]
-    fn present_detour_clears_context_when_format_is_unavailable() {
+    fn present_detour_expands_original_present_dirty_rect_for_full_redraw() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        reset_last_original_present_rects();
+        let (manifest_path, cube_path) = initialize_test_state();
+        let fake = FakePresentObjects::new(
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            vec![DirtyRect {
+                left: 10,
+                top: 20,
+                right: 64,
+                bottom: 96,
+            }],
+            false,
+        );
+        let full_rect = DirtyRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        crate::d3d11_renderer::set_test_render_present_lut_result_with_present_rect(
+            true,
+            Some(full_rect),
+        );
+        super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+
+        assert_eq!(
+            unsafe {
+                super::present_detour(
+                    fake.context_address(),
+                    fake.overlay_swap_chain_address(),
+                    0,
+                    fake.rect_vec_address(),
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0x55
+        );
+
+        assert_eq!(last_original_present_rects(), Some(vec![full_rect]));
+        let render_call = crate::d3d11_renderer::test_render_present_lut_call()
+            .expect("renderer should still receive original present inputs");
+        assert_eq!(render_call.dirty_rects, fake.dirty_rects);
+
+        let _ = fs::remove_file(manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn present_detour_keeps_context_active_when_render_misses_a_frame() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        reset_last_original_present_rects();
         let (manifest_path, cube_path) = initialize_test_state();
         let fake = FakePresentObjects::new(
             ClipBox {
@@ -1947,11 +2067,11 @@ mod tests {
             },
             0x55
         );
-        assert!(
-            state::lut_bypass_runtime()
-                .and_then(|runtime| runtime.context(fake.context_address()).cloned())
-                .is_none()
-        );
+        let context = state::lut_bypass_runtime()
+            .and_then(|runtime| runtime.context(fake.context_address()).cloned())
+            .expect("present plan should keep the context active across a missed render");
+        assert_eq!(context.lut_index, Some(0));
+        assert_eq!(context.dirty_rect_count, 1);
 
         let _ = fs::remove_file(manifest_path);
         let _ = fs::remove_file(cube_path);

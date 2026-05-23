@@ -78,11 +78,11 @@ impl LutBypassRuntime {
         clip_box: ClipBox,
         dxgi_format: u32,
         dirty_rects: &[DirtyRect],
-        lut_applied: bool,
+        _lut_applied: bool,
     ) -> PresentHookOutcome {
         let plan = lut_pipeline.build_present_plan(clip_box, dxgi_format, dirty_rects);
         let back_buffer_format = BackBufferFormat::from_dxgi_format(dxgi_format);
-        let promotion_blocked = plan.is_some() && lut_applied;
+        let promotion_blocked = plan.is_some();
         let lut_index = plan.as_ref().map(|plan| plan.lut_index);
 
         if promotion_blocked {
@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_without_success_does_not_activate_bypass_state() {
+    fn plan_keeps_bypass_state_even_when_render_misses_a_frame() {
         let (pipeline, cube_path) = pipeline_for_single_sdr_monitor();
         let mut runtime = LutBypassRuntime::new(true, None);
 
@@ -396,14 +396,14 @@ mod tests {
         );
 
         assert!(outcome.plan.is_some());
-        assert!(!outcome.promotion_blocked);
-        assert!(runtime.context(0x1234).is_none());
-        assert!(runtime.overlays_enabled(0x1234, true));
-        assert!(runtime.direct_flip_compatible(0x1234, true));
+        assert!(outcome.promotion_blocked);
+        assert!(runtime.context(0x1234).is_some());
+        assert!(!runtime.overlays_enabled(0x1234, true));
+        assert!(!runtime.direct_flip_compatible(0x1234, true));
         assert!(!runtime.window_context_direct_flip_compatible(true));
         assert!(!runtime.comp_swap_chain_direct_flip_compatible(true));
         assert!(!runtime.comp_visual_candidate_for_promotion(true));
-        assert_eq!(runtime.overlay_test_mode(0), 0);
+        assert_eq!(runtime.overlay_test_mode(0), 5);
 
         let _ = fs::remove_file(cube_path);
     }

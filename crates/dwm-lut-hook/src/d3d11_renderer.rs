@@ -44,6 +44,37 @@ struct GpuDrawPlan {
     dirty_rects: Vec<DirtyRect>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RenderPresentLutResult {
+    pub lut_applied: bool,
+    pub present_dirty_rect: Option<DirtyRect>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DrawState {
+    format: BackBufferFormat,
+    lut_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenderTargetState {
+    Bootstrapping,
+    Stable(DrawState),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RenderTargetKey {
+    overlay_swap_chain: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ResourceKey {
+    device: usize,
+    overlay_swap_chain: usize,
+    width: u32,
+    height: u32,
+}
+
 fn prepare_gpu_draw_plan(
     pipeline: &LutPipeline,
     clip_box: ClipBox,
@@ -57,7 +88,7 @@ fn prepare_gpu_draw_plan(
     }
 
     let plan = pipeline.build_present_plan(clip_box, dxgi_format, dirty_rects)?;
-    let dirty_rects = draw_rects_for_frame(&plan.dirty_rects, width, height);
+    let dirty_rects = draw_rects_for_frame(&plan.dirty_rects, width, height, false);
     (!dirty_rects.is_empty()).then_some(GpuDrawPlan {
         format: plan.format,
         lut_index: plan.lut_index,
@@ -73,9 +104,14 @@ const fn dxgi_format_for_copy_texture(format: BackBufferFormat) -> u32 {
     }
 }
 
-fn draw_rects_for_frame(dirty_rects: &[DirtyRect], width: u32, height: u32) -> Vec<DirtyRect> {
+fn draw_rects_for_frame(
+    dirty_rects: &[DirtyRect],
+    width: u32,
+    height: u32,
+    force_full_frame: bool,
+) -> Vec<DirtyRect> {
     let full_rect;
-    let rects = if dirty_rects.is_empty() {
+    let rects = if force_full_frame || dirty_rects.is_empty() {
         full_rect = [DirtyRect {
             left: 0,
             top: 0,
@@ -165,8 +201,28 @@ fn clamp_rect(rect: DirtyRect, width: u32, height: u32) -> Option<DirtyRect> {
     })
 }
 
+fn requires_full_redraw(
+    previous: RenderTargetState,
+    current: DrawState,
+    resources_recreated: bool,
+    copy_texture_created: bool,
+) -> bool {
+    match previous {
+        RenderTargetState::Bootstrapping => true,
+        RenderTargetState::Stable(previous) => {
+            resources_recreated || copy_texture_created || previous != current
+        }
+    }
+}
+
 #[cfg(test)]
 static TEST_RENDER_PRESENT_LUT_RESULT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static TEST_RENDER_PRESENT_DIRTY_RECT: OnceLock<Mutex<Option<DirtyRect>>> = OnceLock::new();
+
+#[cfg(test)]
+static TEST_RENDER_CONTEXT_ACTIVE: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
 
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,6 +240,24 @@ static TEST_RENDER_PRESENT_LUT_CALL: OnceLock<Mutex<Option<TestRenderPresentLutC
 #[cfg(test)]
 pub(crate) fn set_test_render_present_lut_result(result: bool) {
     TEST_RENDER_PRESENT_LUT_RESULT.store(result, Ordering::Release);
+    set_test_render_present_dirty_rect(None);
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_render_present_lut_result_with_present_rect(
+    result: bool,
+    rect: Option<DirtyRect>,
+) {
+    TEST_RENDER_PRESENT_LUT_RESULT.store(result, Ordering::Release);
+    set_test_render_present_dirty_rect(rect);
+}
+
+#[cfg(test)]
+fn set_test_render_present_dirty_rect(rect: Option<DirtyRect>) {
+    let result = TEST_RENDER_PRESENT_DIRTY_RECT.get_or_init(|| Mutex::new(None));
+    if let Ok(mut result) = result.lock() {
+        *result = rect;
+    }
 }
 
 #[cfg(test)]
@@ -192,6 +266,11 @@ pub(crate) fn reset_test_render_present_lut_result() {
     let calls = TEST_RENDER_PRESENT_LUT_CALL.get_or_init(|| Mutex::new(None));
     if let Ok(mut calls) = calls.lock() {
         *calls = None;
+    }
+    set_test_render_present_dirty_rect(None);
+    let context_active = TEST_RENDER_CONTEXT_ACTIVE.get_or_init(|| Mutex::new(None));
+    if let Ok(mut context_active) = context_active.lock() {
+        *context_active = None;
     }
 }
 
@@ -205,13 +284,22 @@ pub(crate) fn test_render_present_lut_call() -> Option<TestRenderPresentLutCall>
 }
 
 #[cfg(test)]
+pub(crate) fn test_render_context_active() -> Option<bool> {
+    TEST_RENDER_CONTEXT_ACTIVE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|active| *active)
+}
+
+#[cfg(test)]
 pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
     swap_chain_path: crate::profile::SwapChainPathHypothesis,
     clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
     _pipeline: &LutPipeline,
-) -> bool {
+) -> RenderPresentLutResult {
     let calls = TEST_RENDER_PRESENT_LUT_CALL.get_or_init(|| Mutex::new(None));
     if let Ok(mut calls) = calls.lock() {
         *calls = Some(TestRenderPresentLutCall {
@@ -221,7 +309,21 @@ pub(crate) unsafe fn render_present_lut(
             dirty_rects: dirty_rects.to_vec(),
         });
     }
-    TEST_RENDER_PRESENT_LUT_RESULT.load(Ordering::Acquire)
+    let context_active = TEST_RENDER_CONTEXT_ACTIVE.get_or_init(|| Mutex::new(None));
+    if let Ok(mut context_active) = context_active.lock() {
+        *context_active = Some(
+            crate::state::lut_bypass_runtime().is_some_and(|runtime| runtime.has_active_contexts()),
+        );
+    }
+    let present_dirty_rect = TEST_RENDER_PRESENT_DIRTY_RECT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|rect| *rect);
+    RenderPresentLutResult {
+        lut_applied: TEST_RENDER_PRESENT_LUT_RESULT.load(Ordering::Acquire),
+        present_dirty_rect,
+    }
 }
 
 #[cfg(test)]
@@ -451,6 +553,114 @@ mod tests {
                 bottom: 1080,
             }]
         );
+    }
+
+    #[test]
+    fn draw_rects_can_force_full_frame_despite_dirty_rects() {
+        let rects = draw_rects_for_frame(
+            &[DirtyRect {
+                left: 10,
+                top: 20,
+                right: 30,
+                bottom: 40,
+            }],
+            1920,
+            1080,
+            true,
+        );
+
+        assert_eq!(
+            rects,
+            vec![DirtyRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            }]
+        );
+    }
+
+    #[test]
+    fn full_redraw_is_required_until_draw_state_is_stable() {
+        let sdr = DrawState {
+            format: BackBufferFormat::Bgra8Unorm,
+            lut_index: 0,
+        };
+        let hdr = DrawState {
+            format: BackBufferFormat::Rgba16Float,
+            lut_index: 0,
+        };
+        let second_lut = DrawState {
+            format: BackBufferFormat::Bgra8Unorm,
+            lut_index: 1,
+        };
+
+        assert!(requires_full_redraw(
+            RenderTargetState::Bootstrapping,
+            sdr,
+            false,
+            false
+        ));
+        assert!(requires_full_redraw(
+            RenderTargetState::Stable(sdr),
+            sdr,
+            true,
+            false
+        ));
+        assert!(requires_full_redraw(
+            RenderTargetState::Stable(sdr),
+            sdr,
+            false,
+            true
+        ));
+        assert!(requires_full_redraw(
+            RenderTargetState::Stable(sdr),
+            hdr,
+            false,
+            false
+        ));
+        assert!(requires_full_redraw(
+            RenderTargetState::Stable(sdr),
+            second_lut,
+            false,
+            false
+        ));
+        assert!(!requires_full_redraw(
+            RenderTargetState::Stable(sdr),
+            sdr,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn render_target_key_is_stable_for_one_overlay_swap_chain() {
+        let first = RenderTargetKey {
+            overlay_swap_chain: 0x1000,
+        };
+        let second = RenderTargetKey {
+            overlay_swap_chain: 0x1000,
+        };
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn resource_key_distinguishes_overlay_swap_chain_sizes_on_one_device() {
+        let first = ResourceKey {
+            device: 0x1000,
+            overlay_swap_chain: 0x2000,
+            width: 1920,
+            height: 1080,
+        };
+        let second = ResourceKey {
+            device: 0x1000,
+            overlay_swap_chain: 0x3000,
+            width: 1280,
+            height: 720,
+        };
+
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -708,7 +918,7 @@ mod imp {
 
     struct D3D11Renderer {
         compiler: Option<D3DCompiler>,
-        devices: BTreeMap<usize, DeviceResources>,
+        devices: BTreeMap<super::ResourceKey, DeviceResources>,
     }
 
     unsafe impl Send for D3D11Renderer {}
@@ -737,11 +947,11 @@ mod imp {
             clip_box: ClipBox,
             dirty_rects: &[DirtyRect],
             pipeline: &LutPipeline,
-        ) -> bool {
+        ) -> super::RenderPresentLutResult {
             let Some(back_buffer) =
                 (unsafe { overlay_swap_chain_to_back_buffer(overlay_swap_chain, swap_chain_path) })
             else {
-                return false;
+                return super::RenderPresentLutResult::default();
             };
 
             let mut device: ComPtr = ptr::null_mut();
@@ -750,7 +960,7 @@ mod imp {
             }
             if device.is_null() {
                 unsafe { release(back_buffer) };
-                return false;
+                return super::RenderPresentLutResult::default();
             }
 
             let mut context: ComPtr = ptr::null_mut();
@@ -762,7 +972,7 @@ mod imp {
                     release(device);
                     release(back_buffer);
                 }
-                return false;
+                return super::RenderPresentLutResult::default();
             }
 
             let mut desc = Texture2DDesc {
@@ -795,7 +1005,7 @@ mod imp {
                     release(context);
                     release(device);
                 }
-                return false;
+                return super::RenderPresentLutResult::default();
             };
 
             let frame = RenderFrame {
@@ -805,7 +1015,8 @@ mod imp {
                 width: desc.width,
                 height: desc.height,
             };
-            let result = unsafe { self.render_with_device(frame, pipeline, draw_plan) };
+            let result =
+                unsafe { self.render_with_device(overlay_swap_chain, frame, pipeline, draw_plan) };
 
             unsafe {
                 release(back_buffer);
@@ -817,23 +1028,29 @@ mod imp {
 
         unsafe fn render_with_device(
             &mut self,
+            overlay_swap_chain: usize,
             frame: RenderFrame,
             pipeline: &LutPipeline,
-            draw_plan: super::GpuDrawPlan,
-        ) -> bool {
-            let key = frame.device as usize;
+            mut draw_plan: super::GpuDrawPlan,
+        ) -> super::RenderPresentLutResult {
+            let device_key = frame.device as usize;
+            let resource_key = super::ResourceKey {
+                device: device_key,
+                overlay_swap_chain,
+                width: frame.width,
+                height: frame.height,
+            };
             let compile = match self.compiler() {
                 Some(compiler) => compiler.compile,
-                None => return false,
+                None => return super::RenderPresentLutResult::default(),
             };
 
-            let recreate = self.devices.get(&key).is_none_or(|resources| {
-                resources.width != frame.width
-                    || resources.height != frame.height
-                    || resources.lut_count != pipeline.luts.len()
-            });
+            let recreate = self
+                .devices
+                .get(&resource_key)
+                .is_none_or(|resources| resources.lut_count != pipeline.luts.len());
             if recreate {
-                self.devices.remove(&key);
+                self.devices.remove(&resource_key);
                 let Some(resources) = (unsafe {
                     DeviceResources::create(
                         frame.device,
@@ -844,18 +1061,78 @@ mod imp {
                         compile,
                     )
                 }) else {
-                    return false;
+                    return super::RenderPresentLutResult::default();
                 };
-                self.devices.insert(key, resources);
+                self.devices.insert(resource_key, resources);
             }
 
-            let Some(resources) = self.devices.get_mut(&key) else {
-                return false;
+            let Some(resources) = self.devices.get_mut(&resource_key) else {
+                return super::RenderPresentLutResult::default();
             };
             if draw_plan.lut_index >= resources.lut_srvs.len() {
-                return false;
+                return super::RenderPresentLutResult::default();
             }
-            unsafe { resources.draw(frame, &draw_plan) }
+
+            let current_draw_state = super::DrawState {
+                format: draw_plan.format,
+                lut_index: draw_plan.lut_index,
+            };
+            let render_target_key = super::RenderTargetKey { overlay_swap_chain };
+            let previous_state = resources
+                .draw_states
+                .get(&render_target_key)
+                .copied()
+                .unwrap_or(super::RenderTargetState::Bootstrapping);
+            let copy_texture_created = !resources.copy_textures.has_format(draw_plan.format);
+            let needs_full_redraw = super::requires_full_redraw(
+                previous_state,
+                current_draw_state,
+                recreate,
+                copy_texture_created,
+            );
+            if needs_full_redraw {
+                debug_log!(
+                    "event=lut_full_redraw device=0x{:x} overlay_swap_chain=0x{:x} back_buffer=0x{:x} width={} height={} format={:?} lut_index={} resources_recreated={} copy_texture_created={} previous_state={:?} dirty_rect_count={}",
+                    device_key,
+                    overlay_swap_chain,
+                    frame.back_buffer as usize,
+                    frame.width,
+                    frame.height,
+                    draw_plan.format,
+                    draw_plan.lut_index,
+                    recreate,
+                    copy_texture_created,
+                    previous_state,
+                    draw_plan.dirty_rects.len()
+                );
+                draw_plan.dirty_rects = super::draw_rects_for_frame(
+                    &draw_plan.dirty_rects,
+                    frame.width,
+                    frame.height,
+                    true,
+                );
+            }
+            if draw_plan.dirty_rects.is_empty() {
+                return super::RenderPresentLutResult::default();
+            }
+            let present_dirty_rect = needs_full_redraw.then_some(DirtyRect {
+                left: 0,
+                top: 0,
+                right: frame.width as i32,
+                bottom: frame.height as i32,
+            });
+
+            let result = unsafe { resources.draw(frame, &draw_plan) };
+            if result {
+                resources.draw_states.insert(
+                    render_target_key,
+                    super::RenderTargetState::Stable(current_draw_state),
+                );
+            }
+            super::RenderPresentLutResult {
+                lut_applied: result,
+                present_dirty_rect: result.then_some(present_dirty_rect).flatten(),
+            }
         }
 
         fn compiler(&mut self) -> Option<&D3DCompiler> {
@@ -879,6 +1156,7 @@ mod imp {
         copy_textures: CopyTextureResources,
         lut_textures: Vec<ComPtr>,
         lut_srvs: Vec<ComPtr>,
+        draw_states: BTreeMap<super::RenderTargetKey, super::RenderTargetState>,
     }
 
     unsafe impl Send for DeviceResources {}
@@ -897,6 +1175,13 @@ mod imp {
     unsafe impl Send for CopyTextureResources {}
 
     impl CopyTextureResources {
+        fn has_format(&self, format: BackBufferFormat) -> bool {
+            match format {
+                BackBufferFormat::Bgra8Unorm => self.sdr.is_some(),
+                BackBufferFormat::Rgba16Float => self.hdr.is_some(),
+            }
+        }
+
         unsafe fn for_format(
             &mut self,
             device: ComPtr,
@@ -996,6 +1281,7 @@ mod imp {
                 copy_textures: CopyTextureResources::default(),
                 lut_textures: lut_textures.into_iter().map(OwnedCom::into_raw).collect(),
                 lut_srvs: lut_srvs.into_iter().map(OwnedCom::into_raw).collect(),
+                draw_states: BTreeMap::new(),
             })
         }
 
@@ -1105,10 +1391,10 @@ mod imp {
         clip_box: ClipBox,
         dirty_rects: &[DirtyRect],
         pipeline: &LutPipeline,
-    ) -> bool {
+    ) -> super::RenderPresentLutResult {
         let renderer = RENDERER.get_or_init(|| Mutex::new(D3D11Renderer::new()));
         let Ok(mut renderer) = renderer.lock() else {
-            return false;
+            return super::RenderPresentLutResult::default();
         };
         unsafe {
             renderer.render_present_lut(

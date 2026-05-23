@@ -3,6 +3,7 @@ mod blue_noise;
 mod debug_log;
 mod bootstrap;
 mod d3d11_renderer;
+mod desktop_redraw;
 mod lut_bypass;
 mod lut_pipeline;
 mod minhook;
@@ -465,6 +466,7 @@ mod tests {
             lut_bypass_runtime().map(|runtime| runtime.contexts.len()),
             Some(0)
         );
+        assert_eq!(super::desktop_redraw::request_count_for_tests(), 1);
 
         let wide_path: Vec<u16> = expected_manifest_path
             .as_os_str()
@@ -603,8 +605,8 @@ mod tests {
         };
 
         assert_ne!(flags & PRESENT_FLAG_HAS_PLAN, 0);
-        assert_eq!(flags & PRESENT_FLAG_PROMOTION_BLOCKED, 0);
-        assert_eq!(dwm_lut_overlays_enabled(0x1234, 1), 1);
+        assert_ne!(flags & PRESENT_FLAG_PROMOTION_BLOCKED, 0);
+        assert_eq!(dwm_lut_overlays_enabled(0x1234, 1), 0);
 
         let _ = fs::remove_file(expected_manifest_path);
         let _ = fs::remove_file(cube_path);

@@ -224,12 +224,12 @@ pub(crate) fn render_present_lut(
     overlay_swap_chain: usize,
     clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
-) -> bool {
+) -> crate::d3d11_renderer::RenderPresentLutResult {
     let Some((lut_pipeline, swap_chain_path)) = with_state(|state| {
         let LutPipelineState::Ready(lut_pipeline) = &state.runtime.lut_pipeline;
         (lut_pipeline.clone(), state.profile.hypotheses.swap_chain)
     }) else {
-        return false;
+        return crate::d3d11_renderer::RenderPresentLutResult::default();
     };
 
     unsafe {
@@ -241,6 +241,15 @@ pub(crate) fn render_present_lut(
             &lut_pipeline,
         )
     }
+}
+
+pub(crate) fn prepare_present_lut_context(
+    context_address: usize,
+    clip_box: ClipBox,
+    dxgi_format: u32,
+    dirty_rects: &[DirtyRect],
+) -> Option<PresentHookOutcome> {
+    evaluate_present_hook(context_address, clip_box, dxgi_format, dirty_rects, false)
 }
 
 pub fn evaluate_overlays_enabled(context_address: usize, original_enabled: bool) -> Option<bool> {
@@ -342,6 +351,7 @@ pub(crate) fn reset_state_for_tests() {
     });
     crate::bootstrap::reset_initialization_guard_for_tests();
     crate::d3d11_renderer::reset_test_render_present_lut_result();
+    crate::desktop_redraw::reset_for_tests();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
     crate::minhook::reset_test_original_slots();
 }

@@ -254,7 +254,9 @@ fn install_prepared_state(state: HookState) -> Result<(), HookError> {
     install_state(state).map_err(|state| {
         rollback_registered_state_hooks(&state);
         HookError::AlreadyInitialized
-    })
+    })?;
+    crate::desktop_redraw::request_desktop_redraw();
+    Ok(())
 }
 
 fn rollback_registered_state_hooks(state: &HookState) {
