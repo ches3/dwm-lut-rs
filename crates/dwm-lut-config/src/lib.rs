@@ -826,4 +826,42 @@ DOMAIN_MAX 1.0 1.0 1.0
             other => panic!("unexpected error: {other}"),
         }
     }
+
+    #[test]
+    fn load_manifest_accepts_same_monitor_bounds_for_sdr_and_hdr() {
+        let manifest = load_manifest_str(
+            Path::new(r"C:\work\profiles"),
+            r#"
+{
+  "assignments": [
+    {
+      "monitor_id": "DISPLAY1-SDR",
+      "desktop_left": 0,
+      "desktop_top": 0,
+      "desktop_right": 2560,
+      "desktop_bottom": 1440,
+      "color_mode": "sdr",
+      "lut_path": "panel-sdr.cube",
+      "lut_size": 33
+    },
+    {
+      "monitor_id": "DISPLAY1-HDR",
+      "desktop_left": 0,
+      "desktop_top": 0,
+      "desktop_right": 2560,
+      "desktop_bottom": 1440,
+      "color_mode": "hdr",
+      "lut_path": "panel-hdr.cube",
+      "lut_size": 33
+    }
+  ]
+}
+"#,
+        )
+        .expect("SDR and HDR assignments may share monitor bounds");
+
+        assert_eq!(manifest.assignments.len(), 2);
+        assert_eq!(manifest.assignments[0].target.color_mode, ColorMode::Sdr);
+        assert_eq!(manifest.assignments[1].target.color_mode, ColorMode::Hdr);
+    }
 }

@@ -47,6 +47,7 @@ struct GpuDrawPlan {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RenderPresentLutResult {
     pub lut_applied: bool,
+    pub dxgi_format: Option<u32>,
     pub present_dirty_rect: Option<DirtyRect>,
 }
 
@@ -222,6 +223,9 @@ static TEST_RENDER_PRESENT_LUT_RESULT: AtomicBool = AtomicBool::new(false);
 static TEST_RENDER_PRESENT_DIRTY_RECT: OnceLock<Mutex<Option<DirtyRect>>> = OnceLock::new();
 
 #[cfg(test)]
+static TEST_RENDER_PRESENT_DXGI_FORMAT: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
+
+#[cfg(test)]
 static TEST_RENDER_CONTEXT_ACTIVE: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
 
 #[cfg(test)]
@@ -241,6 +245,7 @@ static TEST_RENDER_PRESENT_LUT_CALL: OnceLock<Mutex<Option<TestRenderPresentLutC
 pub(crate) fn set_test_render_present_lut_result(result: bool) {
     TEST_RENDER_PRESENT_LUT_RESULT.store(result, Ordering::Release);
     set_test_render_present_dirty_rect(None);
+    set_test_render_present_dxgi_format(None);
 }
 
 #[cfg(test)]
@@ -250,6 +255,7 @@ pub(crate) fn set_test_render_present_lut_result_with_present_rect(
 ) {
     TEST_RENDER_PRESENT_LUT_RESULT.store(result, Ordering::Release);
     set_test_render_present_dirty_rect(rect);
+    set_test_render_present_dxgi_format(None);
 }
 
 #[cfg(test)]
@@ -261,6 +267,14 @@ fn set_test_render_present_dirty_rect(rect: Option<DirtyRect>) {
 }
 
 #[cfg(test)]
+pub(crate) fn set_test_render_present_dxgi_format(format: Option<u32>) {
+    let result = TEST_RENDER_PRESENT_DXGI_FORMAT.get_or_init(|| Mutex::new(None));
+    if let Ok(mut result) = result.lock() {
+        *result = format;
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn reset_test_render_present_lut_result() {
     set_test_render_present_lut_result(false);
     let calls = TEST_RENDER_PRESENT_LUT_CALL.get_or_init(|| Mutex::new(None));
@@ -268,6 +282,7 @@ pub(crate) fn reset_test_render_present_lut_result() {
         *calls = None;
     }
     set_test_render_present_dirty_rect(None);
+    set_test_render_present_dxgi_format(None);
     let context_active = TEST_RENDER_CONTEXT_ACTIVE.get_or_init(|| Mutex::new(None));
     if let Ok(mut context_active) = context_active.lock() {
         *context_active = None;
@@ -320,8 +335,14 @@ pub(crate) unsafe fn render_present_lut(
         .lock()
         .ok()
         .and_then(|rect| *rect);
+    let dxgi_format = TEST_RENDER_PRESENT_DXGI_FORMAT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|format| *format);
     RenderPresentLutResult {
         lut_applied: TEST_RENDER_PRESENT_LUT_RESULT.load(Ordering::Acquire),
+        dxgi_format,
         present_dirty_rect,
     }
 }
@@ -727,6 +748,117 @@ mod tests {
     }
 
     #[test]
+    fn gpu_draw_plan_selects_lut_by_monitor_bounds_and_format() {
+        fn loaded_lut(
+            monitor_id: &str,
+            bounds: (i32, i32, i32, i32),
+            color_mode: ColorMode,
+        ) -> LoadedLut {
+            LoadedLut {
+                assignment: LutAssignment {
+                    target: MonitorTarget {
+                        monitor_id: monitor_id.into(),
+                        desktop_left: bounds.0,
+                        desktop_top: bounds.1,
+                        desktop_right: Some(bounds.2),
+                        desktop_bottom: Some(bounds.3),
+                        color_mode,
+                    },
+                    lut_path: format!("{monitor_id}-{color_mode:?}.cube").into(),
+                    lut_size: 2,
+                },
+                metadata: LutMetadata {
+                    size: 2,
+                    domain_min: [0.0, 0.0, 0.0],
+                    domain_max: [1.0, 1.0, 1.0],
+                },
+                texture: ShaderTexture3D {
+                    width: 2,
+                    height: 2,
+                    depth: 2,
+                    texels: vec![[0.0, 0.0, 0.0, 1.0]; 8],
+                },
+            }
+        }
+
+        let pipeline = LutPipeline {
+            luts: vec![
+                loaded_lut("LEFT", (-1920, 0, 0, 1080), ColorMode::Sdr),
+                loaded_lut("PRIMARY", (0, 0, 2560, 1440), ColorMode::Sdr),
+                loaded_lut("TOP", (0, -1200, 1920, 0), ColorMode::Sdr),
+                loaded_lut("PRIMARY", (0, 0, 2560, 1440), ColorMode::Hdr),
+            ],
+            shader: LutShaderProgram::embedded(),
+        };
+
+        let left_plan = prepare_gpu_draw_plan(
+            &pipeline,
+            ClipBox {
+                left: -100,
+                top: 50,
+                right: -100,
+                bottom: 50,
+            },
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            1920,
+            1080,
+            &[],
+        )
+        .expect("left monitor should match");
+        assert_eq!(left_plan.lut_index, 0);
+
+        let top_plan = prepare_gpu_draw_plan(
+            &pipeline,
+            ClipBox {
+                left: 100,
+                top: -10,
+                right: 100,
+                bottom: -10,
+            },
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            1920,
+            1200,
+            &[],
+        )
+        .expect("top monitor should match");
+        assert_eq!(top_plan.lut_index, 2);
+
+        let hdr_plan = prepare_gpu_draw_plan(
+            &pipeline,
+            ClipBox {
+                left: 100,
+                top: 50,
+                right: 100,
+                bottom: 50,
+            },
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            2560,
+            1440,
+            &[],
+        )
+        .expect("HDR format should choose HDR assignment at the same bounds");
+        assert_eq!(hdr_plan.lut_index, 3);
+        assert_eq!(hdr_plan.constants.hdr, 1);
+
+        assert!(
+            prepare_gpu_draw_plan(
+                &pipeline,
+                ClipBox {
+                    left: 3000,
+                    top: 50,
+                    right: 3000,
+                    bottom: 50,
+                },
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                2560,
+                1440,
+                &[],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn draw_lifecycle_restores_context_state_after_draw_work() {
         let events = RefCell::new(Vec::new());
 
@@ -1007,6 +1139,18 @@ mod imp {
                 }
                 return super::RenderPresentLutResult::default();
             };
+            debug_log!(
+                "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} clip_left={} clip_top={} dxgi_format={} width={} height={} lut_index={} dirty_rect_count={}",
+                overlay_swap_chain,
+                back_buffer as usize,
+                clip_box.left,
+                clip_box.top,
+                desc.format,
+                desc.width,
+                desc.height,
+                draw_plan.lut_index,
+                dirty_rects.len()
+            );
 
             let frame = RenderFrame {
                 device,
@@ -1131,6 +1275,7 @@ mod imp {
             }
             super::RenderPresentLutResult {
                 lut_applied: result,
+                dxgi_format: Some(super::dxgi_format_for_copy_texture(draw_plan.format)),
                 present_dirty_rect: result.then_some(present_dirty_rect).flatten(),
             }
         }

@@ -1045,7 +1045,9 @@ unsafe extern "system" fn present_detour_impl(
             let _ = state::evaluate_present_hook(
                 this,
                 inputs.clip_box,
-                crate::DXGI_FORMAT_B8G8R8A8_UNORM,
+                render_result
+                    .dxgi_format
+                    .unwrap_or(crate::DXGI_FORMAT_B8G8R8A8_UNORM),
                 &inputs.dirty_rects,
                 render_result.lut_applied,
             );
@@ -1145,7 +1147,8 @@ mod tests {
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state::{self, HookConfig, HookRegistrationPlan, HookRegistrationTarget};
     use crate::{
-        BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookProfile, SignatureLocator,
+        BackBufferFormat, BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect, HookProfile, SignatureLocator,
     };
 
     use super::{
@@ -1264,20 +1267,27 @@ mod tests {
     }
 
     fn write_test_manifest(cube_path: &Path) -> PathBuf {
+        let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
+        write_test_manifest_contents(format!(
+            "{{\n  \"assignments\": [\n    {{\n      \"monitor_id\": \"DISPLAY1\",\n      \"desktop_left\": 0,\n      \"desktop_top\": 0,\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
+        ))
+    }
+
+    fn write_test_manifest_contents(contents: String) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
             .as_nanos();
         let path = std::env::temp_dir().join(format!("dwm-lut-minhook-test-{unique}.json"));
-        let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
-        fs::write(
-            &path,
-            format!(
-                "{{\n  \"assignments\": [\n    {{\n      \"monitor_id\": \"DISPLAY1\",\n      \"desktop_left\": 0,\n      \"desktop_top\": 0,\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
-            ),
-        )
-        .expect("manifest file should be written");
+        fs::write(&path, contents).expect("manifest file should be written");
         path
+    }
+
+    fn write_test_manifest_with_sdr_hdr_assignments(cube_path: &Path) -> PathBuf {
+        let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
+        write_test_manifest_contents(format!(
+            "{{\n  \"assignments\": [\n    {{\n      \"monitor_id\": \"DISPLAY1-SDR\",\n      \"desktop_left\": 0,\n      \"desktop_top\": 0,\n      \"desktop_right\": 1920,\n      \"desktop_bottom\": 1080,\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }},\n    {{\n      \"monitor_id\": \"DISPLAY1-HDR\",\n      \"desktop_left\": 0,\n      \"desktop_top\": 0,\n      \"desktop_right\": 1920,\n      \"desktop_bottom\": 1080,\n      \"color_mode\": \"hdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
+        ))
     }
 
     fn synthetic_resolution(profile: &HookProfile) -> SignatureResolutionReport {
@@ -1321,6 +1331,11 @@ mod tests {
         state::reset_state_for_tests();
         let cube_path = test_cube_path();
         let manifest_path = write_test_manifest(&cube_path);
+        initialize_test_state_from_manifest(manifest_path.clone());
+        (manifest_path, cube_path)
+    }
+
+    fn initialize_test_state_from_manifest(manifest_path: PathBuf) {
         let config = HookConfig {
             manifest_path: manifest_path.clone(),
             profile: BuildProfile::Windows11_25H2,
@@ -1328,7 +1343,6 @@ mod tests {
         let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
         crate::bootstrap::initialize_with_resolution(config, resolution)
             .expect("initialization should succeed with synthetic resolution");
-        (manifest_path, cube_path)
     }
 
     fn activate_context(context_address: usize) {
@@ -1970,6 +1984,64 @@ mod tests {
         assert_eq!(render_call.clip_box.top, 0);
         assert_eq!(render_call.dirty_rects, fake.dirty_rects);
 
+        let _ = fs::remove_file(manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn present_detour_records_renderer_dxgi_format_for_bypass_state() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        reset_last_original_present_rects();
+        state::reset_state_for_tests();
+        let cube_path = test_cube_path();
+        let manifest_path = write_test_manifest_with_sdr_hdr_assignments(&cube_path);
+        initialize_test_state_from_manifest(manifest_path.clone());
+        let fake = FakePresentObjects::new(
+            ClipBox {
+                left: 120,
+                top: 80,
+                right: 120,
+                bottom: 80,
+            },
+            vec![DirtyRect {
+                left: 0,
+                top: 0,
+                right: 64,
+                bottom: 64,
+            }],
+            false,
+        );
+        crate::d3d11_renderer::set_test_render_present_lut_result(true);
+        crate::d3d11_renderer::set_test_render_present_dxgi_format(Some(
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+        ));
+        super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+
+        assert_eq!(
+            unsafe {
+                super::present_detour(
+                    fake.context_address(),
+                    fake.overlay_swap_chain_address(),
+                    0,
+                    fake.rect_vec_address(),
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0x55
+        );
+
+        let context = state::lut_bypass_runtime()
+            .and_then(|runtime| runtime.context(fake.context_address()).cloned())
+            .expect("HDR render plan should keep the context active");
+        assert_eq!(
+            context.back_buffer_format,
+            Some(BackBufferFormat::Rgba16Float)
+        );
+        assert_eq!(context.lut_index, Some(1));
+
+        crate::d3d11_renderer::reset_test_render_present_lut_result();
         let _ = fs::remove_file(manifest_path);
         let _ = fs::remove_file(cube_path);
     }
