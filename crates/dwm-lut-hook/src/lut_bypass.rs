@@ -81,6 +81,37 @@ impl LutBypassRuntime {
         _lut_applied: bool,
     ) -> PresentHookOutcome {
         let plan = lut_pipeline.build_present_plan(clip_box, dxgi_format, dirty_rects);
+        self.update_context(context_address, clip_box, dxgi_format, dirty_rects, plan)
+    }
+
+    pub fn update_present_with_lut_index(
+        &mut self,
+        lut_pipeline: &LutPipeline,
+        context_address: usize,
+        clip_box: ClipBox,
+        dxgi_format: u32,
+        dirty_rects: &[DirtyRect],
+        lut_index: Option<usize>,
+    ) -> PresentHookOutcome {
+        let plan = lut_index.and_then(|lut_index| {
+            lut_pipeline.build_present_plan_for_lut_index(
+                clip_box,
+                dxgi_format,
+                dirty_rects,
+                lut_index,
+            )
+        });
+        self.update_context(context_address, clip_box, dxgi_format, dirty_rects, plan)
+    }
+
+    fn update_context(
+        &mut self,
+        context_address: usize,
+        clip_box: ClipBox,
+        dxgi_format: u32,
+        dirty_rects: &[DirtyRect],
+        plan: Option<LutRenderPlan>,
+    ) -> PresentHookOutcome {
         let back_buffer_format = BackBufferFormat::from_dxgi_format(dxgi_format);
         let promotion_blocked = plan.is_some();
         let lut_index = plan.as_ref().map(|plan| plan.lut_index);

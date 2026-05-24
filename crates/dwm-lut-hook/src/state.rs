@@ -220,6 +220,40 @@ pub fn evaluate_present_hook(
     })
 }
 
+pub(crate) fn evaluate_rendered_present_hook(
+    context_address: usize,
+    clip_box: ClipBox,
+    dxgi_format: u32,
+    dirty_rects: &[DirtyRect],
+    render_result: crate::d3d11_renderer::RenderPresentLutResult,
+) -> Option<PresentHookOutcome> {
+    with_state_mut(|state| {
+        let runtime = &mut state.runtime;
+        let LutPipelineState::Ready(lut_pipeline) = &runtime.lut_pipeline;
+        let LutBypassState::Ready(lut_bypass) = &mut runtime.lut_bypass;
+
+        if render_result.lut_index.is_some() {
+            lut_bypass.update_present_with_lut_index(
+                lut_pipeline,
+                context_address,
+                clip_box,
+                dxgi_format,
+                dirty_rects,
+                render_result.lut_index,
+            )
+        } else {
+            lut_bypass.update_present(
+                lut_pipeline,
+                context_address,
+                clip_box,
+                dxgi_format,
+                dirty_rects,
+                render_result.lut_applied,
+            )
+        }
+    })
+}
+
 pub(crate) fn render_present_lut(
     overlay_swap_chain: usize,
     clip_box: ClipBox,

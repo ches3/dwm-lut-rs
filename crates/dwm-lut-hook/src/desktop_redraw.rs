@@ -1,5 +1,5 @@
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 #[cfg(not(test))]
 use std::ffi::c_void;
@@ -16,7 +16,9 @@ const RDW_ALLCHILDREN: u32 = 0x0080;
 const RDW_UPDATENOW: u32 = 0x0100;
 
 #[cfg(test)]
-static REQUEST_COUNT: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static REQUEST_COUNT: Cell<usize> = const { Cell::new(0) };
+}
 
 #[cfg(not(test))]
 #[link(name = "user32")]
@@ -28,7 +30,7 @@ unsafe extern "system" {
 pub(crate) fn request_desktop_redraw() {
     #[cfg(test)]
     {
-        REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+        REQUEST_COUNT.with(|count| count.set(count.get() + 1));
     }
 
     #[cfg(not(test))]
@@ -45,10 +47,10 @@ pub(crate) fn request_desktop_redraw() {
 
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
-    REQUEST_COUNT.store(0, Ordering::Relaxed);
+    REQUEST_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn request_count_for_tests() -> usize {
-    REQUEST_COUNT.load(Ordering::Relaxed)
+    REQUEST_COUNT.with(Cell::get)
 }

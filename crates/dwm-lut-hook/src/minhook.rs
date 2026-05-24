@@ -1042,14 +1042,14 @@ unsafe extern "system" fn present_detour_impl(
                     &mut present_rect_vec_storage,
                 );
             }
-            let _ = state::evaluate_present_hook(
+            let _ = state::evaluate_rendered_present_hook(
                 this,
                 inputs.clip_box,
                 render_result
                     .dxgi_format
                     .unwrap_or(crate::DXGI_FORMAT_B8G8R8A8_UNORM),
                 &inputs.dirty_rects,
-                render_result.lut_applied,
+                render_result,
             );
         }
         Ok(PresentInputCollection::HardwareProtected) | Err(_) => deactivate_present_context(this),
@@ -2142,6 +2142,50 @@ mod tests {
         let context = state::lut_bypass_runtime()
             .and_then(|runtime| runtime.context(fake.context_address()).cloned())
             .expect("present plan should keep the context active across a missed render");
+        assert_eq!(context.lut_index, Some(0));
+        assert_eq!(context.dirty_rect_count, 1);
+
+        let _ = fs::remove_file(manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn rendered_present_falls_back_to_input_plan_when_renderer_returns_no_lut_index() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        let (manifest_path, cube_path) = initialize_test_state();
+        let context_address = 0x1234;
+        let clip_box = ClipBox {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let dirty_rects = [DirtyRect {
+            left: 0,
+            top: 0,
+            right: 64,
+            bottom: 64,
+        }];
+
+        state::prepare_present_lut_context(
+            context_address,
+            clip_box,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            &dirty_rects,
+        )
+        .expect("pre-render present evaluation should run");
+        state::evaluate_rendered_present_hook(
+            context_address,
+            clip_box,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            &dirty_rects,
+            crate::d3d11_renderer::RenderPresentLutResult::default(),
+        )
+        .expect("post-render present evaluation should run");
+
+        let context = state::lut_bypass_runtime()
+            .and_then(|runtime| runtime.context(context_address).cloned())
+            .expect("input plan should keep the context active when renderer exits early");
         assert_eq!(context.lut_index, Some(0));
         assert_eq!(context.dirty_rect_count, 1);
 

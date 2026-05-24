@@ -48,7 +48,20 @@ struct GpuDrawPlan {
 pub(crate) struct RenderPresentLutResult {
     pub lut_applied: bool,
     pub dxgi_format: Option<u32>,
+    pub lut_index: Option<usize>,
     pub present_dirty_rect: Option<DirtyRect>,
+}
+
+#[cfg(not(test))]
+impl RenderPresentLutResult {
+    fn planned(format: BackBufferFormat, lut_index: usize) -> Self {
+        Self {
+            lut_applied: false,
+            dxgi_format: Some(dxgi_format_for_copy_texture(format)),
+            lut_index: Some(lut_index),
+            present_dirty_rect: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +215,17 @@ fn clamp_rect(rect: DirtyRect, width: u32, height: u32) -> Option<DirtyRect> {
     })
 }
 
+#[cfg(not(test))]
+fn bounding_rect(rects: &[DirtyRect]) -> Option<DirtyRect> {
+    let first = *rects.first()?;
+    Some(rects.iter().skip(1).fold(first, |bounds, rect| DirtyRect {
+        left: bounds.left.min(rect.left),
+        top: bounds.top.min(rect.top),
+        right: bounds.right.max(rect.right),
+        bottom: bounds.bottom.max(rect.bottom),
+    }))
+}
+
 fn requires_full_redraw(
     previous: RenderTargetState,
     current: DrawState,
@@ -313,7 +337,7 @@ pub(crate) unsafe fn render_present_lut(
     swap_chain_path: crate::profile::SwapChainPathHypothesis,
     clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
-    _pipeline: &LutPipeline,
+    pipeline: &LutPipeline,
 ) -> RenderPresentLutResult {
     let calls = TEST_RENDER_PRESENT_LUT_CALL.get_or_init(|| Mutex::new(None));
     if let Ok(mut calls) = calls.lock() {
@@ -343,6 +367,10 @@ pub(crate) unsafe fn render_present_lut(
     RenderPresentLutResult {
         lut_applied: TEST_RENDER_PRESENT_LUT_RESULT.load(Ordering::Acquire),
         dxgi_format,
+        lut_index: dxgi_format
+            .or(Some(DXGI_FORMAT_B8G8R8A8_UNORM))
+            .and_then(|format| pipeline.build_present_plan(clip_box, format, dirty_rects))
+            .map(|plan| plan.lut_index),
         present_dirty_rect,
     }
 }
@@ -696,8 +724,8 @@ mod tests {
                 bottom: 1080,
             },
             DXGI_FORMAT_B8G8R8A8_UNORM,
-            100,
-            100,
+            1920,
+            1080,
             &[
                 DirtyRect {
                     left: 10,
@@ -706,9 +734,9 @@ mod tests {
                     bottom: 20,
                 },
                 DirtyRect {
-                    left: 100,
+                    left: 1920,
                     top: 0,
-                    right: 120,
+                    right: 1940,
                     bottom: 50,
                 },
             ],
@@ -734,12 +762,12 @@ mod tests {
                     bottom: 1080,
                 },
                 DXGI_FORMAT_B8G8R8A8_UNORM,
-                100,
-                100,
+                1920,
+                1080,
                 &[DirtyRect {
-                    left: 100,
+                    left: 1920,
                     top: 0,
-                    right: 120,
+                    right: 1940,
                     bottom: 50,
                 }],
             )
@@ -806,6 +834,15 @@ mod tests {
         )
         .expect("left monitor should match");
         assert_eq!(left_plan.lut_index, 0);
+        assert_eq!(
+            left_plan.dirty_rects,
+            vec![DirtyRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            }]
+        );
 
         let top_plan = prepare_gpu_draw_plan(
             &pipeline,
@@ -822,6 +859,15 @@ mod tests {
         )
         .expect("top monitor should match");
         assert_eq!(top_plan.lut_index, 2);
+        assert_eq!(
+            top_plan.dirty_rects,
+            vec![DirtyRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1200,
+            }]
+        );
 
         let hdr_plan = prepare_gpu_draw_plan(
             &pipeline,
@@ -1132,6 +1178,17 @@ mod imp {
                 desc.height,
                 dirty_rects,
             ) else {
+                debug_log!(
+                    "event=lut_draw_skip overlay_swap_chain=0x{:x} back_buffer=0x{:x} clip_left={} clip_top={} dxgi_format={} width={} height={} dirty_rect_count={}",
+                    overlay_swap_chain,
+                    back_buffer as usize,
+                    clip_box.left,
+                    clip_box.top,
+                    desc.format,
+                    desc.width,
+                    desc.height,
+                    dirty_rects.len()
+                );
                 unsafe {
                     release(back_buffer);
                     release(context);
@@ -1139,8 +1196,9 @@ mod imp {
                 }
                 return super::RenderPresentLutResult::default();
             };
+            let selected_target = &pipeline.luts[draw_plan.lut_index].assignment.target;
             debug_log!(
-                "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} clip_left={} clip_top={} dxgi_format={} width={} height={} lut_index={} dirty_rect_count={}",
+                "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} clip_left={} clip_top={} dxgi_format={} width={} height={} lut_index={} monitor_id={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?}",
                 overlay_swap_chain,
                 back_buffer as usize,
                 clip_box.left,
@@ -1149,7 +1207,10 @@ mod imp {
                 desc.width,
                 desc.height,
                 draw_plan.lut_index,
-                dirty_rects.len()
+                selected_target.monitor_id,
+                dirty_rects.len(),
+                draw_plan.dirty_rects.len(),
+                draw_plan.dirty_rects.first()
             );
 
             let frame = RenderFrame {
@@ -1186,7 +1247,12 @@ mod imp {
             };
             let compile = match self.compiler() {
                 Some(compiler) => compiler.compile,
-                None => return super::RenderPresentLutResult::default(),
+                None => {
+                    return super::RenderPresentLutResult::planned(
+                        draw_plan.format,
+                        draw_plan.lut_index,
+                    );
+                }
             };
 
             let recreate = self
@@ -1205,16 +1271,25 @@ mod imp {
                         compile,
                     )
                 }) else {
-                    return super::RenderPresentLutResult::default();
+                    return super::RenderPresentLutResult::planned(
+                        draw_plan.format,
+                        draw_plan.lut_index,
+                    );
                 };
                 self.devices.insert(resource_key, resources);
             }
 
             let Some(resources) = self.devices.get_mut(&resource_key) else {
-                return super::RenderPresentLutResult::default();
+                return super::RenderPresentLutResult::planned(
+                    draw_plan.format,
+                    draw_plan.lut_index,
+                );
             };
             if draw_plan.lut_index >= resources.lut_srvs.len() {
-                return super::RenderPresentLutResult::default();
+                return super::RenderPresentLutResult::planned(
+                    draw_plan.format,
+                    draw_plan.lut_index,
+                );
             }
 
             let current_draw_state = super::DrawState {
@@ -1257,14 +1332,13 @@ mod imp {
                 );
             }
             if draw_plan.dirty_rects.is_empty() {
-                return super::RenderPresentLutResult::default();
+                return super::RenderPresentLutResult::planned(
+                    draw_plan.format,
+                    draw_plan.lut_index,
+                );
             }
-            let present_dirty_rect = needs_full_redraw.then_some(DirtyRect {
-                left: 0,
-                top: 0,
-                right: frame.width as i32,
-                bottom: frame.height as i32,
-            });
+            let present_dirty_rect =
+                needs_full_redraw.then(|| super::bounding_rect(&draw_plan.dirty_rects).unwrap());
 
             let result = unsafe { resources.draw(frame, &draw_plan) };
             if result {
@@ -1276,6 +1350,7 @@ mod imp {
             super::RenderPresentLutResult {
                 lut_applied: result,
                 dxgi_format: Some(super::dxgi_format_for_copy_texture(draw_plan.format)),
+                lut_index: Some(draw_plan.lut_index),
                 present_dirty_rect: result.then_some(present_dirty_rect).flatten(),
             }
         }

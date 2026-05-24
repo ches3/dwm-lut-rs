@@ -2,7 +2,9 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use dwm_lut_config::{ColorMode, ConfigError, LutAssignment, LutCube, LutManifest, parse_cube};
+use dwm_lut_config::{
+    ColorMode, ConfigError, LutAssignment, LutCube, LutManifest, MonitorTarget, parse_cube,
+};
 
 use crate::blue_noise::{blue_noise_threshold, render_blue_noise_hlsl};
 
@@ -230,10 +232,7 @@ impl LutPipeline {
         };
 
         self.luts.iter().position(|lut| {
-            lut.assignment
-                .target
-                .contains_desktop_point(clip_box.left, clip_box.top)
-                && lut.assignment.target.color_mode == color_mode
+            target_matches_point_and_mode(&lut.assignment.target, clip_box, color_mode)
         })
     }
 
@@ -245,7 +244,35 @@ impl LutPipeline {
     ) -> Option<LutRenderPlan> {
         let format = BackBufferFormat::from_dxgi_format(dxgi_format)?;
         let lut_index = self.select_lut_index(clip_box, format)?;
-        let lut = &self.luts[lut_index];
+        self.build_present_plan_for_index(clip_box, format, dirty_rects, lut_index)
+    }
+
+    pub fn build_present_plan_for_lut_index(
+        &self,
+        clip_box: ClipBox,
+        dxgi_format: u32,
+        dirty_rects: &[DirtyRect],
+        lut_index: usize,
+    ) -> Option<LutRenderPlan> {
+        let format = BackBufferFormat::from_dxgi_format(dxgi_format)?;
+        let lut = self.luts.get(lut_index)?;
+        let color_mode = match format {
+            BackBufferFormat::Bgra8Unorm => ColorMode::Sdr,
+            BackBufferFormat::Rgba16Float => ColorMode::Hdr,
+        };
+        (lut.assignment.target.color_mode == color_mode)
+            .then(|| self.build_present_plan_for_index(clip_box, format, dirty_rects, lut_index))
+            .flatten()
+    }
+
+    fn build_present_plan_for_index(
+        &self,
+        clip_box: ClipBox,
+        format: BackBufferFormat,
+        dirty_rects: &[DirtyRect],
+        lut_index: usize,
+    ) -> Option<LutRenderPlan> {
+        let lut = self.luts.get(lut_index)?;
 
         Some(LutRenderPlan {
             format,
@@ -260,6 +287,14 @@ impl LutPipeline {
             },
         })
     }
+}
+
+fn target_matches_point_and_mode(
+    target: &MonitorTarget,
+    clip_box: ClipBox,
+    color_mode: ColorMode,
+) -> bool {
+    target.contains_desktop_point(clip_box.left, clip_box.top) && target.color_mode == color_mode
 }
 
 pub fn cube_to_texture(cube: &LutCube) -> ShaderTexture3D {
