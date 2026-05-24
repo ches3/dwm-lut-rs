@@ -2,6 +2,7 @@ use crate::lut_pipeline::{
     BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
     DirtyRect, LutPipeline, ShaderConstantsCBuffer,
 };
+use dwm_lut_config::MonitorIdentity;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
@@ -91,6 +92,7 @@ struct ResourceKey {
 
 fn prepare_gpu_draw_plan(
     pipeline: &LutPipeline,
+    monitor_identity: Option<MonitorIdentity>,
     clip_box: ClipBox,
     dxgi_format: u32,
     width: u32,
@@ -101,7 +103,13 @@ fn prepare_gpu_draw_plan(
         return None;
     }
 
-    let plan = pipeline.build_present_plan(clip_box, dxgi_format, dirty_rects)?;
+    let identity = monitor_identity?;
+    let plan = pipeline.build_present_plan_for_monitor_identity(
+        identity,
+        clip_box,
+        dxgi_format,
+        dirty_rects,
+    )?;
     let dirty_rects = draw_rects_for_frame(&plan.dirty_rects, width, height, false);
     (!dirty_rects.is_empty()).then_some(GpuDrawPlan {
         format: plan.format,
@@ -257,6 +265,7 @@ static TEST_RENDER_CONTEXT_ACTIVE: OnceLock<Mutex<Option<bool>>> = OnceLock::new
 pub(crate) struct TestRenderPresentLutCall {
     pub overlay_swap_chain: usize,
     pub swap_chain_path: crate::profile::SwapChainPathHypothesis,
+    pub monitor_identity: Option<MonitorIdentity>,
     pub clip_box: ClipBox,
     pub dirty_rects: Vec<DirtyRect>,
 }
@@ -335,6 +344,7 @@ pub(crate) fn test_render_context_active() -> Option<bool> {
 pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
     swap_chain_path: crate::profile::SwapChainPathHypothesis,
+    monitor_identity: Option<MonitorIdentity>,
     clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,
@@ -344,6 +354,7 @@ pub(crate) unsafe fn render_present_lut(
         *calls = Some(TestRenderPresentLutCall {
             overlay_swap_chain,
             swap_chain_path,
+            monitor_identity,
             clip_box,
             dirty_rects: dirty_rects.to_vec(),
         });
@@ -369,7 +380,16 @@ pub(crate) unsafe fn render_present_lut(
         dxgi_format,
         lut_index: dxgi_format
             .or(Some(DXGI_FORMAT_B8G8R8A8_UNORM))
-            .and_then(|format| pipeline.build_present_plan(clip_box, format, dirty_rects))
+            .and_then(|format| {
+                monitor_identity.and_then(|identity| {
+                    pipeline.build_present_plan_for_monitor_identity(
+                        identity,
+                        clip_box,
+                        format,
+                        dirty_rects,
+                    )
+                })
+            })
             .map(|plan| plan.lut_index),
         present_dirty_rect,
     }
@@ -382,19 +402,25 @@ mod tests {
         BackBufferFormat, DXGI_FORMAT_R16G16B16A16_FLOAT, LoadedLut, LutMetadata, LutShaderProgram,
         ShaderTexture3D,
     };
-    use dwm_lut_config::{ColorMode, LutAssignment, MonitorTarget};
+    use dwm_lut_config::{AdapterLuid, ColorMode, LutAssignment, MonitorIdentity, MonitorTarget};
     use std::cell::RefCell;
+
+    fn test_identity() -> MonitorIdentity {
+        MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4357,
+        }
+    }
 
     fn test_pipeline() -> LutPipeline {
         fn loaded_lut(color_mode: ColorMode) -> LoadedLut {
             LoadedLut {
                 assignment: LutAssignment {
                     target: MonitorTarget {
-                        monitor_id: "DISPLAY1".into(),
-                        desktop_left: 0,
-                        desktop_top: 0,
-                        desktop_right: Some(1920),
-                        desktop_bottom: Some(1080),
+                        identity: test_identity(),
                         color_mode,
                     },
                     lut_path: match color_mode {
@@ -530,6 +556,7 @@ mod tests {
         assert!(
             prepare_gpu_draw_plan(
                 &pipeline,
+                Some(test_identity()),
                 clip_box,
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 1920,
@@ -540,6 +567,7 @@ mod tests {
         );
         let hdr_plan = prepare_gpu_draw_plan(
             &pipeline,
+            Some(test_identity()),
             clip_box,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             1920,
@@ -553,6 +581,7 @@ mod tests {
         assert!(
             prepare_gpu_draw_plan(
                 &pipeline,
+                Some(test_identity()),
                 clip_box,
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 0,
@@ -580,6 +609,7 @@ mod tests {
         let pipeline = test_pipeline();
         let plan = prepare_gpu_draw_plan(
             &pipeline,
+            Some(test_identity()),
             ClipBox {
                 left: 0,
                 top: 0,
@@ -717,6 +747,7 @@ mod tests {
         let pipeline = test_pipeline();
         let plan = prepare_gpu_draw_plan(
             &pipeline,
+            Some(test_identity()),
             ClipBox {
                 left: 0,
                 top: 0,
@@ -755,6 +786,7 @@ mod tests {
         assert!(
             prepare_gpu_draw_plan(
                 &pipeline,
+                Some(test_identity()),
                 ClipBox {
                     left: 0,
                     top: 0,
@@ -776,23 +808,15 @@ mod tests {
     }
 
     #[test]
-    fn gpu_draw_plan_selects_lut_by_monitor_bounds_and_format() {
-        fn loaded_lut(
-            monitor_id: &str,
-            bounds: (i32, i32, i32, i32),
-            color_mode: ColorMode,
-        ) -> LoadedLut {
+    fn gpu_draw_plan_selects_lut_by_runtime_monitor_identity() {
+        fn loaded_lut(label: &str, identity: MonitorIdentity, color_mode: ColorMode) -> LoadedLut {
             LoadedLut {
                 assignment: LutAssignment {
                     target: MonitorTarget {
-                        monitor_id: monitor_id.into(),
-                        desktop_left: bounds.0,
-                        desktop_top: bounds.1,
-                        desktop_right: Some(bounds.2),
-                        desktop_bottom: Some(bounds.3),
+                        identity,
                         color_mode,
                     },
-                    lut_path: format!("{monitor_id}-{color_mode:?}.cube").into(),
+                    lut_path: format!("{label}-{color_mode:?}.cube").into(),
                     lut_size: 2,
                 },
                 metadata: LutMetadata {
@@ -809,95 +833,58 @@ mod tests {
             }
         }
 
+        let primary = MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4355,
+        };
+        let right = MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4357,
+        };
         let pipeline = LutPipeline {
             luts: vec![
-                loaded_lut("LEFT", (-1920, 0, 0, 1080), ColorMode::Sdr),
-                loaded_lut("PRIMARY", (0, 0, 2560, 1440), ColorMode::Sdr),
-                loaded_lut("TOP", (0, -1200, 1920, 0), ColorMode::Sdr),
-                loaded_lut("PRIMARY", (0, 0, 2560, 1440), ColorMode::Hdr),
+                loaded_lut("PRIMARY", primary, ColorMode::Sdr),
+                loaded_lut("RIGHT", right, ColorMode::Sdr),
             ],
             shader: LutShaderProgram::embedded(),
         };
 
-        let left_plan = prepare_gpu_draw_plan(
+        let plan = prepare_gpu_draw_plan(
             &pipeline,
+            Some(right),
             ClipBox {
-                left: -100,
-                top: 50,
-                right: -100,
-                bottom: 50,
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
             },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
             1080,
             &[],
         )
-        .expect("left monitor should match");
-        assert_eq!(left_plan.lut_index, 0);
-        assert_eq!(
-            left_plan.dirty_rects,
-            vec![DirtyRect {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            }]
-        );
+        .expect("runtime monitor identity should select a plan");
 
-        let top_plan = prepare_gpu_draw_plan(
-            &pipeline,
-            ClipBox {
-                left: 100,
-                top: -10,
-                right: 100,
-                bottom: -10,
-            },
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            1920,
-            1200,
-            &[],
-        )
-        .expect("top monitor should match");
-        assert_eq!(top_plan.lut_index, 2);
-        assert_eq!(
-            top_plan.dirty_rects,
-            vec![DirtyRect {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1200,
-            }]
-        );
-
-        let hdr_plan = prepare_gpu_draw_plan(
-            &pipeline,
-            ClipBox {
-                left: 100,
-                top: 50,
-                right: 100,
-                bottom: 50,
-            },
-            DXGI_FORMAT_R16G16B16A16_FLOAT,
-            2560,
-            1440,
-            &[],
-        )
-        .expect("HDR format should choose HDR assignment at the same bounds");
-        assert_eq!(hdr_plan.lut_index, 3);
-        assert_eq!(hdr_plan.constants.hdr, 1);
-
+        assert_eq!(plan.lut_index, 1);
         assert!(
             prepare_gpu_draw_plan(
                 &pipeline,
+                None,
                 ClipBox {
-                    left: 3000,
-                    top: 50,
-                    right: 3000,
-                    bottom: 50,
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
                 },
                 DXGI_FORMAT_B8G8R8A8_UNORM,
-                2560,
-                1440,
+                1920,
+                1080,
                 &[],
             )
             .is_none()
@@ -950,6 +937,7 @@ mod imp {
         BackBufferFormat, ClipBox, DirtyRect, LutPipeline, ShaderConstantsCBuffer,
     };
     use crate::profile::SwapChainPathHypothesis;
+    use dwm_lut_config::MonitorIdentity;
 
     type Hresult = i32;
     type ComPtr = *mut c_void;
@@ -1122,6 +1110,7 @@ mod imp {
             &mut self,
             overlay_swap_chain: usize,
             swap_chain_path: SwapChainPathHypothesis,
+            monitor_identity: Option<MonitorIdentity>,
             clip_box: ClipBox,
             dirty_rects: &[DirtyRect],
             pipeline: &LutPipeline,
@@ -1169,9 +1158,14 @@ mod imp {
             unsafe {
                 d3d11_texture2d_get_desc(back_buffer, &mut desc);
             }
+            let frame_adapter_luid = monitor_identity
+                .map(|identity| identity.adapter_luid.to_string())
+                .unwrap_or_else(|| "unknown".to_owned());
+            let frame_target_id = monitor_identity.map(|identity| identity.target_id);
 
             let Some(draw_plan) = super::prepare_gpu_draw_plan(
                 pipeline,
+                monitor_identity,
                 clip_box,
                 desc.format,
                 desc.width,
@@ -1179,9 +1173,11 @@ mod imp {
                 dirty_rects,
             ) else {
                 debug_log!(
-                    "event=lut_draw_skip overlay_swap_chain=0x{:x} back_buffer=0x{:x} clip_left={} clip_top={} dxgi_format={} width={} height={} dirty_rect_count={}",
+                    "event=lut_draw_skip overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} dirty_rect_count={}",
                     overlay_swap_chain,
                     back_buffer as usize,
+                    frame_adapter_luid,
+                    frame_target_id,
                     clip_box.left,
                     clip_box.top,
                     desc.format,
@@ -1196,18 +1192,18 @@ mod imp {
                 }
                 return super::RenderPresentLutResult::default();
             };
-            let selected_target = &pipeline.luts[draw_plan.lut_index].assignment.target;
             debug_log!(
-                "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} clip_left={} clip_top={} dxgi_format={} width={} height={} lut_index={} monitor_id={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?}",
+                "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} lut_index={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?}",
                 overlay_swap_chain,
                 back_buffer as usize,
+                frame_adapter_luid,
+                frame_target_id,
                 clip_box.left,
                 clip_box.top,
                 desc.format,
                 desc.width,
                 desc.height,
                 draw_plan.lut_index,
-                selected_target.monitor_id,
                 dirty_rects.len(),
                 draw_plan.dirty_rects.len(),
                 draw_plan.dirty_rects.first()
@@ -1608,6 +1604,7 @@ mod imp {
     pub(crate) unsafe fn render_present_lut(
         overlay_swap_chain: usize,
         swap_chain_path: SwapChainPathHypothesis,
+        monitor_identity: Option<MonitorIdentity>,
         clip_box: ClipBox,
         dirty_rects: &[DirtyRect],
         pipeline: &LutPipeline,
@@ -1620,6 +1617,7 @@ mod imp {
             renderer.render_present_lut(
                 overlay_swap_chain,
                 swap_chain_path,
+                monitor_identity,
                 clip_box,
                 dirty_rects,
                 pipeline,

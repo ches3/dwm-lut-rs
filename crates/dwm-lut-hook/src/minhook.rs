@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use crate::profile::{HookProfile, HookTarget};
 use crate::state::HookRegistrationPlan;
 use crate::{ClipBox, DirtyRect, state};
+use dwm_lut_config::{AdapterLuid, MonitorIdentity};
 
 pub type MhStatus = i32;
 
@@ -589,6 +590,9 @@ static COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL: AtomicPtr<c_void> =
 static COMP_VISUAL_PROMOTION_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 const MAX_DIRTY_RECTS: usize = 4096;
+const OVERLAY_SWAP_CHAIN_ADAPTER_LUID_LOW_OFFSET: usize = 0x34;
+const OVERLAY_SWAP_CHAIN_ADAPTER_LUID_HIGH_OFFSET: usize = 0x38;
+const OVERLAY_SWAP_CHAIN_TARGET_ID_OFFSET: usize = 0x3c;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -606,6 +610,7 @@ enum PresentInputCollection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PresentInputsWithoutFormat {
+    monitor_identity: Option<MonitorIdentity>,
     clip_box: ClipBox,
     dirty_rects: Vec<DirtyRect>,
 }
@@ -778,13 +783,52 @@ unsafe fn collect_present_inputs_with_profile(
             hypotheses.clip_box.offset,
         )?
     };
+    let monitor_identity = unsafe { read_monitor_identity(overlay_swap_chain) };
     let dirty_rects = unsafe { read_dirty_rects(rect_vec)? };
     Ok(PresentInputCollection::MissingFormat(
         PresentInputsWithoutFormat {
+            monitor_identity,
             clip_box,
             dirty_rects,
         },
     ))
+}
+
+unsafe fn read_monitor_identity(overlay_swap_chain: usize) -> Option<MonitorIdentity> {
+    let low_part = unsafe {
+        read_memory::<u32>(
+            checked_address(
+                overlay_swap_chain,
+                OVERLAY_SWAP_CHAIN_ADAPTER_LUID_LOW_OFFSET,
+            )
+            .ok()?,
+        )
+        .ok()?
+    };
+    let high_part = unsafe {
+        read_memory::<i32>(
+            checked_address(
+                overlay_swap_chain,
+                OVERLAY_SWAP_CHAIN_ADAPTER_LUID_HIGH_OFFSET,
+            )
+            .ok()?,
+        )
+        .ok()?
+    };
+    let target_id = unsafe {
+        read_memory::<u32>(
+            checked_address(overlay_swap_chain, OVERLAY_SWAP_CHAIN_TARGET_ID_OFFSET).ok()?,
+        )
+        .ok()?
+    };
+
+    Some(MonitorIdentity {
+        adapter_luid: AdapterLuid {
+            high_part,
+            low_part,
+        },
+        target_id,
+    })
 }
 
 unsafe fn read_clip_box(
@@ -975,6 +1019,7 @@ fn is_readable_memory_region(info: &MemoryBasicInformation) -> bool {
 fn deactivate_present_context(context_address: usize) {
     let _ = state::evaluate_present_hook(
         context_address,
+        None,
         ClipBox {
             left: 0,
             top: 0,
@@ -1029,12 +1074,17 @@ unsafe extern "system" fn present_detour_impl(
         Ok(PresentInputCollection::MissingFormat(inputs)) => {
             let _ = state::prepare_present_lut_context(
                 this,
+                inputs.monitor_identity,
                 inputs.clip_box,
                 crate::DXGI_FORMAT_B8G8R8A8_UNORM,
                 &inputs.dirty_rects,
             );
-            let render_result =
-                state::render_present_lut(overlay_swap_chain, inputs.clip_box, &inputs.dirty_rects);
+            let render_result = state::render_present_lut(
+                overlay_swap_chain,
+                inputs.monitor_identity,
+                inputs.clip_box,
+                &inputs.dirty_rects,
+            );
             if let Some(rect) = render_result.present_dirty_rect {
                 original_rect_vec = full_present_rect_vec(
                     rect,
@@ -1142,6 +1192,8 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use dwm_lut_config::{AdapterLuid, MonitorIdentity};
 
     use crate::profile::HookTarget;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
@@ -1269,7 +1321,7 @@ mod tests {
     fn write_test_manifest(cube_path: &Path) -> PathBuf {
         let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
         write_test_manifest_contents(format!(
-            "{{\n  \"assignments\": [\n    {{\n      \"monitor_id\": \"DISPLAY1\",\n      \"desktop_left\": 0,\n      \"desktop_top\": 0,\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
+            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
         ))
     }
 
@@ -1286,9 +1338,23 @@ mod tests {
     fn write_test_manifest_with_sdr_hdr_assignments(cube_path: &Path) -> PathBuf {
         let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
         write_test_manifest_contents(format!(
-            "{{\n  \"assignments\": [\n    {{\n      \"monitor_id\": \"DISPLAY1-SDR\",\n      \"desktop_left\": 0,\n      \"desktop_top\": 0,\n      \"desktop_right\": 1920,\n      \"desktop_bottom\": 1080,\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }},\n    {{\n      \"monitor_id\": \"DISPLAY1-HDR\",\n      \"desktop_left\": 0,\n      \"desktop_top\": 0,\n      \"desktop_right\": 1920,\n      \"desktop_bottom\": 1080,\n      \"color_mode\": \"hdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
+            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }},\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"hdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
         ))
     }
+
+    fn test_monitor_identity() -> MonitorIdentity {
+        MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4357,
+        }
+    }
+
+    const TEST_ADAPTER_LUID_LOW_OFFSET: usize = 0x34;
+    const TEST_ADAPTER_LUID_HIGH_OFFSET: usize = 0x38;
+    const TEST_TARGET_ID_OFFSET: usize = 0x3c;
 
     fn synthetic_resolution(profile: &HookProfile) -> SignatureResolutionReport {
         let base_address = 0x1800_0000usize;
@@ -1354,6 +1420,7 @@ mod tests {
         }];
         state::evaluate_present_hook(
             context_address,
+            Some(test_monitor_identity()),
             ClipBox {
                 left: 0,
                 top: 0,
@@ -1389,13 +1456,27 @@ mod tests {
 
             let context = Box::new(context_state.as_ptr() as usize);
 
-            let overlay_swap_chain_len =
-                (profile.hypotheses.hardware_protected.offset + 1).div_ceil(size_of::<usize>());
+            let overlay_swap_chain_len = (profile
+                .hypotheses
+                .hardware_protected
+                .offset
+                .max(super::OVERLAY_SWAP_CHAIN_TARGET_ID_OFFSET + size_of::<u32>())
+                + 1)
+            .div_ceil(size_of::<usize>());
             let mut overlay_swap_chain = vec![0usize; overlay_swap_chain_len];
             unsafe {
                 (overlay_swap_chain.as_mut_ptr() as *mut u8)
                     .add(profile.hypotheses.hardware_protected.offset)
                     .write(u8::from(hardware_protected));
+                ((overlay_swap_chain.as_mut_ptr() as *mut u8).add(TEST_ADAPTER_LUID_LOW_OFFSET)
+                    as *mut u32)
+                    .write(test_monitor_identity().adapter_luid.low_part);
+                ((overlay_swap_chain.as_mut_ptr() as *mut u8).add(TEST_ADAPTER_LUID_HIGH_OFFSET)
+                    as *mut i32)
+                    .write(test_monitor_identity().adapter_luid.high_part);
+                ((overlay_swap_chain.as_mut_ptr() as *mut u8).add(TEST_TARGET_ID_OFFSET)
+                    as *mut u32)
+                    .write(test_monitor_identity().target_id);
             }
 
             let rect_vec = if dirty_rects.is_empty() {
@@ -1806,6 +1887,7 @@ mod tests {
 
         assert_eq!(inputs.clip_box.left, 120);
         assert_eq!(inputs.clip_box.top, 80);
+        assert_eq!(inputs.monitor_identity, Some(test_monitor_identity()));
         assert_eq!(inputs.dirty_rects, fake.dirty_rects);
 
         let _ = fs::remove_file(manifest_path);
@@ -1926,6 +2008,37 @@ mod tests {
     }
 
     #[test]
+    fn monitor_identity_offsets_match_overlay_swap_chain_fixture() {
+        assert_eq!(
+            super::OVERLAY_SWAP_CHAIN_ADAPTER_LUID_LOW_OFFSET,
+            TEST_ADAPTER_LUID_LOW_OFFSET
+        );
+        assert_eq!(
+            super::OVERLAY_SWAP_CHAIN_ADAPTER_LUID_HIGH_OFFSET,
+            TEST_ADAPTER_LUID_HIGH_OFFSET
+        );
+        assert_eq!(
+            super::OVERLAY_SWAP_CHAIN_TARGET_ID_OFFSET,
+            TEST_TARGET_ID_OFFSET
+        );
+
+        let fake = FakePresentObjects::new(
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            Vec::new(),
+            false,
+        );
+
+        let identity = unsafe { super::read_monitor_identity(fake.overlay_swap_chain_address()) };
+
+        assert_eq!(identity, Some(test_monitor_identity()));
+    }
+
+    #[test]
     fn present_detour_keeps_context_active_when_render_succeeds() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_last_original_present_rects();
@@ -1980,6 +2093,7 @@ mod tests {
         );
         assert_eq!(render_call.swap_chain_path.container_vtable_index, 24);
         assert_eq!(render_call.swap_chain_path.resource_vtable_index, 19);
+        assert_eq!(render_call.monitor_identity, Some(test_monitor_identity()));
         assert_eq!(render_call.clip_box.left, 0);
         assert_eq!(render_call.clip_box.top, 0);
         assert_eq!(render_call.dirty_rects, fake.dirty_rects);
@@ -2150,7 +2264,7 @@ mod tests {
     }
 
     #[test]
-    fn rendered_present_falls_back_to_input_plan_when_renderer_returns_no_lut_index() {
+    fn rendered_present_clears_prepared_context_when_renderer_returns_no_lut_index() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         let (manifest_path, cube_path) = initialize_test_state();
         let context_address = 0x1234;
@@ -2169,6 +2283,7 @@ mod tests {
 
         state::prepare_present_lut_context(
             context_address,
+            Some(test_monitor_identity()),
             clip_box,
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &dirty_rects,
@@ -2183,11 +2298,11 @@ mod tests {
         )
         .expect("post-render present evaluation should run");
 
-        let context = state::lut_bypass_runtime()
-            .and_then(|runtime| runtime.context(context_address).cloned())
-            .expect("input plan should keep the context active when renderer exits early");
-        assert_eq!(context.lut_index, Some(0));
-        assert_eq!(context.dirty_rect_count, 1);
+        assert!(
+            state::lut_bypass_runtime()
+                .and_then(|runtime| runtime.context(context_address).cloned())
+                .is_none()
+        );
 
         let _ = fs::remove_file(manifest_path);
         let _ = fs::remove_file(cube_path);

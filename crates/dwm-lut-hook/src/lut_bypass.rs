@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::lut_pipeline::{BackBufferFormat, ClipBox, DirtyRect, LutPipeline, LutRenderPlan};
+use dwm_lut_config::MonitorIdentity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayTestModeControl {
@@ -75,12 +76,19 @@ impl LutBypassRuntime {
         &mut self,
         lut_pipeline: &LutPipeline,
         context_address: usize,
+        monitor_identity: Option<MonitorIdentity>,
         clip_box: ClipBox,
         dxgi_format: u32,
         dirty_rects: &[DirtyRect],
-        _lut_applied: bool,
     ) -> PresentHookOutcome {
-        let plan = lut_pipeline.build_present_plan(clip_box, dxgi_format, dirty_rects);
+        let plan = monitor_identity.and_then(|identity| {
+            lut_pipeline.build_present_plan_for_monitor_identity(
+                identity,
+                clip_box,
+                dxgi_format,
+                dirty_rects,
+            )
+        });
         self.update_context(context_address, clip_box, dxgi_format, dirty_rects, plan)
     }
 
@@ -257,7 +265,9 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use dwm_lut_config::{ColorMode, LutAssignment, LutManifest, MonitorTarget};
+    use dwm_lut_config::{
+        AdapterLuid, ColorMode, LutAssignment, LutManifest, MonitorIdentity, MonitorTarget,
+    };
 
     use super::{LutBypassRuntime, OverlayTestModeControl};
     use crate::lut_pipeline::{ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, LutPipeline};
@@ -284,16 +294,22 @@ mod tests {
         path
     }
 
+    fn test_identity() -> MonitorIdentity {
+        MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4357,
+        }
+    }
+
     fn pipeline_for_single_sdr_monitor() -> (LutPipeline, PathBuf) {
         let cube_path = write_test_cube();
         let mut manifest = LutManifest::empty();
         manifest.add(LutAssignment {
             target: MonitorTarget {
-                monitor_id: "DISPLAY1".into(),
-                desktop_left: 0,
-                desktop_top: 0,
-                desktop_right: None,
-                desktop_bottom: None,
+                identity: test_identity(),
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path.clone(),
@@ -314,6 +330,7 @@ mod tests {
         let outcome = runtime.update_present(
             &pipeline,
             0x1234,
+            Some(test_identity()),
             ClipBox {
                 left: 0,
                 top: 0,
@@ -327,7 +344,6 @@ mod tests {
                 right: 64,
                 bottom: 64,
             }],
-            true,
         );
 
         assert!(outcome.plan.is_some());
@@ -364,6 +380,7 @@ mod tests {
         let _ = runtime.update_present(
             &pipeline,
             0x1234,
+            Some(test_identity()),
             ClipBox {
                 left: 0,
                 top: 0,
@@ -372,12 +389,12 @@ mod tests {
             },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
-            true,
         );
 
         let outcome = runtime.update_present(
             &pipeline,
             0x1234,
+            None,
             ClipBox {
                 left: 100,
                 top: 100,
@@ -386,7 +403,6 @@ mod tests {
             },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
-            false,
         );
 
         assert!(outcome.plan.is_none());
@@ -410,6 +426,7 @@ mod tests {
         let outcome = runtime.update_present(
             &pipeline,
             0x1234,
+            Some(test_identity()),
             ClipBox {
                 left: 0,
                 top: 0,
@@ -423,7 +440,6 @@ mod tests {
                 right: 64,
                 bottom: 64,
             }],
-            false,
         );
 
         assert!(outcome.plan.is_some());
@@ -447,6 +463,7 @@ mod tests {
         let _ = runtime.update_present(
             &pipeline,
             0x1234,
+            Some(test_identity()),
             ClipBox {
                 left: 0,
                 top: 0,
@@ -460,7 +477,6 @@ mod tests {
                 right: 64,
                 bottom: 64,
             }],
-            true,
         );
 
         assert!(runtime.context(0x1234).is_some());
@@ -480,6 +496,7 @@ mod tests {
         let _ = runtime.update_present(
             &pipeline,
             0x1234,
+            Some(test_identity()),
             ClipBox {
                 left: 0,
                 top: 0,
@@ -488,7 +505,6 @@ mod tests {
             },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
-            true,
         );
 
         assert_eq!(overlay_test_mode, 5);
@@ -496,6 +512,7 @@ mod tests {
         let _ = runtime.update_present(
             &pipeline,
             0x1234,
+            None,
             ClipBox {
                 left: 100,
                 top: 100,
@@ -504,7 +521,6 @@ mod tests {
             },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
-            false,
         );
 
         assert_eq!(overlay_test_mode, 0);

@@ -37,20 +37,15 @@ pub use state::{
     SignatureResolutionState, evaluate_comp_swap_chain_direct_flip_compatible,
     evaluate_comp_swap_chain_independent_flip_compatible,
     evaluate_comp_visual_candidate_for_promotion, evaluate_direct_flip_compatible,
-    evaluate_overlay_test_mode, evaluate_overlays_enabled, evaluate_present_hook,
+    evaluate_overlay_test_mode, evaluate_overlays_enabled,
     evaluate_window_context_direct_flip_compatible, hook_profile, initialization_trace,
     is_initialized, lut_bypass_runtime, lut_pipeline_summary, manifest_path, signature_resolution,
 };
 
 use std::ffi::c_void;
-use std::slice;
 
 use windows_sys::Win32::Foundation::{HINSTANCE, TRUE};
 use windows_sys::Win32::System::LibraryLoader::DisableThreadLibraryCalls;
-
-const PRESENT_FLAG_HAS_PLAN: u32 = 1 << 0;
-const PRESENT_FLAG_PROMOTION_BLOCKED: u32 = 1 << 1;
-const PRESENT_FLAG_OVERLAY_TEST_MODE_FORCED: u32 = 1 << 2;
 
 /// # Safety
 ///
@@ -59,50 +54,6 @@ const PRESENT_FLAG_OVERLAY_TEST_MODE_FORCED: u32 = 1 << 2;
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn dwm_lut_initialize(manifest_path: *const u16) -> u32 {
     bootstrap::ffi_initialize(manifest_path)
-}
-
-/// # Safety
-///
-/// If `dirty_rect_count` is non-zero, `dirty_rects` must point to a readable
-/// array of `DirtyRect` values in the current process.
-#[unsafe(no_mangle)]
-pub unsafe extern "system" fn dwm_lut_update_present_state(
-    context_address: usize,
-    clip_box: ClipBox,
-    dxgi_format: u32,
-    dirty_rects: *const DirtyRect,
-    dirty_rect_count: usize,
-    lut_applied: i32,
-) -> u32 {
-    let dirty_rects = if dirty_rect_count == 0 {
-        &[]
-    } else if dirty_rects.is_null() {
-        return 0;
-    } else {
-        unsafe { slice::from_raw_parts(dirty_rects, dirty_rect_count) }
-    };
-
-    state::evaluate_present_hook(
-        context_address,
-        clip_box,
-        dxgi_format,
-        dirty_rects,
-        lut_applied != 0,
-    )
-    .map(|outcome| {
-        let mut flags = 0;
-        if outcome.plan.is_some() {
-            flags |= PRESENT_FLAG_HAS_PLAN;
-        }
-        if outcome.promotion_blocked {
-            flags |= PRESENT_FLAG_PROMOTION_BLOCKED;
-        }
-        if outcome.overlay_test_mode_control.is_force_mode_5() {
-            flags |= PRESENT_FLAG_OVERLAY_TEST_MODE_FORCED;
-        }
-        flags
-    })
-    .unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
@@ -210,16 +161,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookConfig, HookProfile,
-        HookTarget, InitializationStage, LutBypassState, ManifestLoadState, PRESENT_FLAG_HAS_PLAN,
-        PRESENT_FLAG_OVERLAY_TEST_MODE_FORCED, PRESENT_FLAG_PROMOTION_BLOCKED, SignatureLocator,
-        SignatureResolutionReport, build_profile, dwm_lut_comp_swap_chain_direct_flip_compatible,
-        dwm_lut_comp_swap_chain_independent_flip_compatible,
-        dwm_lut_comp_visual_candidate_for_promotion, dwm_lut_direct_flip_compatible,
-        dwm_lut_initialize, dwm_lut_overlay_test_mode, dwm_lut_overlays_enabled,
-        dwm_lut_update_present_state, dwm_lut_window_context_direct_flip_compatible, hook_profile,
-        initialization_trace, is_initialized, lut_bypass_runtime, lut_pipeline_summary,
-        manifest_path, signature_resolution,
+        BuildProfile, HookConfig, HookProfile, HookTarget, InitializationStage, LutBypassState,
+        ManifestLoadState, SignatureLocator, SignatureResolutionReport, build_profile,
+        dwm_lut_initialize, hook_profile, initialization_trace, is_initialized, lut_bypass_runtime,
+        lut_pipeline_summary, manifest_path, signature_resolution,
     };
     use crate::bootstrap::initialize_with_resolution;
     use crate::resolver::{LoadedModule, ResolvedTarget};
@@ -292,7 +237,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("dwm-lut-hook-test-{unique}.json"));
         let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
         let manifest = format!(
-            "{{\n  \"assignments\": [\n    {{\n      \"monitor_id\": \"DISPLAY1\",\n      \"desktop_left\": 0,\n      \"desktop_top\": 0,\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
+            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
         );
         fs::write(&path, manifest).expect("manifest file should be written");
         path
@@ -495,119 +440,6 @@ mod tests {
 
         assert!(matches!(result, Err(super::HookError::AlreadyInitialized)));
         assert!(!is_initialized());
-        let _ = fs::remove_file(expected_manifest_path);
-        let _ = fs::remove_file(cube_path);
-    }
-
-    #[test]
-    fn present_updates_context_scoped_bypass_state() {
-        reset_state_for_tests();
-        let (expected_manifest_path, cube_path) = synthetic_manifest_paths();
-        let config = HookConfig {
-            manifest_path: expected_manifest_path.clone(),
-            profile: BuildProfile::Windows11_25H2,
-        };
-        let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
-
-        initialize_with_resolution(config, resolution)
-            .expect("initialization should succeed with synthetic resolution");
-
-        let dirty_rects = [DirtyRect {
-            left: 0,
-            top: 0,
-            right: 64,
-            bottom: 64,
-        }];
-        let flags = unsafe {
-            dwm_lut_update_present_state(
-                0x1234,
-                ClipBox {
-                    left: 0,
-                    top: 0,
-                    right: 1920,
-                    bottom: 1080,
-                },
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                dirty_rects.as_ptr(),
-                dirty_rects.len(),
-                1,
-            )
-        };
-
-        assert_ne!(flags & PRESENT_FLAG_HAS_PLAN, 0);
-        assert_ne!(flags & PRESENT_FLAG_PROMOTION_BLOCKED, 0);
-        assert_ne!(flags & PRESENT_FLAG_OVERLAY_TEST_MODE_FORCED, 0);
-        assert_eq!(dwm_lut_overlays_enabled(0x1234, 1), 0);
-        assert_eq!(dwm_lut_direct_flip_compatible(0x1234, 1), 0);
-        assert_eq!(dwm_lut_window_context_direct_flip_compatible(1), 0);
-        assert_eq!(dwm_lut_comp_swap_chain_direct_flip_compatible(1), 0);
-        assert_eq!(dwm_lut_comp_swap_chain_independent_flip_compatible(1), 0);
-        assert_eq!(dwm_lut_comp_visual_candidate_for_promotion(1), 0);
-        assert_eq!(dwm_lut_overlay_test_mode(0), 5);
-        assert_eq!(dwm_lut_overlays_enabled(0x4321, 1), 1);
-        assert_eq!(dwm_lut_direct_flip_compatible(0x4321, 1), 1);
-        assert_eq!(
-            unsafe {
-                dwm_lut_update_present_state(
-                    0x9999,
-                    ClipBox {
-                        left: 0,
-                        top: 0,
-                        right: 1920,
-                        bottom: 1080,
-                    },
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
-                    std::ptr::null(),
-                    1,
-                    1,
-                )
-            },
-            0
-        );
-
-        assert_eq!(
-            lut_bypass_runtime()
-                .and_then(|runtime| runtime.context(0x1234).map(|context| context.lut_index)),
-            Some(Some(0))
-        );
-
-        let _ = fs::remove_file(expected_manifest_path);
-        let _ = fs::remove_file(cube_path);
-    }
-
-    #[test]
-    fn present_export_uses_empty_slice_for_null_zero_length_dirty_rects() {
-        reset_state_for_tests();
-        let (expected_manifest_path, cube_path) = synthetic_manifest_paths();
-        let config = HookConfig {
-            manifest_path: expected_manifest_path.clone(),
-            profile: BuildProfile::Windows11_25H2,
-        };
-        let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
-
-        initialize_with_resolution(config, resolution)
-            .expect("initialization should succeed with synthetic resolution");
-
-        let flags = unsafe {
-            dwm_lut_update_present_state(
-                0x1234,
-                ClipBox {
-                    left: 0,
-                    top: 0,
-                    right: 1920,
-                    bottom: 1080,
-                },
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                std::ptr::null(),
-                0,
-                0,
-            )
-        };
-
-        assert_ne!(flags & PRESENT_FLAG_HAS_PLAN, 0);
-        assert_ne!(flags & PRESENT_FLAG_PROMOTION_BLOCKED, 0);
-        assert_eq!(dwm_lut_overlays_enabled(0x1234, 1), 0);
-
         let _ = fs::remove_file(expected_manifest_path);
         let _ = fs::remove_file(cube_path);
     }

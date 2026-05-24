@@ -5,7 +5,7 @@ use std::sync::Arc;
 #[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
 
-use dwm_lut_config::LutManifest;
+use dwm_lut_config::{LutManifest, MonitorIdentity};
 
 use crate::lut_bypass::{LutBypassRuntime, PresentHookOutcome};
 use crate::lut_pipeline::{LutPipeline, LutPipelineSummary};
@@ -197,12 +197,13 @@ pub fn lut_bypass_runtime() -> Option<LutBypassRuntime> {
     })
 }
 
-pub fn evaluate_present_hook(
+pub(crate) fn evaluate_present_hook(
     context_address: usize,
+    monitor_identity: Option<MonitorIdentity>,
     clip_box: ClipBox,
     dxgi_format: u32,
     dirty_rects: &[DirtyRect],
-    lut_applied: bool,
+    _lut_applied: bool,
 ) -> Option<PresentHookOutcome> {
     with_state_mut(|state| {
         let runtime = &mut state.runtime;
@@ -212,10 +213,10 @@ pub fn evaluate_present_hook(
         lut_bypass.update_present(
             lut_pipeline,
             context_address,
+            monitor_identity,
             clip_box,
             dxgi_format,
             dirty_rects,
-            lut_applied,
         )
     })
 }
@@ -245,10 +246,10 @@ pub(crate) fn evaluate_rendered_present_hook(
             lut_bypass.update_present(
                 lut_pipeline,
                 context_address,
+                None,
                 clip_box,
                 dxgi_format,
                 dirty_rects,
-                render_result.lut_applied,
             )
         }
     })
@@ -256,6 +257,7 @@ pub(crate) fn evaluate_rendered_present_hook(
 
 pub(crate) fn render_present_lut(
     overlay_swap_chain: usize,
+    monitor_identity: Option<MonitorIdentity>,
     clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
 ) -> crate::d3d11_renderer::RenderPresentLutResult {
@@ -270,6 +272,7 @@ pub(crate) fn render_present_lut(
         crate::d3d11_renderer::render_present_lut(
             overlay_swap_chain,
             swap_chain_path,
+            monitor_identity,
             clip_box,
             dirty_rects,
             &lut_pipeline,
@@ -279,11 +282,19 @@ pub(crate) fn render_present_lut(
 
 pub(crate) fn prepare_present_lut_context(
     context_address: usize,
+    monitor_identity: Option<MonitorIdentity>,
     clip_box: ClipBox,
     dxgi_format: u32,
     dirty_rects: &[DirtyRect],
 ) -> Option<PresentHookOutcome> {
-    evaluate_present_hook(context_address, clip_box, dxgi_format, dirty_rects, false)
+    evaluate_present_hook(
+        context_address,
+        monitor_identity,
+        clip_box,
+        dxgi_format,
+        dirty_rects,
+        false,
+    )
 }
 
 pub fn evaluate_overlays_enabled(context_address: usize, original_enabled: bool) -> Option<bool> {

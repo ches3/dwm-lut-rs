@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use dwm_lut_config::{
-    ColorMode, ConfigError, LutAssignment, LutCube, LutManifest, MonitorTarget, parse_cube,
+    ColorMode, ConfigError, LutAssignment, LutCube, LutManifest, MonitorIdentity, parse_cube,
 };
 
 use crate::blue_noise::{blue_noise_threshold, render_blue_noise_hlsl};
@@ -225,25 +225,31 @@ impl LutPipeline {
         }
     }
 
-    pub fn select_lut_index(&self, clip_box: ClipBox, format: BackBufferFormat) -> Option<usize> {
+    pub fn select_lut_index_for_monitor_identity(
+        &self,
+        identity: MonitorIdentity,
+        format: BackBufferFormat,
+    ) -> Option<usize> {
         let color_mode = match format {
             BackBufferFormat::Bgra8Unorm => ColorMode::Sdr,
             BackBufferFormat::Rgba16Float => ColorMode::Hdr,
         };
 
         self.luts.iter().position(|lut| {
-            target_matches_point_and_mode(&lut.assignment.target, clip_box, color_mode)
+            let target = &lut.assignment.target;
+            target.identity == identity && target.color_mode == color_mode
         })
     }
 
-    pub fn build_present_plan(
+    pub fn build_present_plan_for_monitor_identity(
         &self,
+        identity: MonitorIdentity,
         clip_box: ClipBox,
         dxgi_format: u32,
         dirty_rects: &[DirtyRect],
     ) -> Option<LutRenderPlan> {
         let format = BackBufferFormat::from_dxgi_format(dxgi_format)?;
-        let lut_index = self.select_lut_index(clip_box, format)?;
+        let lut_index = self.select_lut_index_for_monitor_identity(identity, format)?;
         self.build_present_plan_for_index(clip_box, format, dirty_rects, lut_index)
     }
 
@@ -287,14 +293,6 @@ impl LutPipeline {
             },
         })
     }
-}
-
-fn target_matches_point_and_mode(
-    target: &MonitorTarget,
-    clip_box: ClipBox,
-    color_mode: ColorMode,
-) -> bool {
-    target.contains_desktop_point(clip_box.left, clip_box.top) && target.color_mode == color_mode
 }
 
 pub fn cube_to_texture(cube: &LutCube) -> ShaderTexture3D {
@@ -542,7 +540,9 @@ mod tests {
     use std::ptr::addr_of;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use dwm_lut_config::{ColorMode, LutAssignment, LutCube, LutManifest, MonitorTarget};
+    use dwm_lut_config::{
+        AdapterLuid, ColorMode, LutAssignment, LutCube, LutManifest, MonitorIdentity, MonitorTarget,
+    };
 
     use super::{
         BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -648,16 +648,19 @@ mod tests {
     }
 
     #[test]
-    fn present_plan_selects_sdr_lut_by_clip_box_and_format() {
+    fn present_plan_selects_sdr_lut_by_runtime_identity() {
         let cube_path = write_test_cube();
+        let identity = MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4357,
+        };
         let mut manifest = LutManifest::empty();
         manifest.add(LutAssignment {
             target: MonitorTarget {
-                monitor_id: "DISPLAY1".into(),
-                desktop_left: 0,
-                desktop_top: 0,
-                desktop_right: None,
-                desktop_bottom: None,
+                identity,
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path.clone(),
@@ -666,7 +669,8 @@ mod tests {
 
         let runtime = LutPipeline::load(&manifest).expect("runtime should load");
         let plan = runtime
-            .build_present_plan(
+            .build_present_plan_for_monitor_identity(
+                identity,
                 ClipBox {
                     left: 0,
                     top: 0,
@@ -696,14 +700,17 @@ mod tests {
     #[test]
     fn present_plan_selects_hdr_lut_for_rgba16_float() {
         let cube_path = write_test_cube();
+        let identity = MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4357,
+        };
         let mut manifest = LutManifest::empty();
         manifest.add(LutAssignment {
             target: MonitorTarget {
-                monitor_id: "DISPLAY1".into(),
-                desktop_left: 0,
-                desktop_top: 0,
-                desktop_right: None,
-                desktop_bottom: None,
+                identity,
                 color_mode: ColorMode::Hdr,
             },
             lut_path: cube_path.clone(),
@@ -711,7 +718,8 @@ mod tests {
         });
 
         let runtime = LutPipeline::load(&manifest).expect("runtime should load");
-        let plan = runtime.build_present_plan(
+        let plan = runtime.build_present_plan_for_monitor_identity(
+            identity,
             ClipBox {
                 left: 0,
                 top: 0,
@@ -730,17 +738,27 @@ mod tests {
     }
 
     #[test]
-    fn present_plan_selects_monitor_by_clip_box_inside_manifest_bounds() {
+    fn present_plan_selects_monitor_by_runtime_identity() {
         let cube_path_a = write_test_cube();
         let cube_path_b = write_test_cube();
+        let identity_a = MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4355,
+        };
+        let identity_b = MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4357,
+        };
         let mut manifest = LutManifest::empty();
         manifest.add(LutAssignment {
             target: MonitorTarget {
-                monitor_id: "LEFT".into(),
-                desktop_left: -1920,
-                desktop_top: 0,
-                desktop_right: Some(0),
-                desktop_bottom: Some(1080),
+                identity: identity_a,
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path_a.clone(),
@@ -748,11 +766,7 @@ mod tests {
         });
         manifest.add(LutAssignment {
             target: MonitorTarget {
-                monitor_id: "PRIMARY".into(),
-                desktop_left: 0,
-                desktop_top: 0,
-                desktop_right: Some(2560),
-                desktop_bottom: Some(1440),
+                identity: identity_b,
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path_b.clone(),
@@ -760,20 +774,23 @@ mod tests {
         });
 
         let runtime = LutPipeline::load(&manifest).expect("runtime should load");
-        let plan = runtime
-            .build_present_plan(
-                ClipBox {
-                    left: 120,
-                    top: 64,
-                    right: 2560,
-                    bottom: 1440,
-                },
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                &[],
-            )
-            .expect("primary monitor plan should exist");
-
-        assert_eq!(plan.lut_index, 1);
+        assert_eq!(
+            runtime
+                .build_present_plan_for_monitor_identity(
+                    identity_b,
+                    ClipBox {
+                        left: 0,
+                        top: 0,
+                        right: 0,
+                        bottom: 0,
+                    },
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    &[],
+                )
+                .expect("identity should select a plan")
+                .lut_index,
+            1
+        );
 
         let _ = fs::remove_file(cube_path_a);
         let _ = fs::remove_file(cube_path_b);
@@ -798,14 +815,17 @@ mod tests {
     #[test]
     fn runtime_rejects_lut_size_mismatch() {
         let cube_path = write_test_cube();
+        let identity = MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4357,
+        };
         let mut manifest = LutManifest::empty();
         manifest.add(LutAssignment {
             target: MonitorTarget {
-                monitor_id: "DISPLAY1".into(),
-                desktop_left: 0,
-                desktop_top: 0,
-                desktop_right: None,
-                desktop_bottom: None,
+                identity,
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path.clone(),
@@ -843,14 +863,17 @@ DOMAIN_MAX 1.0 1.0 1.0\n\
 0.0 1.0 1.0\n\
 1.0 1.0 1.0\n",
         );
+        let identity = MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4357,
+        };
         let mut manifest = LutManifest::empty();
         manifest.add(LutAssignment {
             target: MonitorTarget {
-                monitor_id: "DISPLAY1".into(),
-                desktop_left: 0,
-                desktop_top: 0,
-                desktop_right: None,
-                desktop_bottom: None,
+                identity,
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path.clone(),
@@ -859,7 +882,8 @@ DOMAIN_MAX 1.0 1.0 1.0\n\
 
         let runtime = LutPipeline::load(&manifest).expect("runtime should load");
         let plan = runtime
-            .build_present_plan(
+            .build_present_plan_for_monitor_identity(
+                identity,
                 ClipBox {
                     left: 0,
                     top: 0,

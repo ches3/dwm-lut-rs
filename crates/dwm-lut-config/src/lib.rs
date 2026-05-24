@@ -2,34 +2,59 @@ use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorMode {
     Sdr,
     Hdr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MonitorTarget {
-    pub monitor_id: String,
-    pub desktop_left: i32,
-    pub desktop_top: i32,
-    pub desktop_right: Option<i32>,
-    pub desktop_bottom: Option<i32>,
-    pub color_mode: ColorMode,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AdapterLuid {
+    pub high_part: i32,
+    pub low_part: u32,
 }
 
-impl MonitorTarget {
-    pub fn contains_desktop_point(&self, x: i32, y: i32) -> bool {
-        match (self.desktop_right, self.desktop_bottom) {
-            (Some(right), Some(bottom)) => {
-                x >= self.desktop_left && x < right && y >= self.desktop_top && y < bottom
-            }
-            _ => self.desktop_left == x && self.desktop_top == y,
+impl FromStr for AdapterLuid {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (high, low) = value
+            .split_once(':')
+            .ok_or("adapter_luid must use high:low hex format")?;
+        if high.len() != 8 || low.len() != 8 {
+            return Err("adapter_luid must use 8-digit high and low hex parts");
         }
+        let high_part =
+            u32::from_str_radix(high, 16).map_err(|_| "adapter_luid high part must be hex")?;
+        let low_part =
+            u32::from_str_radix(low, 16).map_err(|_| "adapter_luid low part must be hex")?;
+        Ok(Self {
+            high_part: high_part as i32,
+            low_part,
+        })
     }
+}
+
+impl fmt::Display for AdapterLuid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:08x}:{:08x}", self.high_part as u32, self.low_part)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MonitorIdentity {
+    pub adapter_luid: AdapterLuid,
+    pub target_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorTarget {
+    pub identity: MonitorIdentity,
+    pub color_mode: ColorMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,20 +139,26 @@ impl ConfigError {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ManifestDocument {
     assignments: Vec<ManifestAssignmentDocument>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ManifestAssignmentDocument {
-    monitor_id: String,
-    desktop_left: i32,
-    desktop_top: i32,
-    desktop_right: Option<i32>,
-    desktop_bottom: Option<i32>,
+    monitor: ManifestMonitorDocument,
     color_mode: ManifestColorMode,
     lut_path: PathBuf,
     lut_size: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestMonitorDocument {
+    #[serde(deserialize_with = "deserialize_adapter_luid")]
+    adapter_luid: AdapterLuid,
+    target_id: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
@@ -144,6 +175,14 @@ impl From<ManifestColorMode> for ColorMode {
             ManifestColorMode::Hdr => Self::Hdr,
         }
     }
+}
+
+fn deserialize_adapter_luid<'de, D>(deserializer: D) -> Result<AdapterLuid, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    value.parse().map_err(serde::de::Error::custom)
 }
 
 pub fn load_manifest(path: &Path) -> Result<LutManifest, ConfigError> {
@@ -166,38 +205,18 @@ pub fn load_manifest_str(base_dir: &Path, contents: &str) -> Result<LutManifest,
     })?;
 
     let mut manifest = LutManifest::empty();
-    let mut selection_keys = HashSet::new();
+    let mut identity_keys = HashSet::new();
     for assignment in document.assignments {
-        if assignment.monitor_id.trim().is_empty() {
-            return Err(ConfigError::parse_message("monitor_id must not be empty"));
-        }
-
         if assignment.lut_size == 0 {
             return Err(ConfigError::parse_message(
                 "lut_size must be greater than 0",
             ));
         }
 
-        match (assignment.desktop_right, assignment.desktop_bottom) {
-            (Some(right), Some(bottom)) => {
-                if right <= assignment.desktop_left {
-                    return Err(ConfigError::parse_message(
-                        "desktop_right must be greater than desktop_left",
-                    ));
-                }
-                if bottom <= assignment.desktop_top {
-                    return Err(ConfigError::parse_message(
-                        "desktop_bottom must be greater than desktop_top",
-                    ));
-                }
-            }
-            (None, None) => {}
-            _ => {
-                return Err(ConfigError::parse_message(
-                    "desktop_right and desktop_bottom must be specified together",
-                ));
-            }
-        }
+        let identity = MonitorIdentity {
+            adapter_luid: assignment.monitor.adapter_luid,
+            target_id: assignment.monitor.target_id,
+        };
 
         let lut_path = if assignment.lut_path.is_absolute() {
             assignment.lut_path
@@ -206,28 +225,15 @@ pub fn load_manifest_str(base_dir: &Path, contents: &str) -> Result<LutManifest,
         };
 
         let target = MonitorTarget {
-            monitor_id: assignment.monitor_id,
-            desktop_left: assignment.desktop_left,
-            desktop_top: assignment.desktop_top,
-            desktop_right: assignment.desktop_right,
-            desktop_bottom: assignment.desktop_bottom,
+            identity,
             color_mode: assignment.color_mode.into(),
         };
 
-        let selection_key = (
-            target.desktop_left,
-            target.desktop_top,
-            assignment.color_mode,
-        );
-        if !selection_keys.insert(selection_key)
-            || manifest
-                .assignments
-                .iter()
-                .any(|existing| monitor_targets_overlap(&existing.target, &target))
-        {
+        let identity_key = (identity, target.color_mode);
+        if !identity_keys.insert(identity_key) {
             return Err(ConfigError::parse_message(format!(
-                "duplicate assignment or overlapping assignment for desktop_left={}, desktop_top={}, color_mode={:?}",
-                assignment.desktop_left, assignment.desktop_top, assignment.color_mode
+                "duplicate assignment for monitor adapter_luid={}, target_id={}, color_mode={:?}",
+                identity.adapter_luid, identity.target_id, assignment.color_mode
             )));
         }
 
@@ -425,41 +431,13 @@ fn expected_entry_count(size: u32) -> Result<usize, ConfigError> {
         .ok_or_else(|| ConfigError::parse_message("LUT_3D_SIZE is too large"))
 }
 
-fn monitor_targets_overlap(left: &MonitorTarget, right: &MonitorTarget) -> bool {
-    if left.color_mode != right.color_mode {
-        return false;
-    }
-
-    match (
-        left.desktop_right,
-        left.desktop_bottom,
-        right.desktop_right,
-        right.desktop_bottom,
-    ) {
-        (Some(left_right), Some(left_bottom), Some(right_right), Some(right_bottom)) => {
-            left.desktop_left < right_right
-                && left_right > right.desktop_left
-                && left.desktop_top < right_bottom
-                && left_bottom > right.desktop_top
-        }
-        (Some(_), Some(_), None, None) => {
-            left.contains_desktop_point(right.desktop_left, right.desktop_top)
-        }
-        (None, None, Some(_), Some(_)) => {
-            right.contains_desktop_point(left.desktop_left, left.desktop_top)
-        }
-        (None, None, None, None) => {
-            left.desktop_left == right.desktop_left && left.desktop_top == right.desktop_top
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{ColorMode, ConfigError, load_manifest_str, parse_cube_str};
+    use super::{
+        AdapterLuid, ColorMode, ConfigError, MonitorIdentity, load_manifest_str, parse_cube_str,
+    };
 
     #[test]
     fn parse_cube_accepts_comments_and_fractional_values() {
@@ -608,9 +586,10 @@ DOMAIN_MAX 1.0 1.0 1.0
 {
   "assignments": [
     {
-      "monitor_id": "DISPLAY1",
-      "desktop_left": 0,
-      "desktop_top": 0,
+      "monitor": {
+        "adapter_luid": "00000000:00014e02",
+        "target_id": 4357
+      },
       "color_mode": "sdr",
       "lut_path": "panel.cube",
       "lut_size": 33
@@ -622,10 +601,17 @@ DOMAIN_MAX 1.0 1.0 1.0
         .expect("manifest should parse");
 
         assert_eq!(manifest.assignments.len(), 1);
-        assert_eq!(manifest.assignments[0].target.monitor_id, "DISPLAY1");
+        assert_eq!(
+            manifest.assignments[0].target.identity,
+            MonitorIdentity {
+                adapter_luid: AdapterLuid {
+                    high_part: 0,
+                    low_part: 0x14e02,
+                },
+                target_id: 4357,
+            }
+        );
         assert_eq!(manifest.assignments[0].target.color_mode, ColorMode::Sdr);
-        assert_eq!(manifest.assignments[0].target.desktop_right, None);
-        assert_eq!(manifest.assignments[0].target.desktop_bottom, None);
         assert_eq!(
             manifest.assignments[0].lut_path,
             PathBuf::from(r"C:\work\profiles").join("panel.cube")
@@ -634,16 +620,17 @@ DOMAIN_MAX 1.0 1.0 1.0
     }
 
     #[test]
-    fn load_manifest_rejects_empty_monitor_id() {
-        let error = load_manifest_str(
+    fn load_manifest_accepts_runtime_monitor_identity() {
+        let manifest = load_manifest_str(
             Path::new(r"C:\work\profiles"),
             r#"
 {
   "assignments": [
     {
-      "monitor_id": "  ",
-      "desktop_left": 0,
-      "desktop_top": 0,
+      "monitor": {
+        "adapter_luid": "00000000:00014e02",
+        "target_id": 4357
+      },
       "color_mode": "sdr",
       "lut_path": "panel.cube",
       "lut_size": 33
@@ -652,14 +639,170 @@ DOMAIN_MAX 1.0 1.0 1.0
 }
 "#,
         )
-        .expect_err("empty monitor_id should fail");
+        .expect("runtime manifest should parse");
+
+        let target = &manifest.assignments[0].target;
+        assert_eq!(
+            target.identity,
+            MonitorIdentity {
+                adapter_luid: AdapterLuid {
+                    high_part: 0,
+                    low_part: 0x14e02,
+                },
+                target_id: 4357,
+            }
+        );
+        assert_eq!(target.color_mode, ColorMode::Sdr);
+    }
+
+    #[test]
+    fn load_manifest_rejects_duplicate_runtime_monitor_identity_for_same_color_mode() {
+        let error = load_manifest_str(
+            Path::new(r"C:\work\profiles"),
+            r#"
+{
+  "assignments": [
+    {
+      "monitor": {
+        "adapter_luid": "00000000:00014e02",
+        "target_id": 4357
+      },
+      "color_mode": "sdr",
+      "lut_path": "panel-a.cube",
+      "lut_size": 33
+    },
+    {
+      "monitor": {
+        "adapter_luid": "00000000:00014e02",
+        "target_id": 4357
+      },
+      "color_mode": "sdr",
+      "lut_path": "panel-b.cube",
+      "lut_size": 33
+    }
+  ]
+}
+"#,
+        )
+        .expect_err("duplicate runtime monitor identity should fail");
 
         match error {
             ConfigError::Parse {
                 line: None,
                 message,
-            } => assert!(message.contains("monitor_id must not be empty")),
+            } => assert!(message.contains("duplicate assignment for monitor")),
             other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn load_manifest_accepts_same_runtime_monitor_identity_for_sdr_and_hdr() {
+        let manifest = load_manifest_str(
+            Path::new(r"C:\work\profiles"),
+            r#"
+{
+  "assignments": [
+    {
+      "monitor": {
+        "adapter_luid": "00000000:00014e02",
+        "target_id": 4357
+      },
+      "color_mode": "sdr",
+      "lut_path": "panel-sdr.cube",
+      "lut_size": 33
+    },
+    {
+      "monitor": {
+        "adapter_luid": "00000000:00014e02",
+        "target_id": 4357
+      },
+      "color_mode": "hdr",
+      "lut_path": "panel-hdr.cube",
+      "lut_size": 65
+    }
+  ]
+}
+"#,
+        )
+        .expect("SDR and HDR assignments should coexist for one runtime monitor");
+
+        assert_eq!(manifest.assignments.len(), 2);
+        assert_eq!(
+            manifest.assignments[0].target.identity,
+            manifest.assignments[1].target.identity
+        );
+        assert_ne!(
+            manifest.assignments[0].target.color_mode,
+            manifest.assignments[1].target.color_mode
+        );
+    }
+
+    #[test]
+    fn load_manifest_requires_monitor() {
+        let error = load_manifest_str(
+            Path::new(r"C:\work\profiles"),
+            r#"
+{
+  "assignments": [
+    {
+      "color_mode": "sdr",
+      "lut_path": "panel.cube",
+      "lut_size": 33
+    }
+  ]
+}
+"#,
+        )
+        .expect_err("missing monitor should fail");
+
+        match error {
+            ConfigError::Parse {
+                line: Some(8),
+                message,
+            } => assert!(message.contains("missing field `monitor`")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn load_manifest_rejects_legacy_monitor_fields() {
+        for field in [
+            r#""monitor_id": "DISPLAY1","#,
+            r#""desktop_left": 0,"#,
+            r#""desktop_top": 0,"#,
+            r#""desktop_right": 1920,"#,
+            r#""desktop_bottom": 1080,"#,
+        ] {
+            let error = load_manifest_str(
+                Path::new(r"C:\work\profiles"),
+                &format!(
+                    r#"
+{{
+  "assignments": [
+    {{
+      "monitor": {{
+        "adapter_luid": "00000000:00014e02",
+        "target_id": 4357
+      }},
+      {field}
+      "color_mode": "sdr",
+      "lut_path": "panel.cube",
+      "lut_size": 33
+    }}
+  ]
+}}
+"#
+                ),
+            )
+            .expect_err("legacy monitor field should fail");
+
+            match error {
+                ConfigError::Parse {
+                    line: Some(_),
+                    message,
+                } => assert!(message.contains("unknown field")),
+                other => panic!("unexpected error: {other}"),
+            }
         }
     }
 
@@ -684,184 +827,5 @@ DOMAIN_MAX 1.0 1.0 1.0
                 .expect("empty assignments array should still parse");
 
         assert!(manifest.assignments.is_empty());
-    }
-
-    #[test]
-    fn load_manifest_accepts_monitor_desktop_bounds() {
-        let manifest = load_manifest_str(
-            Path::new(r"C:\work\profiles"),
-            r#"
-{
-  "assignments": [
-    {
-      "monitor_id": "DISPLAY1",
-      "desktop_left": -1920,
-      "desktop_top": 0,
-      "desktop_right": 0,
-      "desktop_bottom": 1080,
-      "color_mode": "hdr",
-      "lut_path": "panel.cube",
-      "lut_size": 33
-    }
-  ]
-}
-"#,
-        )
-        .expect("manifest should parse");
-
-        let target = &manifest.assignments[0].target;
-        assert_eq!(target.desktop_right, Some(0));
-        assert_eq!(target.desktop_bottom, Some(1080));
-        assert!(target.contains_desktop_point(-1, 100));
-        assert!(!target.contains_desktop_point(0, 100));
-    }
-
-    #[test]
-    fn load_manifest_requires_complete_monitor_bounds() {
-        let error = load_manifest_str(
-            Path::new(r"C:\work\profiles"),
-            r#"
-{
-  "assignments": [
-    {
-      "monitor_id": "DISPLAY1",
-      "desktop_left": 0,
-      "desktop_top": 0,
-      "desktop_right": 1920,
-      "color_mode": "sdr",
-      "lut_path": "panel.cube",
-      "lut_size": 33
-    }
-  ]
-}
-"#,
-        )
-        .expect_err("partial bounds should fail");
-
-        match error {
-            ConfigError::Parse {
-                line: None,
-                message,
-            } => assert!(message.contains("must be specified together")),
-            other => panic!("unexpected error: {other}"),
-        }
-    }
-
-    #[test]
-    fn load_manifest_rejects_overlapping_monitor_bounds_for_same_color_mode() {
-        let error = load_manifest_str(
-            Path::new(r"C:\work\profiles"),
-            r#"
-{
-  "assignments": [
-    {
-      "monitor_id": "DISPLAY1",
-      "desktop_left": 0,
-      "desktop_top": 0,
-      "desktop_right": 1920,
-      "desktop_bottom": 1080,
-      "color_mode": "sdr",
-      "lut_path": "panel-a.cube",
-      "lut_size": 33
-    },
-    {
-      "monitor_id": "DISPLAY2",
-      "desktop_left": 1280,
-      "desktop_top": 0,
-      "desktop_right": 3200,
-      "desktop_bottom": 1080,
-      "color_mode": "sdr",
-      "lut_path": "panel-b.cube",
-      "lut_size": 33
-    }
-  ]
-}
-"#,
-        )
-        .expect_err("overlapping monitor bounds should fail");
-
-        match error {
-            ConfigError::Parse {
-                line: None,
-                message,
-            } => assert!(message.contains("overlapping assignment")),
-            other => panic!("unexpected error: {other}"),
-        }
-    }
-
-    #[test]
-    fn load_manifest_rejects_duplicate_selection_keys() {
-        let error = load_manifest_str(
-            Path::new(r"C:\work\profiles"),
-            r#"
-{
-  "assignments": [
-    {
-      "monitor_id": "DISPLAY1",
-      "desktop_left": 0,
-      "desktop_top": 0,
-      "color_mode": "sdr",
-      "lut_path": "panel-a.cube",
-      "lut_size": 33
-    },
-    {
-      "monitor_id": "DISPLAY2",
-      "desktop_left": 0,
-      "desktop_top": 0,
-      "color_mode": "sdr",
-      "lut_path": "panel-b.cube",
-      "lut_size": 33
-    }
-  ]
-}
-"#,
-        )
-        .expect_err("duplicate selection keys should fail");
-
-        match error {
-            ConfigError::Parse {
-                line: None,
-                message,
-            } => assert!(message.contains("duplicate assignment")),
-            other => panic!("unexpected error: {other}"),
-        }
-    }
-
-    #[test]
-    fn load_manifest_accepts_same_monitor_bounds_for_sdr_and_hdr() {
-        let manifest = load_manifest_str(
-            Path::new(r"C:\work\profiles"),
-            r#"
-{
-  "assignments": [
-    {
-      "monitor_id": "DISPLAY1-SDR",
-      "desktop_left": 0,
-      "desktop_top": 0,
-      "desktop_right": 2560,
-      "desktop_bottom": 1440,
-      "color_mode": "sdr",
-      "lut_path": "panel-sdr.cube",
-      "lut_size": 33
-    },
-    {
-      "monitor_id": "DISPLAY1-HDR",
-      "desktop_left": 0,
-      "desktop_top": 0,
-      "desktop_right": 2560,
-      "desktop_bottom": 1440,
-      "color_mode": "hdr",
-      "lut_path": "panel-hdr.cube",
-      "lut_size": 33
-    }
-  ]
-}
-"#,
-        )
-        .expect("SDR and HDR assignments may share monitor bounds");
-
-        assert_eq!(manifest.assignments.len(), 2);
-        assert_eq!(manifest.assignments[0].target.color_mode, ColorMode::Sdr);
-        assert_eq!(manifest.assignments[1].target.color_mode, ColorMode::Hdr);
     }
 }
