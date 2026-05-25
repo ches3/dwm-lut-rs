@@ -1,11 +1,15 @@
 #[cfg(test)]
 use std::cell::RefCell;
+#[cfg(debug_assertions)]
+use std::collections::BTreeMap;
 use std::ffi::c_void;
 #[cfg(not(test))]
 use std::mem::MaybeUninit;
 use std::mem::{align_of, size_of};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
+#[cfg(debug_assertions)]
+use std::sync::{Mutex, OnceLock};
 
 use crate::profile::{HookProfile, HookTarget};
 use crate::state::HookRegistrationPlan;
@@ -603,16 +607,11 @@ struct RectVec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PresentInputCollection {
-    MissingFormat(PresentInputsWithoutFormat),
-    HardwareProtected,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct PresentInputsWithoutFormat {
     monitor_identity: Option<MonitorIdentity>,
     clip_box: ClipBox,
     dirty_rects: Vec<DirtyRect>,
+    hardware_protected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -622,6 +621,155 @@ enum PresentInputError {
     NullContextState,
     InvalidDirtyRectVector,
     UnreadableMemory,
+}
+
+#[cfg(debug_assertions)]
+const PRESENT_DIAGNOSTIC_SAMPLE_INTERVAL: u64 = 600;
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PresentDetourLogKey {
+    overlay_swap_chain: usize,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PresentInputLogKey {
+    overlay_swap_chain: usize,
+    adapter_luid_low: Option<u32>,
+    adapter_luid_high: Option<i32>,
+    target_id: Option<u32>,
+    dirty_rect_count: usize,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PresentHardwareProtectedLogKey {
+    overlay_swap_chain: usize,
+}
+
+#[cfg(debug_assertions)]
+struct DiagnosticLogLimiter<K> {
+    counts: BTreeMap<K, u64>,
+}
+
+#[cfg(debug_assertions)]
+impl<K> Default for DiagnosticLogLimiter<K> {
+    fn default() -> Self {
+        Self {
+            counts: BTreeMap::new(),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl<K: Ord> DiagnosticLogLimiter<K> {
+    fn should_log(&mut self, key: K) -> bool {
+        let count = self.counts.entry(key).or_insert(0);
+        *count = count.saturating_add(1);
+        *count == 1 || (*count).is_multiple_of(PRESENT_DIAGNOSTIC_SAMPLE_INTERVAL)
+    }
+}
+
+#[cfg(debug_assertions)]
+static PRESENT_DETOUR_LOG_LIMITER: OnceLock<Mutex<DiagnosticLogLimiter<PresentDetourLogKey>>> =
+    OnceLock::new();
+
+#[cfg(debug_assertions)]
+static PRESENT_INPUT_LOG_LIMITER: OnceLock<Mutex<DiagnosticLogLimiter<PresentInputLogKey>>> =
+    OnceLock::new();
+
+#[cfg(debug_assertions)]
+static PRESENT_INPUT_HARDWARE_PROTECTED_LOG_LIMITER: OnceLock<
+    Mutex<DiagnosticLogLimiter<PresentHardwareProtectedLogKey>>,
+> = OnceLock::new();
+
+#[cfg(debug_assertions)]
+static PRESENT_HARDWARE_PROTECTED_RENDER_RESULT_LOG_LIMITER: OnceLock<
+    Mutex<DiagnosticLogLimiter<PresentHardwareProtectedLogKey>>,
+> = OnceLock::new();
+
+#[cfg(debug_assertions)]
+fn should_log_present_detour_enter(overlay_swap_chain: usize) -> bool {
+    PRESENT_DETOUR_LOG_LIMITER
+        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
+        .lock()
+        .map(|mut limiter| limiter.should_log(PresentDetourLogKey { overlay_swap_chain }))
+        .unwrap_or(true)
+}
+
+#[cfg(not(debug_assertions))]
+fn should_log_present_detour_enter(_overlay_swap_chain: usize) -> bool {
+    false
+}
+
+#[cfg(debug_assertions)]
+fn should_log_present_input_collected(
+    overlay_swap_chain: usize,
+    monitor_identity: Option<MonitorIdentity>,
+    dirty_rect_count: usize,
+) -> bool {
+    PRESENT_INPUT_LOG_LIMITER
+        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
+        .lock()
+        .map(|mut limiter| {
+            limiter.should_log(PresentInputLogKey {
+                overlay_swap_chain,
+                adapter_luid_low: monitor_identity.map(|identity| identity.adapter_luid.low_part),
+                adapter_luid_high: monitor_identity.map(|identity| identity.adapter_luid.high_part),
+                target_id: monitor_identity.map(|identity| identity.target_id),
+                dirty_rect_count,
+            })
+        })
+        .unwrap_or(true)
+}
+
+#[cfg(not(debug_assertions))]
+fn should_log_present_input_collected(
+    _overlay_swap_chain: usize,
+    _monitor_identity: Option<MonitorIdentity>,
+    _dirty_rect_count: usize,
+) -> bool {
+    false
+}
+
+#[cfg(debug_assertions)]
+fn should_log_present_input_hardware_protected(overlay_swap_chain: usize) -> bool {
+    PRESENT_INPUT_HARDWARE_PROTECTED_LOG_LIMITER
+        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
+        .lock()
+        .map(|mut limiter| {
+            limiter.should_log(PresentHardwareProtectedLogKey { overlay_swap_chain })
+        })
+        .unwrap_or(true)
+}
+
+#[cfg(not(debug_assertions))]
+fn should_log_present_input_hardware_protected(_overlay_swap_chain: usize) -> bool {
+    false
+}
+
+#[cfg(debug_assertions)]
+fn should_log_present_hardware_protected_render_result(overlay_swap_chain: usize) -> bool {
+    PRESENT_HARDWARE_PROTECTED_RENDER_RESULT_LOG_LIMITER
+        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
+        .lock()
+        .map(|mut limiter| {
+            limiter.should_log(PresentHardwareProtectedLogKey { overlay_swap_chain })
+        })
+        .unwrap_or(true)
+}
+
+#[cfg(not(debug_assertions))]
+fn should_log_present_hardware_protected_render_result(_overlay_swap_chain: usize) -> bool {
+    false
+}
+
+#[cfg(debug_assertions)]
+fn format_monitor_identity(identity: Option<MonitorIdentity>) -> String {
+    identity
+        .map(|identity| format!("{}:{}", identity.adapter_luid, identity.target_id))
+        .unwrap_or_else(|| "none".to_owned())
 }
 
 #[repr(C)]
@@ -750,7 +898,7 @@ unsafe fn collect_present_inputs(
     this: usize,
     overlay_swap_chain: usize,
     rect_vec: usize,
-) -> Result<PresentInputCollection, PresentInputError> {
+) -> Result<PresentInputsWithoutFormat, PresentInputError> {
     let profile = state::hook_profile().ok_or(PresentInputError::MissingProfile)?;
     unsafe { collect_present_inputs_with_profile(&profile, this, overlay_swap_chain, rect_vec) }
 }
@@ -760,7 +908,7 @@ unsafe fn collect_present_inputs_with_profile(
     this: usize,
     overlay_swap_chain: usize,
     rect_vec: usize,
-) -> Result<PresentInputCollection, PresentInputError> {
+) -> Result<PresentInputsWithoutFormat, PresentInputError> {
     let hypotheses = profile.hypotheses;
 
     if overlay_swap_chain == 0 {
@@ -773,8 +921,13 @@ unsafe fn collect_present_inputs_with_profile(
             hypotheses.hardware_protected.offset,
         )?)? != 0
     };
-    if hardware_protected {
-        return Ok(PresentInputCollection::HardwareProtected);
+    if hardware_protected && should_log_present_input_hardware_protected(overlay_swap_chain) {
+        debug_log!(
+            "event=present_input_hardware_protected this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x} hardware_protected_raw=1",
+            this,
+            overlay_swap_chain,
+            rect_vec
+        );
     }
     let clip_box = unsafe {
         read_clip_box(
@@ -785,13 +938,23 @@ unsafe fn collect_present_inputs_with_profile(
     };
     let monitor_identity = unsafe { read_monitor_identity(overlay_swap_chain) };
     let dirty_rects = unsafe { read_dirty_rects(rect_vec)? };
-    Ok(PresentInputCollection::MissingFormat(
-        PresentInputsWithoutFormat {
-            monitor_identity,
-            clip_box,
-            dirty_rects,
-        },
-    ))
+    if should_log_present_input_collected(overlay_swap_chain, monitor_identity, dirty_rects.len()) {
+        debug_log!(
+            "event=present_input_collected this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x} hardware_protected_raw={} monitor_identity={} dirty_rect_count={}",
+            this,
+            overlay_swap_chain,
+            rect_vec,
+            u8::from(hardware_protected),
+            crate::debug_log::quoted(format_monitor_identity(monitor_identity)),
+            dirty_rects.len()
+        );
+    }
+    Ok(PresentInputsWithoutFormat {
+        monitor_identity,
+        clip_box,
+        dirty_rects,
+        hardware_protected,
+    })
 }
 
 unsafe fn read_monitor_identity(overlay_swap_chain: usize) -> Option<MonitorIdentity> {
@@ -1057,6 +1220,14 @@ unsafe extern "system" fn present_detour_impl(
     if original.is_null() {
         return 0;
     }
+    if should_log_present_detour_enter(overlay_swap_chain) {
+        debug_log!(
+            "event=present_detour_enter this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x}",
+            this,
+            overlay_swap_chain,
+            rect_vec
+        );
+    }
 
     let mut original_rect_vec = rect_vec;
     let mut present_rect_storage = [DirtyRect {
@@ -1071,7 +1242,7 @@ unsafe extern "system" fn present_detour_impl(
         capacity_end: ptr::null(),
     };
     match unsafe { collect_present_inputs(this, overlay_swap_chain, rect_vec) } {
-        Ok(PresentInputCollection::MissingFormat(inputs)) => {
+        Ok(inputs) => {
             let _ = state::prepare_present_lut_context(
                 this,
                 inputs.monitor_identity,
@@ -1085,6 +1256,19 @@ unsafe extern "system" fn present_detour_impl(
                 inputs.clip_box,
                 &inputs.dirty_rects,
             );
+            if inputs.hardware_protected
+                && should_log_present_hardware_protected_render_result(overlay_swap_chain)
+            {
+                debug_log!(
+                    "event=present_hardware_protected_render_result this=0x{:x} overlay_swap_chain=0x{:x} lut_applied={} dxgi_format={:?} lut_index={:?} present_dirty_rect={:?}",
+                    this,
+                    overlay_swap_chain,
+                    render_result.lut_applied,
+                    render_result.dxgi_format,
+                    render_result.lut_index,
+                    render_result.present_dirty_rect
+                );
+            }
             if let Some(rect) = render_result.present_dirty_rect {
                 original_rect_vec = full_present_rect_vec(
                     rect,
@@ -1102,7 +1286,21 @@ unsafe extern "system" fn present_detour_impl(
                 render_result,
             );
         }
-        Ok(PresentInputCollection::HardwareProtected) | Err(_) => deactivate_present_context(this),
+        Err(error) => {
+            #[cfg(debug_assertions)]
+            {
+                debug_log!(
+                    "event=present_input_collect_error this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x} error={:?}",
+                    this,
+                    overlay_swap_chain,
+                    rect_vec,
+                    error
+                );
+            }
+            #[cfg(not(debug_assertions))]
+            let _ = error;
+            deactivate_present_context(this);
+        }
     }
 
     let original: PresentOriginal = unsafe { std::mem::transmute(original) };
@@ -1881,31 +2079,34 @@ mod tests {
             )
         }
         .expect("present inputs should be collected");
-        let super::PresentInputCollection::MissingFormat(inputs) = inputs else {
-            panic!("present inputs should be collected without format");
-        };
 
         assert_eq!(inputs.clip_box.left, 120);
         assert_eq!(inputs.clip_box.top, 80);
         assert_eq!(inputs.monitor_identity, Some(test_monitor_identity()));
         assert_eq!(inputs.dirty_rects, fake.dirty_rects);
+        assert!(!inputs.hardware_protected);
 
         let _ = fs::remove_file(manifest_path);
         let _ = fs::remove_file(cube_path);
     }
 
     #[test]
-    fn present_input_collection_skips_swap_chain_when_hardware_protected() {
+    fn present_input_collection_reads_confirmed_inputs_when_hardware_protected() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         let (manifest_path, cube_path) = initialize_test_state();
         let fake = FakePresentObjects::new(
             ClipBox {
-                left: 0,
-                top: 0,
+                left: 120,
+                top: 80,
                 right: 1920,
                 bottom: 1080,
             },
-            Vec::new(),
+            vec![DirtyRect {
+                left: 10,
+                top: 20,
+                right: 30,
+                bottom: 40,
+            }],
             true,
         );
 
@@ -1919,10 +2120,11 @@ mod tests {
         }
         .expect("hardware protected state should be collected");
 
-        assert!(matches!(
-            inputs,
-            super::PresentInputCollection::HardwareProtected
-        ));
+        assert_eq!(inputs.clip_box.left, 120);
+        assert_eq!(inputs.clip_box.top, 80);
+        assert_eq!(inputs.monitor_identity, Some(test_monitor_identity()));
+        assert_eq!(inputs.dirty_rects, fake.dirty_rects);
+        assert!(inputs.hardware_protected);
 
         let _ = fs::remove_file(manifest_path);
         let _ = fs::remove_file(cube_path);
@@ -2309,7 +2511,7 @@ mod tests {
     }
 
     #[test]
-    fn present_detour_clears_context_when_hardware_protected() {
+    fn present_detour_renders_when_hardware_protected_inputs_are_readable() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         let (manifest_path, cube_path) = initialize_test_state();
         let fake = FakePresentObjects::new(
@@ -2324,6 +2526,7 @@ mod tests {
         );
         activate_context(fake.context_address());
         super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+        crate::d3d11_renderer::set_test_render_present_lut_result(true);
 
         assert_eq!(
             unsafe {
@@ -2339,11 +2542,15 @@ mod tests {
             },
             0x55
         );
-        assert!(
-            state::lut_bypass_runtime()
-                .and_then(|runtime| runtime.context(fake.context_address()).cloned())
-                .is_none()
+        let render_call = crate::d3d11_renderer::test_render_present_lut_call()
+            .expect("hardware protected present should reach renderer");
+        assert_eq!(
+            render_call.overlay_swap_chain,
+            fake.overlay_swap_chain_address()
         );
+        assert_eq!(render_call.monitor_identity, Some(test_monitor_identity()));
+        assert_eq!(render_call.dirty_rects, fake.dirty_rects);
+        crate::d3d11_renderer::reset_test_render_present_lut_result();
 
         let _ = fs::remove_file(manifest_path);
         let _ = fs::remove_file(cube_path);

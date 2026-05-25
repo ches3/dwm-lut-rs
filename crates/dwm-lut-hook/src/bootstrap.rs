@@ -304,6 +304,25 @@ where
         resolution.targets.len(),
         resolution.skipped_signatures.len()
     );
+    #[cfg(debug_assertions)]
+    {
+        for target in &resolution.targets {
+            debug_log!(
+                "event=signature_resolved target={} capture_key={} address=0x{:x}",
+                crate::debug_log::quoted(target.target.label()),
+                crate::debug_log::quoted(target.capture_key),
+                target.address
+            );
+        }
+        for skipped in &resolution.skipped_signatures {
+            debug_log!(
+                "event=signature_skipped target={} capture_key={} reason={:?}",
+                crate::debug_log::quoted(skipped.target.label()),
+                crate::debug_log::quoted(skipped.capture_key),
+                skipped.reason
+            );
+        }
+    }
 
     finalize_initial_state(config, manifest, profile, resolution, lut_pipeline)
 }

@@ -36,12 +36,20 @@ pub(crate) fn request_desktop_redraw() {
     #[cfg(not(test))]
     {
         let flags = RDW_INVALIDATE | RDW_INTERNALPAINT | RDW_ALLCHILDREN | RDW_UPDATENOW;
-        let result = unsafe { RedrawWindow(ptr::null_mut(), ptr::null(), ptr::null_mut(), flags) };
-        debug_log!(
-            "event=desktop_redraw_requested result={} flags=0x{:x}",
-            result,
-            flags
-        );
+        #[cfg(debug_assertions)]
+        {
+            let result =
+                unsafe { RedrawWindow(ptr::null_mut(), ptr::null(), ptr::null_mut(), flags) };
+            debug_log!(
+                "event=desktop_redraw_requested result={} flags=0x{:x}",
+                result,
+                flags
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = unsafe { RedrawWindow(ptr::null_mut(), ptr::null(), ptr::null_mut(), flags) };
+        }
     }
 }
 

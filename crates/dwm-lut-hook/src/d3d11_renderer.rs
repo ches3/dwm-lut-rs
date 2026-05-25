@@ -45,6 +45,28 @@ struct GpuDrawPlan {
     dirty_rects: Vec<DirtyRect>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrawPlanSkipReason {
+    ZeroSize,
+    MissingMonitorIdentity,
+    UnsupportedFormat,
+    MissingAssignment,
+    EmptyDirtyRects,
+}
+
+#[cfg(all(not(test), debug_assertions))]
+impl DrawPlanSkipReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ZeroSize => "zero_size",
+            Self::MissingMonitorIdentity => "missing_monitor_identity",
+            Self::UnsupportedFormat => "unsupported_format",
+            Self::MissingAssignment => "missing_assignment",
+            Self::EmptyDirtyRects => "empty_dirty_rects",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RenderPresentLutResult {
     pub lut_applied: bool,
@@ -98,20 +120,30 @@ fn prepare_gpu_draw_plan(
     width: u32,
     height: u32,
     dirty_rects: &[DirtyRect],
-) -> Option<GpuDrawPlan> {
+) -> Result<GpuDrawPlan, DrawPlanSkipReason> {
     if width == 0 || height == 0 {
-        return None;
+        return Err(DrawPlanSkipReason::ZeroSize);
     }
 
-    let identity = monitor_identity?;
-    let plan = pipeline.build_present_plan_for_monitor_identity(
-        identity,
-        clip_box,
-        dxgi_format,
-        dirty_rects,
-    )?;
+    let Some(identity) = monitor_identity else {
+        return Err(DrawPlanSkipReason::MissingMonitorIdentity);
+    };
+    let Some(format) = BackBufferFormat::from_dxgi_format(dxgi_format) else {
+        return Err(DrawPlanSkipReason::UnsupportedFormat);
+    };
+    let Some(lut_index) = pipeline.select_lut_index_for_monitor_identity(identity, format) else {
+        return Err(DrawPlanSkipReason::MissingAssignment);
+    };
+    let Some(plan) =
+        pipeline.build_present_plan_for_lut_index(clip_box, dxgi_format, dirty_rects, lut_index)
+    else {
+        return Err(DrawPlanSkipReason::MissingAssignment);
+    };
     let dirty_rects = draw_rects_for_frame(&plan.dirty_rects, width, height, false);
-    (!dirty_rects.is_empty()).then_some(GpuDrawPlan {
+    if dirty_rects.is_empty() {
+        return Err(DrawPlanSkipReason::EmptyDirtyRects);
+    }
+    Ok(GpuDrawPlan {
         format: plan.format,
         lut_index: plan.lut_index,
         constants: plan.shader_constants.to_cbuffer(),
@@ -563,7 +595,7 @@ mod tests {
                 1080,
                 &dirty_rects,
             )
-            .is_some()
+            .is_ok()
         );
         let hdr_plan = prepare_gpu_draw_plan(
             &pipeline,
@@ -588,7 +620,7 @@ mod tests {
                 1080,
                 &dirty_rects,
             )
-            .is_none()
+            .is_err()
         );
     }
 
@@ -803,7 +835,7 @@ mod tests {
                     bottom: 50,
                 }],
             )
-            .is_none()
+            .is_err()
         );
     }
 
@@ -887,7 +919,7 @@ mod tests {
                 1080,
                 &[],
             )
-            .is_none()
+            .is_err()
         );
     }
 
@@ -959,6 +991,10 @@ mod imp {
     const D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT: usize = 8;
 
     static RENDERER: OnceLock<Mutex<D3D11Renderer>> = OnceLock::new();
+    #[cfg(debug_assertions)]
+    const DIAGNOSTIC_SAMPLE_INTERVAL: u64 = 600;
+    #[cfg(debug_assertions)]
+    const BACK_BUFFER_STAGE_SUCCESS: u32 = 9;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -1047,7 +1083,92 @@ mod imp {
         max_depth: f32,
     }
 
+    #[cfg(debug_assertions)]
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct BackBuffer25H2Diagnostic {
+        stage: u32,
+        hresult: Hresult,
+        container: ComPtr,
+        resource: ComPtr,
+        texture: ComPtr,
+    }
+
+    #[cfg(debug_assertions)]
+    impl BackBuffer25H2Diagnostic {
+        const fn new() -> Self {
+            Self {
+                stage: 0,
+                hresult: 0,
+                container: ptr::null_mut(),
+                resource: ptr::null_mut(),
+                texture: ptr::null_mut(),
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct FrameDiagnosticKey {
+        dxgi_format: u32,
+        target_id: Option<u32>,
+        width: u32,
+        height: u32,
+    }
+
+    #[cfg(debug_assertions)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct BackBufferHelperDiagnosticKey {
+        stage: u32,
+        hresult: Hresult,
+        container: usize,
+        resource: usize,
+        texture: usize,
+    }
+
+    #[cfg(debug_assertions)]
+    struct PerOverlayDiagnosticLogLimiter<K> {
+        last_keys: BTreeMap<usize, K>,
+        counts: BTreeMap<usize, u64>,
+    }
+
+    #[cfg(debug_assertions)]
+    impl<K> Default for PerOverlayDiagnosticLogLimiter<K> {
+        fn default() -> Self {
+            Self {
+                last_keys: BTreeMap::new(),
+                counts: BTreeMap::new(),
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    impl<K: Copy + PartialEq> PerOverlayDiagnosticLogLimiter<K> {
+        fn should_log(&mut self, overlay_swap_chain: usize, key: K) -> bool {
+            let count = self.counts.entry(overlay_swap_chain).or_insert(0);
+            *count = count.saturating_add(1);
+
+            let changed = self
+                .last_keys
+                .get(&overlay_swap_chain)
+                .is_none_or(|last_key| *last_key != key);
+            if changed {
+                self.last_keys.insert(overlay_swap_chain, key);
+            }
+
+            *count == 1 || changed || (*count).is_multiple_of(DIAGNOSTIC_SAMPLE_INTERVAL)
+        }
+    }
+
     unsafe extern "system" {
+        #[cfg(debug_assertions)]
+        fn dwm_lut_get_back_buffer_25h2_diagnostic(
+            overlay_swap_chain: *mut c_void,
+            container_vtable_index: usize,
+            resource_vtable_index: usize,
+            diagnostic: *mut BackBuffer25H2Diagnostic,
+        ) -> ComPtr;
+        #[cfg(not(debug_assertions))]
         fn dwm_lut_get_back_buffer_25h2(
             overlay_swap_chain: *mut c_void,
             container_vtable_index: usize,
@@ -1085,6 +1206,11 @@ mod imp {
     struct D3D11Renderer {
         compiler: Option<D3DCompiler>,
         devices: BTreeMap<super::ResourceKey, DeviceResources>,
+        #[cfg(debug_assertions)]
+        frame_diagnostics: PerOverlayDiagnosticLogLimiter<FrameDiagnosticKey>,
+        #[cfg(debug_assertions)]
+        back_buffer_helper_diagnostics:
+            PerOverlayDiagnosticLogLimiter<BackBufferHelperDiagnosticKey>,
     }
 
     unsafe impl Send for D3D11Renderer {}
@@ -1103,6 +1229,10 @@ mod imp {
             Self {
                 compiler: None,
                 devices: BTreeMap::new(),
+                #[cfg(debug_assertions)]
+                frame_diagnostics: PerOverlayDiagnosticLogLimiter::default(),
+                #[cfg(debug_assertions)]
+                back_buffer_helper_diagnostics: PerOverlayDiagnosticLogLimiter::default(),
             }
         }
 
@@ -1115,9 +1245,13 @@ mod imp {
             dirty_rects: &[DirtyRect],
             pipeline: &LutPipeline,
         ) -> super::RenderPresentLutResult {
-            let Some(back_buffer) =
-                (unsafe { overlay_swap_chain_to_back_buffer(overlay_swap_chain, swap_chain_path) })
-            else {
+            let Some(back_buffer) = (unsafe {
+                self.overlay_swap_chain_to_back_buffer(overlay_swap_chain, swap_chain_path)
+            }) else {
+                debug_log!(
+                    "event=back_buffer_get_failed overlay_swap_chain=0x{:x}",
+                    overlay_swap_chain
+                );
                 return super::RenderPresentLutResult::default();
             };
 
@@ -1126,6 +1260,11 @@ mod imp {
                 d3d11_device_child_get_device(back_buffer, &mut device);
             }
             if device.is_null() {
+                debug_log!(
+                    "event=renderer_early_return reason=device_null overlay_swap_chain=0x{:x} back_buffer=0x{:x}",
+                    overlay_swap_chain,
+                    back_buffer as usize
+                );
                 unsafe { release(back_buffer) };
                 return super::RenderPresentLutResult::default();
             }
@@ -1135,6 +1274,12 @@ mod imp {
                 d3d11_device_get_immediate_context(device, &mut context);
             }
             if context.is_null() {
+                debug_log!(
+                    "event=renderer_early_return reason=context_null overlay_swap_chain=0x{:x} back_buffer=0x{:x} device=0x{:x}",
+                    overlay_swap_chain,
+                    back_buffer as usize,
+                    device as usize
+                );
                 unsafe {
                     release(device);
                     release(back_buffer);
@@ -1158,12 +1303,29 @@ mod imp {
             unsafe {
                 d3d11_texture2d_get_desc(back_buffer, &mut desc);
             }
+            #[cfg(debug_assertions)]
             let frame_adapter_luid = monitor_identity
                 .map(|identity| identity.adapter_luid.to_string())
                 .unwrap_or_else(|| "unknown".to_owned());
+            #[cfg(debug_assertions)]
             let frame_target_id = monitor_identity.map(|identity| identity.target_id);
+            #[cfg(debug_assertions)]
+            let should_log_success_frame =
+                self.should_log_success_frame(overlay_swap_chain, desc, frame_target_id);
+            #[cfg(debug_assertions)]
+            if should_log_success_frame {
+                debug_log!(
+                    "event=back_buffer_desc overlay_swap_chain=0x{:x} back_buffer=0x{:x} dxgi_format={} width={} height={} target_id={:?}",
+                    overlay_swap_chain,
+                    back_buffer as usize,
+                    desc.format,
+                    desc.width,
+                    desc.height,
+                    frame_target_id
+                );
+            }
 
-            let Some(draw_plan) = super::prepare_gpu_draw_plan(
+            let draw_plan = match super::prepare_gpu_draw_plan(
                 pipeline,
                 monitor_identity,
                 clip_box,
@@ -1171,9 +1333,36 @@ mod imp {
                 desc.width,
                 desc.height,
                 dirty_rects,
-            ) else {
+            ) {
+                Ok(draw_plan) => draw_plan,
+                Err(_reason) => {
+                    #[cfg(debug_assertions)]
+                    debug_log!(
+                        "event=lut_draw_skip reason={} overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} dirty_rect_count={}",
+                        _reason.as_str(),
+                        overlay_swap_chain,
+                        back_buffer as usize,
+                        frame_adapter_luid,
+                        frame_target_id,
+                        clip_box.left,
+                        clip_box.top,
+                        desc.format,
+                        desc.width,
+                        desc.height,
+                        dirty_rects.len()
+                    );
+                    unsafe {
+                        release(back_buffer);
+                        release(context);
+                        release(device);
+                    }
+                    return super::RenderPresentLutResult::default();
+                }
+            };
+            #[cfg(debug_assertions)]
+            if should_log_success_frame {
                 debug_log!(
-                    "event=lut_draw_skip overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} dirty_rect_count={}",
+                    "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} lut_index={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?}",
                     overlay_swap_chain,
                     back_buffer as usize,
                     frame_adapter_luid,
@@ -1183,31 +1372,12 @@ mod imp {
                     desc.format,
                     desc.width,
                     desc.height,
-                    dirty_rects.len()
+                    draw_plan.lut_index,
+                    dirty_rects.len(),
+                    draw_plan.dirty_rects.len(),
+                    draw_plan.dirty_rects.first()
                 );
-                unsafe {
-                    release(back_buffer);
-                    release(context);
-                    release(device);
-                }
-                return super::RenderPresentLutResult::default();
-            };
-            debug_log!(
-                "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} lut_index={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?}",
-                overlay_swap_chain,
-                back_buffer as usize,
-                frame_adapter_luid,
-                frame_target_id,
-                clip_box.left,
-                clip_box.top,
-                desc.format,
-                desc.width,
-                desc.height,
-                draw_plan.lut_index,
-                dirty_rects.len(),
-                draw_plan.dirty_rects.len(),
-                draw_plan.dirty_rects.first()
-            );
+            }
 
             let frame = RenderFrame {
                 device,
@@ -1227,6 +1397,80 @@ mod imp {
             result
         }
 
+        #[cfg(debug_assertions)]
+        fn should_log_success_frame(
+            &mut self,
+            overlay_swap_chain: usize,
+            desc: Texture2DDesc,
+            target_id: Option<u32>,
+        ) -> bool {
+            self.frame_diagnostics.should_log(
+                overlay_swap_chain,
+                FrameDiagnosticKey {
+                    dxgi_format: desc.format,
+                    target_id,
+                    width: desc.width,
+                    height: desc.height,
+                },
+            )
+        }
+
+        #[cfg(debug_assertions)]
+        unsafe fn overlay_swap_chain_to_back_buffer(
+            &mut self,
+            overlay_swap_chain: usize,
+            swap_chain_path: SwapChainPathHypothesis,
+        ) -> Option<ComPtr> {
+            let mut diagnostic = BackBuffer25H2Diagnostic::new();
+            let texture = unsafe {
+                dwm_lut_get_back_buffer_25h2_diagnostic(
+                    overlay_swap_chain as ComPtr,
+                    swap_chain_path.container_vtable_index,
+                    swap_chain_path.resource_vtable_index,
+                    &mut diagnostic,
+                )
+            };
+            let diagnostic_key = BackBufferHelperDiagnosticKey {
+                stage: diagnostic.stage,
+                hresult: diagnostic.hresult,
+                container: diagnostic.container as usize,
+                resource: diagnostic.resource as usize,
+                texture: diagnostic.texture as usize,
+            };
+            if diagnostic.stage != BACK_BUFFER_STAGE_SUCCESS
+                || self
+                    .back_buffer_helper_diagnostics
+                    .should_log(overlay_swap_chain, diagnostic_key)
+            {
+                debug_log!(
+                    "event=back_buffer_helper_result overlay_swap_chain=0x{:x} stage={} hresult={} container=0x{:x} resource=0x{:x} texture=0x{:x}",
+                    overlay_swap_chain,
+                    diagnostic.stage,
+                    diagnostic.hresult,
+                    diagnostic.container as usize,
+                    diagnostic.resource as usize,
+                    diagnostic.texture as usize
+                );
+            }
+            (!texture.is_null()).then_some(texture)
+        }
+
+        #[cfg(not(debug_assertions))]
+        unsafe fn overlay_swap_chain_to_back_buffer(
+            &mut self,
+            overlay_swap_chain: usize,
+            swap_chain_path: SwapChainPathHypothesis,
+        ) -> Option<ComPtr> {
+            let texture = unsafe {
+                dwm_lut_get_back_buffer_25h2(
+                    overlay_swap_chain as ComPtr,
+                    swap_chain_path.container_vtable_index,
+                    swap_chain_path.resource_vtable_index,
+                )
+            };
+            (!texture.is_null()).then_some(texture)
+        }
+
         unsafe fn render_with_device(
             &mut self,
             overlay_swap_chain: usize,
@@ -1244,6 +1488,11 @@ mod imp {
             let compile = match self.compiler() {
                 Some(compiler) => compiler.compile,
                 None => {
+                    debug_log!(
+                        "event=renderer_early_return reason=compiler_unavailable overlay_swap_chain=0x{:x} device=0x{:x}",
+                        overlay_swap_chain,
+                        device_key
+                    );
                     return super::RenderPresentLutResult::planned(
                         draw_plan.format,
                         draw_plan.lut_index,
@@ -1267,6 +1516,14 @@ mod imp {
                         compile,
                     )
                 }) else {
+                    debug_log!(
+                        "event=renderer_early_return reason=device_resources_create_failed overlay_swap_chain=0x{:x} device=0x{:x} width={} height={} lut_count={}",
+                        overlay_swap_chain,
+                        device_key,
+                        frame.width,
+                        frame.height,
+                        pipeline.luts.len()
+                    );
                     return super::RenderPresentLutResult::planned(
                         draw_plan.format,
                         draw_plan.lut_index,
@@ -1276,12 +1533,24 @@ mod imp {
             }
 
             let Some(resources) = self.devices.get_mut(&resource_key) else {
+                debug_log!(
+                    "event=renderer_early_return reason=device_resources_missing overlay_swap_chain=0x{:x} device=0x{:x}",
+                    overlay_swap_chain,
+                    device_key
+                );
                 return super::RenderPresentLutResult::planned(
                     draw_plan.format,
                     draw_plan.lut_index,
                 );
             };
             if draw_plan.lut_index >= resources.lut_srvs.len() {
+                debug_log!(
+                    "event=renderer_early_return reason=lut_index_out_of_range overlay_swap_chain=0x{:x} device=0x{:x} lut_index={} srv_count={}",
+                    overlay_swap_chain,
+                    device_key,
+                    draw_plan.lut_index,
+                    resources.lut_srvs.len()
+                );
                 return super::RenderPresentLutResult::planned(
                     draw_plan.format,
                     draw_plan.lut_index,
@@ -1328,6 +1597,11 @@ mod imp {
                 );
             }
             if draw_plan.dirty_rects.is_empty() {
+                debug_log!(
+                    "event=renderer_early_return reason=draw_rects_empty overlay_swap_chain=0x{:x} device=0x{:x}",
+                    overlay_swap_chain,
+                    device_key
+                );
                 return super::RenderPresentLutResult::planned(
                     draw_plan.format,
                     draw_plan.lut_index,
@@ -1507,6 +1781,14 @@ mod imp {
                     .for_format(frame.device, frame.width, frame.height, draw_plan.format)
                     .map(|resource| (resource.texture, resource.srv))
             }) else {
+                debug_log!(
+                    "event=renderer_early_return reason=copy_texture_create_failed device=0x{:x} back_buffer=0x{:x} width={} height={} format={:?}",
+                    frame.device as usize,
+                    frame.back_buffer as usize,
+                    frame.width,
+                    frame.height,
+                    draw_plan.format
+                );
                 return false;
             };
             let mut rtv: ComPtr = ptr::null_mut();
@@ -1519,6 +1801,11 @@ mod imp {
             } < S_OK
                 || rtv.is_null()
             {
+                debug_log!(
+                    "event=renderer_early_return reason=render_target_view_create_failed device=0x{:x} back_buffer=0x{:x}",
+                    frame.device as usize,
+                    frame.back_buffer as usize
+                );
                 return false;
             }
             let drew_any = super::with_restored_state(
@@ -1623,20 +1910,6 @@ mod imp {
                 pipeline,
             )
         }
-    }
-
-    unsafe fn overlay_swap_chain_to_back_buffer(
-        overlay_swap_chain: usize,
-        swap_chain_path: SwapChainPathHypothesis,
-    ) -> Option<ComPtr> {
-        let texture = unsafe {
-            dwm_lut_get_back_buffer_25h2(
-                overlay_swap_chain as ComPtr,
-                swap_chain_path.container_vtable_index,
-                swap_chain_path.resource_vtable_index,
-            )
-        };
-        (!texture.is_null()).then_some(texture)
     }
 
     unsafe fn d3d11_device_get_immediate_context(device: ComPtr, context: *mut ComPtr) {
