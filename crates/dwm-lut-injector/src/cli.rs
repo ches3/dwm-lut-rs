@@ -6,7 +6,7 @@ use crate::error::InjectorError;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CliOptions {
-    pub(crate) dll_path: PathBuf,
+    pub(crate) dll_path: Option<PathBuf>,
     pub(crate) manifest_path: PathBuf,
 }
 
@@ -55,7 +55,6 @@ where
         }
     }
 
-    let dll_path = dll_path.ok_or_else(|| InjectorError::Usage(usage_message("missing --dll")))?;
     let manifest_path =
         manifest_path.ok_or_else(|| InjectorError::Usage(usage_message("missing --manifest")))?;
 
@@ -66,7 +65,7 @@ where
 }
 
 fn usage_message(problem: &str) -> String {
-    let usage = "usage: dwm-lut-injector --dll <hook-dll-path> --manifest <manifest-path>";
+    let usage = "usage: dwm-lut-injector [--dll <hook-dll-path>] --manifest <manifest-path>";
     if problem.is_empty() {
         usage.to_string()
     } else {
@@ -95,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn requires_both_dll_and_manifest_paths() {
+    fn requires_manifest_path() {
         let error = parse_args_from(["dwm-lut-injector", "--dll", "hook.dll"])
             .expect_err("missing manifest must be rejected");
 
@@ -108,7 +107,21 @@ mod tests {
     }
 
     #[test]
-    fn accepts_required_arguments() {
+    fn accepts_manifest_without_explicit_dll() {
+        let parsed = parse_args_from(["dwm-lut-injector", "--manifest", "manifest.json"])
+            .expect("manifest-only arguments should parse");
+
+        assert_eq!(
+            run_options(parsed),
+            CliOptions {
+                dll_path: None,
+                manifest_path: PathBuf::from("manifest.json"),
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_explicit_dll_argument() {
         let parsed = parse_args_from([
             "dwm-lut-injector",
             "--dll",
@@ -121,7 +134,7 @@ mod tests {
         assert_eq!(
             run_options(parsed),
             CliOptions {
-                dll_path: PathBuf::from("hook.dll"),
+                dll_path: Some(PathBuf::from("hook.dll")),
                 manifest_path: PathBuf::from("manifest.json"),
             }
         );
