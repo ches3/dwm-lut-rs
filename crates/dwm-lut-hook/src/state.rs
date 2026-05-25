@@ -3,6 +3,8 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(not(test))]
+use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
 
 use dwm_lut_config::{LutManifest, MonitorIdentity};
@@ -123,22 +125,43 @@ pub struct HookState {
 }
 
 #[cfg(not(test))]
-static STATE: OnceLock<Mutex<HookState>> = OnceLock::new();
+static STATE: OnceLock<Mutex<Option<HookState>>> = OnceLock::new();
+
+#[cfg(not(test))]
+static LIFECYCLE: AtomicU8 = AtomicU8::new(LIFECYCLE_IDLE);
+
+const LIFECYCLE_IDLE: u8 = 0;
+const LIFECYCLE_RUNNING: u8 = 1;
+const LIFECYCLE_SHUTTING_DOWN: u8 = 2;
+const LIFECYCLE_SHUT_DOWN: u8 = 3;
 
 #[cfg(test)]
 thread_local! {
     static STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
+    static LIFECYCLE: RefCell<u8> = const { RefCell::new(LIFECYCLE_IDLE) };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownStart {
+    Started,
+    NotInitialized,
+    AlreadyInProgress,
+    AlreadyShutDown,
 }
 
 pub(crate) fn install_state(state: HookState) -> Result<(), Box<HookState>> {
     #[cfg(not(test))]
     {
-        STATE
-            .set(Mutex::new(state))
-            .map_err(|mutex| match mutex.into_inner() {
-                Ok(state) => Box::new(state),
-                Err(poisoned) => Box::new(poisoned.into_inner()),
-            })
+        let slot = STATE.get_or_init(|| Mutex::new(None));
+        let Ok(mut slot) = slot.lock() else {
+            return Err(Box::new(state));
+        };
+        if slot.is_some() {
+            return Err(Box::new(state));
+        }
+        *slot = Some(state);
+        LIFECYCLE.store(LIFECYCLE_RUNNING, Ordering::Release);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -149,6 +172,7 @@ pub(crate) fn install_state(state: HookState) -> Result<(), Box<HookState>> {
                 Err(Box::new(state))
             } else {
                 *slot = Some(state);
+                LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_RUNNING);
                 Ok(())
             }
         })
@@ -158,7 +182,10 @@ pub(crate) fn install_state(state: HookState) -> Result<(), Box<HookState>> {
 pub fn is_initialized() -> bool {
     #[cfg(not(test))]
     {
-        STATE.get().is_some()
+        STATE
+            .get()
+            .and_then(|state| state.lock().ok().map(|guard| guard.is_some()))
+            .unwrap_or(false)
     }
 
     #[cfg(test)]
@@ -217,6 +244,124 @@ pub(crate) fn evaluate_present_hook(
             clip_box,
             dxgi_format,
             dirty_rects,
+        )
+    })
+}
+
+pub(crate) fn is_shutting_down() -> bool {
+    #[cfg(not(test))]
+    {
+        matches!(
+            LIFECYCLE.load(Ordering::Acquire),
+            LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_SHUT_DOWN
+        )
+    }
+
+    #[cfg(test)]
+    {
+        LIFECYCLE.with(|lifecycle| {
+            matches!(
+                *lifecycle.borrow(),
+                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_SHUT_DOWN
+            )
+        })
+    }
+}
+
+pub(crate) fn begin_shutdown() -> ShutdownStart {
+    #[cfg(not(test))]
+    {
+        match LIFECYCLE.compare_exchange(
+            LIFECYCLE_RUNNING,
+            LIFECYCLE_SHUTTING_DOWN,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => ShutdownStart::Started,
+            Err(LIFECYCLE_IDLE) => ShutdownStart::NotInitialized,
+            Err(LIFECYCLE_SHUTTING_DOWN) => ShutdownStart::AlreadyInProgress,
+            Err(LIFECYCLE_SHUT_DOWN) => ShutdownStart::AlreadyShutDown,
+            Err(_) => ShutdownStart::NotInitialized,
+        }
+    }
+
+    #[cfg(test)]
+    {
+        LIFECYCLE.with(|lifecycle| {
+            let mut lifecycle = lifecycle.borrow_mut();
+            match *lifecycle {
+                LIFECYCLE_RUNNING => {
+                    *lifecycle = LIFECYCLE_SHUTTING_DOWN;
+                    ShutdownStart::Started
+                }
+                LIFECYCLE_IDLE => ShutdownStart::NotInitialized,
+                LIFECYCLE_SHUTTING_DOWN => ShutdownStart::AlreadyInProgress,
+                LIFECYCLE_SHUT_DOWN => ShutdownStart::AlreadyShutDown,
+                _ => ShutdownStart::NotInitialized,
+            }
+        })
+    }
+}
+
+pub(crate) fn mark_process_detaching() {
+    #[cfg(not(test))]
+    {
+        let _ = LIFECYCLE.compare_exchange(
+            LIFECYCLE_RUNNING,
+            LIFECYCLE_SHUT_DOWN,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    #[cfg(test)]
+    {
+        LIFECYCLE.with(|lifecycle| {
+            let mut lifecycle = lifecycle.borrow_mut();
+            if *lifecycle == LIFECYCLE_RUNNING {
+                *lifecycle = LIFECYCLE_SHUT_DOWN;
+            }
+        });
+    }
+}
+
+pub(crate) fn clear_state_after_shutdown() {
+    #[cfg(not(test))]
+    {
+        if let Some(state) = STATE.get()
+            && let Ok(mut guard) = state.lock()
+        {
+            *guard = None;
+        }
+        LIFECYCLE.store(LIFECYCLE_IDLE, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    {
+        STATE.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+        LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_IDLE);
+    }
+}
+
+pub(crate) fn finish_failed_shutdown() {
+    #[cfg(not(test))]
+    {
+        LIFECYCLE.store(LIFECYCLE_SHUT_DOWN, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    {
+        LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_SHUT_DOWN);
+    }
+}
+
+pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
+    with_state(|state| {
+        (
+            state.runtime.minhook.clone(),
+            state.runtime.hook_registration.hooks.clone(),
         )
     })
 }
@@ -366,7 +511,7 @@ pub(crate) fn restore_overlay_test_mode() {
 fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
     let state = STATE.get()?;
     let guard = state.lock().ok()?;
-    Some(f(&guard))
+    guard.as_ref().map(f)
 }
 
 #[cfg(test)]
@@ -378,7 +523,7 @@ fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
 fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
     let state = STATE.get()?;
     let mut guard = state.lock().ok()?;
-    Some(f(&mut guard))
+    guard.as_mut().map(f)
 }
 
 #[cfg(test)]
@@ -394,6 +539,7 @@ pub(crate) fn reset_state_for_tests() {
     STATE.with(|slot| {
         *slot.borrow_mut() = None;
     });
+    LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_IDLE);
     crate::bootstrap::reset_initialization_guard_for_tests();
     crate::d3d11_renderer::reset_test_render_present_lut_result();
     crate::desktop_redraw::reset_for_tests();

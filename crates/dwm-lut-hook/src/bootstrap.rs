@@ -13,13 +13,16 @@ use crate::LutBypassRuntime;
 use std::sync::Arc;
 
 use crate::lut_pipeline::{LutPipeline, LutPipelineError};
-use crate::minhook::{MinHookError, register_plan, unregister_registered_hooks};
+use crate::minhook::{
+    MinHookCleanupOperation, MinHookError, register_plan, unregister_registered_hooks,
+};
 use crate::profile::{BuildProfile, HookProfile};
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
     HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime, HookState,
     InitializationStage, LoggerState, LutBypassState, LutPipelineState, ManifestLoadState,
-    SignatureResolutionState, install_state, is_initialized,
+    ShutdownStart, SignatureResolutionState, begin_shutdown, clear_state_after_shutdown,
+    finish_failed_shutdown, install_state, is_initialized, minhook_cleanup_plan,
 };
 
 #[cfg(not(test))]
@@ -53,6 +56,18 @@ fn enter_initialization() -> Result<InitializationGuard, HookError> {
     }
 
     Ok(InitializationGuard)
+}
+
+fn is_initialization_in_progress() -> bool {
+    #[cfg(not(test))]
+    {
+        INITIALIZATION_IN_PROGRESS.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    {
+        INITIALIZATION_IN_PROGRESS.with(Cell::get)
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +191,16 @@ enum InitializeStatus {
     MinHookEnableHookFailed = 29,
 }
 
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownStatus {
+    Success = 0,
+    NotInitialized = 1,
+    AlreadyInProgress = 2,
+    AlreadyShutDown = 3,
+    MinHookCleanupFailed = 4,
+}
+
 pub fn build_profile() -> BuildProfile {
     BuildProfile::Windows11_25H2
 }
@@ -220,6 +245,95 @@ pub(crate) fn ffi_initialize(manifest_path: *const u16) -> u32 {
             InitializeStatus::Success as u32
         }
         Err(error) => finish_initialize_error(error),
+    }
+}
+
+pub(crate) fn ffi_shutdown() -> u32 {
+    debug_log!("event=shutdown_start");
+    if is_initialization_in_progress() {
+        debug_log!(
+            "event=shutdown_finished status={} reason={}",
+            ShutdownStatus::AlreadyInProgress as u32,
+            crate::debug_log::quoted("initialization_in_progress")
+        );
+        return ShutdownStatus::AlreadyInProgress as u32;
+    }
+
+    match begin_shutdown() {
+        ShutdownStart::Started => {}
+        ShutdownStart::NotInitialized => {
+            debug_log!(
+                "event=shutdown_finished status={} reason={}",
+                ShutdownStatus::NotInitialized as u32,
+                crate::debug_log::quoted("not_initialized")
+            );
+            return ShutdownStatus::NotInitialized as u32;
+        }
+        ShutdownStart::AlreadyInProgress => {
+            debug_log!(
+                "event=shutdown_finished status={} reason={}",
+                ShutdownStatus::AlreadyInProgress as u32,
+                crate::debug_log::quoted("already_in_progress")
+            );
+            return ShutdownStatus::AlreadyInProgress as u32;
+        }
+        ShutdownStart::AlreadyShutDown => {
+            debug_log!(
+                "event=shutdown_finished status={} reason={}",
+                ShutdownStatus::AlreadyShutDown as u32,
+                crate::debug_log::quoted("already_shutdown")
+            );
+            return ShutdownStatus::AlreadyShutDown as u32;
+        }
+    }
+
+    let Some((minhook, hooks)) = minhook_cleanup_plan() else {
+        clear_state_after_shutdown();
+        debug_log!(
+            "event=shutdown_finished status={} reason={}",
+            ShutdownStatus::Success as u32,
+            crate::debug_log::quoted("state_missing")
+        );
+        return ShutdownStatus::Success as u32;
+    };
+
+    crate::state::restore_overlay_test_mode();
+
+    let cleanup_failures = unregister_registered_hooks(&minhook, &hooks);
+    for failure in &cleanup_failures {
+        debug_log!(
+            "event=minhook_cleanup_failed operation={:?} target={} status={}",
+            failure.operation,
+            crate::debug_log::quoted(failure.target.label()),
+            failure.status
+        );
+    }
+
+    let renderer_device_count = crate::d3d11_renderer::shutdown_renderer_resources();
+    debug_log!(
+        "event=renderer_resources_released device_resource_count={}",
+        renderer_device_count
+    );
+
+    if cleanup_failures
+        .iter()
+        .any(|failure| failure.operation == MinHookCleanupOperation::RemoveHook)
+    {
+        finish_failed_shutdown();
+        debug_log!(
+            "event=shutdown_finished status={} cleanup_failure_count={}",
+            ShutdownStatus::MinHookCleanupFailed as u32,
+            cleanup_failures.len()
+        );
+        ShutdownStatus::MinHookCleanupFailed as u32
+    } else {
+        clear_state_after_shutdown();
+        debug_log!(
+            "event=shutdown_finished status={} cleanup_failure_count={}",
+            ShutdownStatus::Success as u32,
+            cleanup_failures.len()
+        );
+        ShutdownStatus::Success as u32
     }
 }
 

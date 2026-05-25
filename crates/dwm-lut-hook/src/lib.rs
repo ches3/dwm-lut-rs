@@ -57,6 +57,11 @@ pub unsafe extern "system" fn dwm_lut_initialize(manifest_path: *const u16) -> u
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn dwm_lut_shutdown() -> u32 {
+    bootstrap::ffi_shutdown()
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn dwm_lut_overlays_enabled(
     context_address: usize,
     original_enabled: i32,
@@ -145,6 +150,7 @@ pub unsafe extern "system" fn DllMain(
             DisableThreadLibraryCalls(module);
         }
     } else if reason == DLL_PROCESS_DETACH {
+        state::mark_process_detaching();
         state::restore_overlay_test_mode();
     }
 
@@ -163,8 +169,8 @@ mod tests {
     use super::{
         BuildProfile, HookConfig, HookProfile, HookTarget, InitializationStage, LutBypassState,
         ManifestLoadState, SignatureLocator, SignatureResolutionReport, build_profile,
-        dwm_lut_initialize, hook_profile, initialization_trace, is_initialized, lut_bypass_runtime,
-        lut_pipeline_summary, manifest_path, signature_resolution,
+        dwm_lut_initialize, dwm_lut_shutdown, hook_profile, initialization_trace, is_initialized,
+        lut_bypass_runtime, lut_pipeline_summary, manifest_path, signature_resolution,
     };
     use crate::bootstrap::initialize_with_resolution;
     use crate::resolver::{LoadedModule, ResolvedTarget};
@@ -440,6 +446,86 @@ mod tests {
 
         assert!(matches!(result, Err(super::HookError::AlreadyInitialized)));
         assert!(!is_initialized());
+        let _ = fs::remove_file(expected_manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn shutdown_reports_in_progress_while_initialization_guard_is_held() {
+        reset_state_for_tests();
+        let _initialization = super::bootstrap::hold_initialization_for_tests()
+            .expect("test should acquire initialization guard");
+
+        assert_eq!(dwm_lut_shutdown(), 2);
+        assert!(!is_initialized());
+    }
+
+    #[test]
+    fn shutdown_releases_state_and_allows_reinitialization() {
+        reset_state_for_tests();
+        let (expected_manifest_path, cube_path) = synthetic_manifest_paths();
+        let config = HookConfig {
+            manifest_path: expected_manifest_path.clone(),
+            profile: BuildProfile::Windows11_25H2,
+        };
+        let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
+
+        initialize_with_resolution(config.clone(), resolution.clone())
+            .expect("initialization should succeed");
+        assert!(is_initialized());
+
+        assert_eq!(dwm_lut_shutdown(), 0);
+        assert!(!is_initialized());
+
+        initialize_with_resolution(config, resolution).expect("reinitialization should succeed");
+        assert!(is_initialized());
+
+        let _ = dwm_lut_shutdown();
+        let _ = fs::remove_file(expected_manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn shutdown_after_process_detach_reports_already_shutdown() {
+        reset_state_for_tests();
+        let (expected_manifest_path, cube_path) = synthetic_manifest_paths();
+        let config = HookConfig {
+            manifest_path: expected_manifest_path.clone(),
+            profile: BuildProfile::Windows11_25H2,
+        };
+        let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
+
+        initialize_with_resolution(config, resolution).expect("initialization should succeed");
+
+        let dllmain_result = unsafe { super::DllMain(ptr::null_mut(), 0, ptr::null_mut()) };
+        assert_eq!(dllmain_result, 1);
+        assert_eq!(dwm_lut_shutdown(), 3);
+        assert!(is_initialized());
+
+        reset_state_for_tests();
+        let _ = fs::remove_file(expected_manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn shutdown_remove_failure_keeps_state_and_rejects_reinitialization() {
+        reset_state_for_tests();
+        let (expected_manifest_path, cube_path) = synthetic_manifest_paths();
+        let config = HookConfig {
+            manifest_path: expected_manifest_path.clone(),
+            profile: BuildProfile::Windows11_25H2,
+        };
+        let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
+
+        initialize_with_resolution(config.clone(), resolution.clone())
+            .expect("initialization should succeed");
+        crate::minhook::reset_test_minhook_behavior(None, None, None, Some(1));
+
+        assert_eq!(dwm_lut_shutdown(), 4);
+        assert!(is_initialized());
+        assert!(initialize_with_resolution(config, resolution).is_err());
+        assert_eq!(dwm_lut_shutdown(), 3);
+
         let _ = fs::remove_file(expected_manifest_path);
         let _ = fs::remove_file(cube_path);
     }

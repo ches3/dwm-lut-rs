@@ -428,6 +428,11 @@ pub(crate) unsafe fn render_present_lut(
 }
 
 #[cfg(test)]
+pub(crate) fn shutdown_renderer_resources() -> usize {
+    0
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::lut_pipeline::{
@@ -1631,6 +1636,18 @@ mod imp {
             }
             self.compiler.as_ref()
         }
+
+        fn clear_resources(&mut self) -> usize {
+            let device_count = self.devices.len();
+            self.devices.clear();
+            self.compiler = None;
+            #[cfg(debug_assertions)]
+            {
+                self.frame_diagnostics = PerOverlayDiagnosticLogLimiter::default();
+                self.back_buffer_helper_diagnostics = PerOverlayDiagnosticLogLimiter::default();
+            }
+            device_count
+        }
     }
 
     struct DeviceResources {
@@ -1910,6 +1927,16 @@ mod imp {
                 pipeline,
             )
         }
+    }
+
+    pub(crate) fn shutdown_renderer_resources() -> usize {
+        let Some(renderer) = RENDERER.get() else {
+            return 0;
+        };
+        let Ok(mut renderer) = renderer.lock() else {
+            return 0;
+        };
+        renderer.clear_resources()
     }
 
     unsafe fn d3d11_device_get_immediate_context(device: ComPtr, context: *mut ComPtr) {
@@ -3095,4 +3122,4 @@ mod imp {
 }
 
 #[cfg(not(test))]
-pub(crate) use imp::render_present_lut;
+pub(crate) use imp::{render_present_lut, shutdown_renderer_resources};

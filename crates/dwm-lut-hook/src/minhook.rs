@@ -1220,6 +1220,10 @@ unsafe extern "system" fn present_detour_impl(
     if original.is_null() {
         return 0;
     }
+    if state::is_shutting_down() {
+        let original: PresentOriginal = unsafe { std::mem::transmute(original) };
+        return unsafe { original(this, overlay_swap_chain, a3, rect_vec, a5, a6, a7) };
+    }
     if should_log_present_detour_enter(overlay_swap_chain) {
         debug_log!(
             "event=present_detour_enter this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x}",
@@ -1332,16 +1336,25 @@ unsafe extern "system" fn direct_flip_detour(
 ) -> u8 {
     let original =
         unsafe { forward_overlay_direct_flip(&DIRECT_FLIP_ORIGINAL, this, a2, a3, a4, a5, a6) };
+    if state::is_shutting_down() {
+        return original;
+    }
     bool_to_u8(state::evaluate_direct_flip_compatible(this, original != 0).unwrap_or(original != 0))
 }
 
 unsafe extern "system" fn overlays_enabled_detour(this: usize) -> u8 {
     let original = unsafe { forward_bool1(&OVERLAYS_ENABLED_ORIGINAL, this) };
+    if state::is_shutting_down() {
+        return original;
+    }
     bool_to_u8(state::evaluate_overlays_enabled(this, original != 0).unwrap_or(original != 0))
 }
 
 unsafe extern "system" fn window_direct_flip_detour(this: usize, a2: usize, a3: u8) -> u8 {
     let original = unsafe { forward_bool3(&WINDOW_DIRECT_FLIP_ORIGINAL, this, a2, a3) };
+    if state::is_shutting_down() {
+        return original;
+    }
     bool_to_u8(
         state::evaluate_window_context_direct_flip_compatible(original != 0)
             .unwrap_or(original != 0),
@@ -1350,6 +1363,9 @@ unsafe extern "system" fn window_direct_flip_detour(this: usize, a2: usize, a3: 
 
 unsafe extern "system" fn comp_swap_chain_direct_flip_detour(this: usize, a2: usize, a3: u8) -> u8 {
     let original = unsafe { forward_bool3(&COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL, this, a2, a3) };
+    if state::is_shutting_down() {
+        return original;
+    }
     bool_to_u8(
         state::evaluate_comp_swap_chain_direct_flip_compatible(original != 0)
             .unwrap_or(original != 0),
@@ -1358,6 +1374,9 @@ unsafe extern "system" fn comp_swap_chain_direct_flip_detour(this: usize, a2: us
 
 unsafe extern "system" fn comp_swap_chain_independent_flip_detour(this: usize) -> u8 {
     let original = unsafe { forward_bool1(&COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL, this) };
+    if state::is_shutting_down() {
+        return original;
+    }
     bool_to_u8(
         state::evaluate_comp_swap_chain_independent_flip_compatible(original != 0)
             .unwrap_or(original != 0),
@@ -1372,6 +1391,9 @@ unsafe extern "system" fn comp_visual_promotion_detour(this: usize, a2: usize, a
 
     let original: ForwardCompVisual = unsafe { std::mem::transmute(original) };
     let original = unsafe { original(this, a2, a3) };
+    if state::is_shutting_down() {
+        return original;
+    }
     bool_to_u8(
         state::evaluate_comp_visual_candidate_for_promotion(original != 0).unwrap_or(original != 0),
     )
