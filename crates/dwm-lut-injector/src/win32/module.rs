@@ -16,29 +16,80 @@ pub(crate) struct RemoteModule {
     pub(crate) base_address: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NamedRemoteModule {
+    pub(crate) module: RemoteModule,
+    pub(crate) name: String,
+    pub(crate) path: String,
+}
+
 pub(crate) fn find_remote_module(
     pid: u32,
     module_name: &str,
     step: InjectionStep,
 ) -> Result<RemoteModule, InjectorError> {
+    Ok(find_remote_module_by_name(pid, step, module_name, |name| {
+        name.eq_ignore_ascii_case(module_name)
+    })?
+    .module)
+}
+
+pub(crate) fn find_remote_module_by_name(
+    pid: u32,
+    step: InjectionStep,
+    missing_module_name: &str,
+    mut matches: impl FnMut(&str) -> bool,
+) -> Result<NamedRemoteModule, InjectorError> {
+    let mut modules = find_remote_modules_by_name(pid, step, |module| matches(&module.name))?;
+    modules
+        .drain(..)
+        .next()
+        .ok_or_else(|| InjectorError::RemoteModuleNotFound {
+            module: missing_module_name.to_string(),
+        })
+}
+
+pub(crate) fn find_remote_modules_by_name(
+    pid: u32,
+    step: InjectionStep,
+    mut matches: impl FnMut(&NamedRemoteModule) -> bool,
+) -> Result<Vec<NamedRemoteModule>, InjectorError> {
     let snapshot = create_module_snapshot(pid, step)?;
     let mut entry = empty_module_entry();
+    let mut modules = Vec::new();
 
     let mut has_entry = unsafe { Module32FirstW(snapshot.raw(), &mut entry) };
     if has_entry == FALSE {
-        return module_lookup_error(last_os_error(), step, module_name);
+        let error = last_os_error();
+        if is_no_more_files_error(&error) {
+            return Ok(modules);
+        }
+
+        return Err(module_lookup_error(error, step));
     }
 
     loop {
-        if utf16_to_string(&entry.szModule).eq_ignore_ascii_case(module_name) {
-            return Ok(RemoteModule {
+        let name = utf16_to_string(&entry.szModule);
+        let path = utf16_to_string(&entry.szExePath);
+        let module = NamedRemoteModule {
+            module: RemoteModule {
                 base_address: entry.modBaseAddr as usize,
-            });
+            },
+            name,
+            path,
+        };
+        if matches(&module) {
+            modules.push(module);
         }
 
         has_entry = unsafe { Module32NextW(snapshot.raw(), &mut entry) };
         if has_entry == FALSE {
-            return module_lookup_error(last_os_error(), step, module_name);
+            let error = last_os_error();
+            if is_no_more_files_error(&error) {
+                return Ok(modules);
+            }
+
+            return Err(module_lookup_error(error, step));
         }
     }
 }
@@ -62,21 +113,11 @@ fn empty_module_entry() -> MODULEENTRY32W {
     }
 }
 
-fn module_lookup_error(
-    error: io::Error,
-    step: InjectionStep,
-    module_name: &str,
-) -> Result<RemoteModule, InjectorError> {
-    if is_no_more_files_error(&error) {
-        return Err(InjectorError::RemoteModuleNotFound {
-            module: module_name.to_string(),
-        });
-    }
-
-    Err(InjectorError::StepFailed {
+fn module_lookup_error(error: io::Error, step: InjectionStep) -> InjectorError {
+    InjectorError::StepFailed {
         step,
         source: error,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -94,13 +135,13 @@ mod tests {
         let error = module_lookup_error(
             io::Error::from_raw_os_error(ERROR_NO_MORE_FILES as i32),
             InjectionStep::ResolveKernel32,
-            "kernel32.dll",
-        )
-        .expect_err("missing module must be reported");
+        );
 
         assert!(matches!(
             error,
-            InjectorError::RemoteModuleNotFound { module } if module == "kernel32.dll"
+            InjectorError::StepFailed { step, source }
+                if step == InjectionStep::ResolveKernel32
+                    && source.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32)
         ));
     }
 }

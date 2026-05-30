@@ -131,7 +131,15 @@ fn is_staged_hook_dll_path(path: &Path) -> bool {
         return false;
     };
 
-    file_name.starts_with("dwm_lut_hook-") && file_name.ends_with(".dll")
+    let lower = file_name.to_ascii_lowercase();
+    let Some(hex) = lower
+        .strip_prefix("dwm_lut_hook-")
+        .and_then(|value| value.strip_suffix(".dll"))
+    else {
+        return false;
+    };
+
+    hex.len() == HASH_PREFIX_BYTES * 2 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn verify_staged_file(staged_path: &Path, expected_hash: &[u8]) -> Result<(), InjectorError> {
@@ -277,11 +285,23 @@ mod tests {
         assert!(is_staged_hook_dll_path(Path::new(
             r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdef.dll"
         )));
+        assert!(is_staged_hook_dll_path(Path::new(
+            r"C:\ProgramData\dwm-lut-rs\hook\DWM_LUT_HOOK-0123456789ABCDEF0123456789ABCDEF.DLL"
+        )));
         assert!(!is_staged_hook_dll_path(Path::new(
             r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook.dll"
         )));
         assert!(!is_staged_hook_dll_path(Path::new(
             r"C:\ProgramData\dwm-lut-rs\hook\other-0123456789abcdef0123456789abcdef.dll"
+        )));
+        assert!(!is_staged_hook_dll_path(Path::new(
+            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef.dll"
+        )));
+        assert!(!is_staged_hook_dll_path(Path::new(
+            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdeg.dll"
+        )));
+        assert!(!is_staged_hook_dll_path(Path::new(
+            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdef-extra.dll"
         )));
     }
 
@@ -297,18 +317,22 @@ mod tests {
         let current = dir.join("dwm_lut_hook-11111111111111111111111111111111.dll");
         let stale = dir.join("dwm_lut_hook-22222222222222222222222222222222.dll");
         let unrelated = dir.join("dwm_lut_hook.dll");
+        let prefix_only = dir.join("dwm_lut_hook-not-a-content-address.dll");
         fs::write(&current, b"current").expect("current staged DLL should be written");
         fs::write(&stale, b"stale").expect("stale staged DLL should be written");
         fs::write(&unrelated, b"unrelated").expect("unrelated DLL should be written");
+        fs::write(&prefix_only, b"unrelated").expect("prefix-only DLL should be written");
 
         cleanup_stale_staged_dlls(&dir, &current);
 
         assert!(current.exists());
         assert!(!stale.exists());
         assert!(unrelated.exists());
+        assert!(prefix_only.exists());
 
         let _ = fs::remove_file(current);
         let _ = fs::remove_file(unrelated);
+        let _ = fs::remove_file(prefix_only);
         let _ = fs::remove_dir(dir);
     }
 }

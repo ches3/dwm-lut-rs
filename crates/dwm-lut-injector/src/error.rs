@@ -36,6 +36,40 @@ pub(crate) enum HookInitializeStatus {
     MinHookEnableHookFailed = 29,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HookShutdownStatus {
+    Success = 0,
+    NotInitialized = 1,
+    AlreadyInProgress = 2,
+    AlreadyShutDown = 3,
+    MinHookCleanupFailed = 4,
+}
+
+impl HookShutdownStatus {
+    pub(crate) fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Success),
+            1 => Some(Self::NotInitialized),
+            2 => Some(Self::AlreadyInProgress),
+            3 => Some(Self::AlreadyShutDown),
+            4 => Some(Self::MinHookCleanupFailed),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for HookShutdownStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success => write!(f, "success"),
+            Self::NotInitialized => write!(f, "hook DLL is loaded but not initialized"),
+            Self::AlreadyInProgress => write!(f, "hook shutdown is already in progress"),
+            Self::AlreadyShutDown => write!(f, "hook DLL is already shut down"),
+            Self::MinHookCleanupFailed => write!(f, "MinHook cleanup failed"),
+        }
+    }
+}
+
 impl HookInitializeStatus {
     pub(crate) fn from_code(code: u32) -> Option<Self> {
         match code {
@@ -184,11 +218,14 @@ pub(crate) enum InjectionStep {
     VerifyStagedHookDll,
     SecureStagedHookDll,
     ResolveInitializeExport,
+    ResolveShutdownExport,
     ResolveManifestPath,
     AllocateManifestPath,
     WriteManifestPath,
     StartInitialize,
     WaitInitialize,
+    StartShutdown,
+    WaitShutdown,
 }
 
 impl fmt::Display for InjectionStep {
@@ -220,11 +257,14 @@ impl fmt::Display for InjectionStep {
             Self::VerifyStagedHookDll => write!(f, "staged hook DLL verification"),
             Self::SecureStagedHookDll => write!(f, "staged hook DLL ACL update"),
             Self::ResolveInitializeExport => write!(f, "dwm_lut_initialize export resolution"),
+            Self::ResolveShutdownExport => write!(f, "dwm_lut_shutdown export resolution"),
             Self::ResolveManifestPath => write!(f, "local manifest path validation"),
             Self::AllocateManifestPath => write!(f, "remote manifest path allocation"),
             Self::WriteManifestPath => write!(f, "remote manifest path write"),
             Self::StartInitialize => write!(f, "remote initialize launch"),
             Self::WaitInitialize => write!(f, "remote initialize wait"),
+            Self::StartShutdown => write!(f, "remote shutdown launch"),
+            Self::WaitShutdown => write!(f, "remote shutdown wait"),
         }
     }
 }
@@ -258,6 +298,8 @@ pub(crate) enum InjectorError {
     },
     HookInitializeFailed(HookInitializeStatus),
     UnknownHookInitializeStatus(u32),
+    HookShutdownFailed(HookShutdownStatus),
+    UnknownHookShutdownStatus(u32),
 }
 
 impl fmt::Display for InjectorError {
@@ -295,6 +337,12 @@ impl fmt::Display for InjectorError {
             }
             Self::UnknownHookInitializeStatus(code) => {
                 write!(f, "hook initialize returned unknown status {code:#x}")
+            }
+            Self::HookShutdownFailed(status) => {
+                write!(f, "hook shutdown failed: {status}")
+            }
+            Self::UnknownHookShutdownStatus(code) => {
+                write!(f, "hook shutdown returned unknown status {code:#x}")
             }
         }
     }

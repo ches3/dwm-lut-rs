@@ -11,7 +11,9 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;
 use crate::error::{InjectionStep, InjectorError};
 
 pub(crate) use export::{resolve_remote_export_address, resolve_remote_module_export_address};
-pub(crate) use module::{RemoteModule, find_remote_module};
+pub(crate) use module::{
+    NamedRemoteModule, RemoteModule, find_remote_module, find_remote_modules_by_name,
+};
 pub(crate) use process::{enable_debug_privilege, find_process_id_by_name, open_target_process};
 pub(crate) use remote::{OwnedHandle, RemoteAllocation, run_remote_thread, wide_null};
 

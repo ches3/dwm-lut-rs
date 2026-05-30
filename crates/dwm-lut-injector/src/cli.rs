@@ -10,9 +10,15 @@ pub(crate) struct CliOptions {
     pub(crate) manifest_path: PathBuf,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CliCommand {
+    Apply(CliOptions),
+    Disable,
+}
+
 #[derive(Debug)]
 pub(crate) enum ParseArgsResult {
-    Run(CliOptions),
+    Run(CliCommand),
     Help(String),
 }
 
@@ -28,6 +34,26 @@ where
     let mut args = args.into_iter().map(Into::into);
     let _program = args.next();
 
+    let first = args.next();
+    let Some(first) = first else {
+        return Err(InjectorError::Usage(usage_message("missing command")));
+    };
+    let first_string = first.to_string_lossy();
+    if first_string == "--help" || first_string == "-h" {
+        return Ok(ParseArgsResult::Help(usage_message("")));
+    }
+    match first_string.as_ref() {
+        "apply" => parse_apply_args(args),
+        "disable" => parse_disable_args(args),
+        other => Err(InjectorError::Usage(usage_message(&format!(
+            "unknown command: {other}"
+        )))),
+    }
+}
+
+fn parse_apply_args(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<ParseArgsResult, InjectorError> {
     let mut dll_path = None;
     let mut manifest_path = None;
     while let Some(arg) = args.next() {
@@ -58,14 +84,27 @@ where
     let manifest_path =
         manifest_path.ok_or_else(|| InjectorError::Usage(usage_message("missing --manifest")))?;
 
-    Ok(ParseArgsResult::Run(CliOptions {
+    Ok(ParseArgsResult::Run(CliCommand::Apply(CliOptions {
         dll_path,
         manifest_path,
-    }))
+    })))
+}
+
+fn parse_disable_args(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<ParseArgsResult, InjectorError> {
+    if let Some(arg) = args.next() {
+        return Err(InjectorError::Usage(usage_message(&format!(
+            "unknown argument for disable: {}",
+            arg.to_string_lossy()
+        ))));
+    }
+
+    Ok(ParseArgsResult::Run(CliCommand::Disable))
 }
 
 fn usage_message(problem: &str) -> String {
-    let usage = "usage: dwm-lut-injector [--dll <hook-dll-path>] --manifest <manifest-path>";
+    let usage = "usage: dwm-lut-injector apply [--dll <hook-dll-path>] --manifest <manifest-path>\n       dwm-lut-injector disable";
     if problem.is_empty() {
         usage.to_string()
     } else {
@@ -79,7 +118,7 @@ mod tests {
 
     use crate::error::InjectorError;
 
-    use super::{CliOptions, ParseArgsResult, parse_args_from};
+    use super::{CliCommand, CliOptions, ParseArgsResult, parse_args_from};
 
     #[test]
     fn reports_help_without_treating_it_as_invalid_usage() {
@@ -95,7 +134,7 @@ mod tests {
 
     #[test]
     fn requires_manifest_path() {
-        let error = parse_args_from(["dwm-lut-injector", "--dll", "hook.dll"])
+        let error = parse_args_from(["dwm-lut-injector", "apply", "--dll", "hook.dll"])
             .expect_err("missing manifest must be rejected");
 
         match error {
@@ -107,9 +146,22 @@ mod tests {
     }
 
     #[test]
-    fn accepts_manifest_without_explicit_dll() {
-        let parsed = parse_args_from(["dwm-lut-injector", "--manifest", "manifest.json"])
-            .expect("manifest-only arguments should parse");
+    fn rejects_manifest_without_command() {
+        let error = parse_args_from(["dwm-lut-injector", "--manifest", "manifest.json"])
+            .expect_err("manifest without command must be rejected");
+
+        match error {
+            InjectorError::Usage(message) => {
+                assert!(message.contains("unknown command: --manifest"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn accepts_explicit_apply_command() {
+        let parsed = parse_args_from(["dwm-lut-injector", "apply", "--manifest", "manifest.json"])
+            .expect("explicit apply command should parse");
 
         assert_eq!(
             run_options(parsed),
@@ -121,9 +173,21 @@ mod tests {
     }
 
     #[test]
+    fn accepts_disable_command_without_manifest() {
+        let parsed =
+            parse_args_from(["dwm-lut-injector", "disable"]).expect("disable command should parse");
+
+        match parsed {
+            ParseArgsResult::Run(CliCommand::Disable) => {}
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
     fn accepts_explicit_dll_argument() {
         let parsed = parse_args_from([
             "dwm-lut-injector",
+            "apply",
             "--dll",
             "hook.dll",
             "--manifest",
@@ -142,7 +206,10 @@ mod tests {
 
     fn run_options(parsed: ParseArgsResult) -> CliOptions {
         match parsed {
-            ParseArgsResult::Run(options) => options,
+            ParseArgsResult::Run(CliCommand::Apply(options)) => options,
+            ParseArgsResult::Run(CliCommand::Disable) => {
+                panic!("expected apply command arguments")
+            }
             ParseArgsResult::Help(_) => panic!("expected normal execution arguments"),
         }
     }
