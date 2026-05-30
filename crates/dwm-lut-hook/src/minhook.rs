@@ -1541,7 +1541,7 @@ mod tests {
     fn write_test_manifest(cube_path: &Path) -> PathBuf {
         let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
         write_test_manifest_contents(format!(
-            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
+            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\"\n    }}\n  ]\n}}\n"
         ))
     }
 
@@ -1558,7 +1558,7 @@ mod tests {
     fn write_test_manifest_with_sdr_hdr_assignments(cube_path: &Path) -> PathBuf {
         let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
         write_test_manifest_contents(format!(
-            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }},\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"hdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
+            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\"\n    }},\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"hdr\",\n      \"lut_path\": \"{cube_path}\"\n    }}\n  ]\n}}\n"
         ))
     }
 

@@ -1,5 +1,4 @@
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use dwm_lut_config::{
@@ -151,11 +150,6 @@ pub struct LutRenderPlan {
 pub enum LutPipelineError {
     NoAssignments,
     Config(ConfigError),
-    LutSizeMismatch {
-        lut_path: PathBuf,
-        manifest_size: u32,
-        cube_size: u32,
-    },
 }
 
 impl fmt::Display for LutPipelineError {
@@ -163,15 +157,6 @@ impl fmt::Display for LutPipelineError {
         match self {
             Self::NoAssignments => write!(f, "manifest does not contain any LUT assignments"),
             Self::Config(error) => write!(f, "{error}"),
-            Self::LutSizeMismatch {
-                lut_path,
-                manifest_size,
-                cube_size,
-            } => write!(
-                f,
-                "lut_size for {} was {manifest_size}, but the .cube file declares {cube_size}",
-                lut_path.display()
-            ),
         }
     }
 }
@@ -193,13 +178,6 @@ impl LutPipeline {
         let mut luts = Vec::with_capacity(manifest.assignments.len());
         for assignment in &manifest.assignments {
             let cube = parse_cube(&assignment.lut_path)?;
-            if cube.size != assignment.lut_size {
-                return Err(LutPipelineError::LutSizeMismatch {
-                    lut_path: assignment.lut_path.clone(),
-                    manifest_size: assignment.lut_size,
-                    cube_size: cube.size,
-                });
-            }
 
             luts.push(LoadedLut {
                 assignment: assignment.clone(),
@@ -546,8 +524,8 @@ mod tests {
 
     use super::{
         BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        DirtyRect, LutPipeline, LutPipelineError, ShaderConstants, ShaderConstantsCBuffer,
-        apply_sdr_dither, normalize_sample, pq_to_scrgb, scrgb_to_pq, tetrahedral_interpolation,
+        DirtyRect, LutPipeline, ShaderConstants, ShaderConstantsCBuffer, apply_sdr_dither,
+        normalize_sample, pq_to_scrgb, scrgb_to_pq, tetrahedral_interpolation,
     };
 
     fn identity_cube() -> LutCube {
@@ -664,7 +642,6 @@ mod tests {
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path.clone(),
-            lut_size: 2,
         });
 
         let runtime = LutPipeline::load(&manifest).expect("runtime should load");
@@ -714,7 +691,6 @@ mod tests {
                 color_mode: ColorMode::Hdr,
             },
             lut_path: cube_path.clone(),
-            lut_size: 2,
         });
 
         let runtime = LutPipeline::load(&manifest).expect("runtime should load");
@@ -762,7 +738,6 @@ mod tests {
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path_a.clone(),
-            lut_size: 2,
         });
         manifest.add(LutAssignment {
             target: MonitorTarget {
@@ -770,7 +745,6 @@ mod tests {
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path_b.clone(),
-            lut_size: 2,
         });
 
         let runtime = LutPipeline::load(&manifest).expect("runtime should load");
@@ -813,42 +787,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_rejects_lut_size_mismatch() {
-        let cube_path = write_test_cube();
-        let identity = MonitorIdentity {
-            adapter_luid: AdapterLuid {
-                high_part: 0,
-                low_part: 0x14e02,
-            },
-            target_id: 4357,
-        };
-        let mut manifest = LutManifest::empty();
-        manifest.add(LutAssignment {
-            target: MonitorTarget {
-                identity,
-                color_mode: ColorMode::Sdr,
-            },
-            lut_path: cube_path.clone(),
-            lut_size: 33,
-        });
-
-        let error = LutPipeline::load(&manifest).expect_err("size mismatch should fail");
-        match error {
-            LutPipelineError::LutSizeMismatch {
-                manifest_size,
-                cube_size,
-                ..
-            } => {
-                assert_eq!(manifest_size, 33);
-                assert_eq!(cube_size, 2);
-            }
-            other => panic!("unexpected error: {other}"),
-        }
-
-        let _ = fs::remove_file(cube_path);
-    }
-
-    #[test]
     fn present_plan_preserves_non_default_domain_for_shader_constants() {
         let cube_path = write_test_cube_contents(
             "LUT_3D_SIZE 2\n\
@@ -877,7 +815,6 @@ DOMAIN_MAX 1.0 1.0 1.0\n\
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path.clone(),
-            lut_size: 2,
         });
 
         let runtime = LutPipeline::load(&manifest).expect("runtime should load");

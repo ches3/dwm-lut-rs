@@ -464,7 +464,6 @@ mod tests {
                         ColorMode::Sdr => "identity-sdr.cube".into(),
                         ColorMode::Hdr => "identity-hdr.cube".into(),
                     },
-                    lut_size: 2,
                 },
                 metadata: LutMetadata {
                     size: 2,
@@ -854,7 +853,6 @@ mod tests {
                         color_mode,
                     },
                     lut_path: format!("{label}-{color_mode:?}.cube").into(),
-                    lut_size: 2,
                 },
                 metadata: LutMetadata {
                     size: 2,

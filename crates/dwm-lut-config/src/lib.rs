@@ -61,7 +61,6 @@ pub struct MonitorTarget {
 pub struct LutAssignment {
     pub target: MonitorTarget,
     pub lut_path: PathBuf,
-    pub lut_size: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -150,7 +149,6 @@ struct ManifestAssignmentDocument {
     monitor: ManifestMonitorDocument,
     color_mode: ManifestColorMode,
     lut_path: PathBuf,
-    lut_size: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,12 +205,6 @@ pub fn load_manifest_str(base_dir: &Path, contents: &str) -> Result<LutManifest,
     let mut manifest = LutManifest::empty();
     let mut identity_keys = HashSet::new();
     for assignment in document.assignments {
-        if assignment.lut_size == 0 {
-            return Err(ConfigError::parse_message(
-                "lut_size must be greater than 0",
-            ));
-        }
-
         let identity = MonitorIdentity {
             adapter_luid: assignment.monitor.adapter_luid,
             target_id: assignment.monitor.target_id,
@@ -237,11 +229,7 @@ pub fn load_manifest_str(base_dir: &Path, contents: &str) -> Result<LutManifest,
             )));
         }
 
-        manifest.add(LutAssignment {
-            target,
-            lut_path,
-            lut_size: assignment.lut_size,
-        });
+        manifest.add(LutAssignment { target, lut_path });
     }
 
     Ok(manifest)
@@ -591,8 +579,7 @@ DOMAIN_MAX 1.0 1.0 1.0
         "target_id": 4357
       },
       "color_mode": "sdr",
-      "lut_path": "panel.cube",
-      "lut_size": 33
+      "lut_path": "panel.cube"
     }
   ]
 }
@@ -616,7 +603,6 @@ DOMAIN_MAX 1.0 1.0 1.0
             manifest.assignments[0].lut_path,
             PathBuf::from(r"C:\work\profiles").join("panel.cube")
         );
-        assert_eq!(manifest.assignments[0].lut_size, 33);
     }
 
     #[test]
@@ -632,8 +618,7 @@ DOMAIN_MAX 1.0 1.0 1.0
         "target_id": 4357
       },
       "color_mode": "sdr",
-      "lut_path": "panel.cube",
-      "lut_size": 33
+      "lut_path": "panel.cube"
     }
   ]
 }
@@ -668,8 +653,7 @@ DOMAIN_MAX 1.0 1.0 1.0
         "target_id": 4357
       },
       "color_mode": "sdr",
-      "lut_path": "panel-a.cube",
-      "lut_size": 33
+      "lut_path": "panel-a.cube"
     },
     {
       "monitor": {
@@ -677,8 +661,7 @@ DOMAIN_MAX 1.0 1.0 1.0
         "target_id": 4357
       },
       "color_mode": "sdr",
-      "lut_path": "panel-b.cube",
-      "lut_size": 33
+      "lut_path": "panel-b.cube"
     }
   ]
 }
@@ -708,8 +691,7 @@ DOMAIN_MAX 1.0 1.0 1.0
         "target_id": 4357
       },
       "color_mode": "sdr",
-      "lut_path": "panel-sdr.cube",
-      "lut_size": 33
+      "lut_path": "panel-sdr.cube"
     },
     {
       "monitor": {
@@ -717,8 +699,7 @@ DOMAIN_MAX 1.0 1.0 1.0
         "target_id": 4357
       },
       "color_mode": "hdr",
-      "lut_path": "panel-hdr.cube",
-      "lut_size": 65
+      "lut_path": "panel-hdr.cube"
     }
   ]
 }
@@ -746,8 +727,7 @@ DOMAIN_MAX 1.0 1.0 1.0
   "assignments": [
     {
       "color_mode": "sdr",
-      "lut_path": "panel.cube",
-      "lut_size": 33
+      "lut_path": "panel.cube"
     }
   ]
 }
@@ -757,7 +737,7 @@ DOMAIN_MAX 1.0 1.0 1.0
 
         match error {
             ConfigError::Parse {
-                line: Some(8),
+                line: Some(7),
                 message,
             } => assert!(message.contains("missing field `monitor`")),
             other => panic!("unexpected error: {other}"),
@@ -786,8 +766,7 @@ DOMAIN_MAX 1.0 1.0 1.0
       }},
       {field}
       "color_mode": "sdr",
-      "lut_path": "panel.cube",
-      "lut_size": 33
+      "lut_path": "panel.cube"
     }}
   ]
 }}

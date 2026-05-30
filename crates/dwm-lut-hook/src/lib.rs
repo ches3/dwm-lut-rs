@@ -243,7 +243,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("dwm-lut-hook-test-{unique}.json"));
         let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
         let manifest = format!(
-            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\",\n      \"lut_size\": 2\n    }}\n  ]\n}}\n"
+            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\"\n    }}\n  ]\n}}\n"
         );
         fs::write(&path, manifest).expect("manifest file should be written");
         path

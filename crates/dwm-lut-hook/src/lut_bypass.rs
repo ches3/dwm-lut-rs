@@ -313,7 +313,6 @@ mod tests {
                 color_mode: ColorMode::Sdr,
             },
             lut_path: cube_path.clone(),
-            lut_size: 2,
         });
 
         (
