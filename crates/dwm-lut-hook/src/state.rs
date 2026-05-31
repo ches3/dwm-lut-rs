@@ -1,16 +1,14 @@
 #[cfg(test)]
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Arc;
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicU8, Ordering};
-#[cfg(not(test))]
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
-use dwm_lut_config::{LutManifest, MonitorIdentity};
+use dwm_lut_config::{LutAssignment, LutManifest, MonitorIdentity};
 
 use crate::lut_bypass::{LutBypassRuntime, PresentHookOutcome};
-use crate::lut_pipeline::{LutPipeline, LutPipelineSummary};
+use crate::lut_pipeline::{BackBufferFormat, LutPipeline, LutPipelineSummary};
 use crate::minhook::{MinHookRuntime, RegisteredHook};
 use crate::profile::{BuildProfile, HookProfile, HookTarget};
 use crate::resolver::SignatureResolutionReport;
@@ -127,6 +125,8 @@ pub struct HookState {
 #[cfg(not(test))]
 static STATE: OnceLock<Mutex<Option<HookState>>> = OnceLock::new();
 
+static PRESENT_APPLY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 #[cfg(not(test))]
 static LIFECYCLE: AtomicU8 = AtomicU8::new(LIFECYCLE_IDLE);
 
@@ -134,6 +134,7 @@ const LIFECYCLE_IDLE: u8 = 0;
 const LIFECYCLE_RUNNING: u8 = 1;
 const LIFECYCLE_SHUTTING_DOWN: u8 = 2;
 const LIFECYCLE_SHUT_DOWN: u8 = 3;
+const LIFECYCLE_APPLYING_MANIFEST: u8 = 4;
 
 #[cfg(test)]
 thread_local! {
@@ -147,6 +148,13 @@ pub(crate) enum ShutdownStart {
     NotInitialized,
     AlreadyInProgress,
     AlreadyShutDown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyManifestStart {
+    Started,
+    NotInitialized,
+    AlreadyInProgress,
 }
 
 pub(crate) fn install_state(state: HookState) -> Result<(), Box<HookState>> {
@@ -196,6 +204,21 @@ pub fn is_initialized() -> bool {
 
 pub fn manifest_path() -> Option<PathBuf> {
     with_state(|state| state.config.manifest_path.clone())
+}
+
+pub fn manifest_assignments() -> Option<Vec<LutAssignment>> {
+    with_state(|state| state.manifest.assignments.clone())
+}
+
+pub fn lut_pipeline_selects_monitor(
+    identity: MonitorIdentity,
+    format: BackBufferFormat,
+) -> Option<bool> {
+    with_state(|state| match &state.runtime.lut_pipeline {
+        LutPipelineState::Ready(pipeline) => pipeline
+            .select_lut_index_for_monitor_identity(identity, format)
+            .is_some(),
+    })
 }
 
 pub fn hook_profile() -> Option<HookProfile> {
@@ -268,6 +291,83 @@ pub(crate) fn is_shutting_down() -> bool {
     }
 }
 
+pub(crate) fn begin_apply_manifest() -> ApplyManifestStart {
+    #[cfg(not(test))]
+    {
+        match LIFECYCLE.compare_exchange(
+            LIFECYCLE_RUNNING,
+            LIFECYCLE_APPLYING_MANIFEST,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => ApplyManifestStart::Started,
+            Err(LIFECYCLE_IDLE) | Err(LIFECYCLE_SHUT_DOWN) => ApplyManifestStart::NotInitialized,
+            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_APPLYING_MANIFEST) => {
+                ApplyManifestStart::AlreadyInProgress
+            }
+            Err(_) => ApplyManifestStart::NotInitialized,
+        }
+    }
+
+    #[cfg(test)]
+    {
+        LIFECYCLE.with(|lifecycle| {
+            let mut lifecycle = lifecycle.borrow_mut();
+            match *lifecycle {
+                LIFECYCLE_RUNNING => {
+                    *lifecycle = LIFECYCLE_APPLYING_MANIFEST;
+                    ApplyManifestStart::Started
+                }
+                LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN => ApplyManifestStart::NotInitialized,
+                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_APPLYING_MANIFEST => {
+                    ApplyManifestStart::AlreadyInProgress
+                }
+                _ => ApplyManifestStart::NotInitialized,
+            }
+        })
+    }
+}
+
+pub(crate) fn finish_apply_manifest() {
+    #[cfg(not(test))]
+    {
+        let _ = LIFECYCLE.compare_exchange(
+            LIFECYCLE_APPLYING_MANIFEST,
+            LIFECYCLE_RUNNING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    #[cfg(test)]
+    {
+        LIFECYCLE.with(|lifecycle| {
+            let mut lifecycle = lifecycle.borrow_mut();
+            if *lifecycle == LIFECYCLE_APPLYING_MANIFEST {
+                *lifecycle = LIFECYCLE_RUNNING;
+            }
+        });
+    }
+}
+
+fn present_apply_lock() -> &'static Mutex<()> {
+    PRESENT_APPLY_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub(crate) fn lock_present_apply() -> MutexGuard<'static, ()> {
+    present_apply_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(crate) fn try_lock_present_apply() -> Option<MutexGuard<'static, ()>> {
+    match present_apply_lock().try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
 pub(crate) fn begin_shutdown() -> ShutdownStart {
     #[cfg(not(test))]
     {
@@ -279,7 +379,9 @@ pub(crate) fn begin_shutdown() -> ShutdownStart {
         ) {
             Ok(_) => ShutdownStart::Started,
             Err(LIFECYCLE_IDLE) => ShutdownStart::NotInitialized,
-            Err(LIFECYCLE_SHUTTING_DOWN) => ShutdownStart::AlreadyInProgress,
+            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_APPLYING_MANIFEST) => {
+                ShutdownStart::AlreadyInProgress
+            }
             Err(LIFECYCLE_SHUT_DOWN) => ShutdownStart::AlreadyShutDown,
             Err(_) => ShutdownStart::NotInitialized,
         }
@@ -295,7 +397,9 @@ pub(crate) fn begin_shutdown() -> ShutdownStart {
                     ShutdownStart::Started
                 }
                 LIFECYCLE_IDLE => ShutdownStart::NotInitialized,
-                LIFECYCLE_SHUTTING_DOWN => ShutdownStart::AlreadyInProgress,
+                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_APPLYING_MANIFEST => {
+                    ShutdownStart::AlreadyInProgress
+                }
                 LIFECYCLE_SHUT_DOWN => ShutdownStart::AlreadyShutDown,
                 _ => ShutdownStart::NotInitialized,
             }
@@ -507,6 +611,33 @@ pub(crate) fn restore_overlay_test_mode() {
     });
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceManifestPipelineError {
+    NotInitialized,
+}
+
+pub fn replace_manifest_pipeline(
+    manifest_path: PathBuf,
+    manifest: LutManifest,
+    lut_pipeline: LutPipeline,
+) -> Result<(), ReplaceManifestPipelineError> {
+    let assignment_count = manifest.assignments.len();
+    let has_lut_assignments = lut_pipeline.summary().lut_count > 0;
+
+    with_state_mut(|state| {
+        state.manifest = manifest;
+        state.config.manifest_path = manifest_path.clone();
+        state.runtime.manifest_load = ManifestLoadState::Loaded {
+            manifest_path,
+            assignment_count,
+        };
+        state.runtime.lut_pipeline = LutPipelineState::Ready(Arc::new(lut_pipeline));
+        let LutBypassState::Ready(lut_bypass) = &mut state.runtime.lut_bypass;
+        lut_bypass.reload_for_new_manifest(has_lut_assignments);
+    })
+    .ok_or(ReplaceManifestPipelineError::NotInitialized)
+}
+
 #[cfg(not(test))]
 fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
     let state = STATE.get()?;
@@ -545,4 +676,16 @@ pub(crate) fn reset_state_for_tests() {
     crate::desktop_redraw::reset_for_tests();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
     crate::minhook::reset_test_original_slots();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lock_present_apply, try_lock_present_apply};
+
+    #[test]
+    fn present_apply_lock_is_exclusive() {
+        let _apply_guard = lock_present_apply();
+
+        assert!(try_lock_present_apply().is_none());
+    }
 }

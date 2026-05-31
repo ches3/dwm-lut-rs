@@ -39,7 +39,8 @@ pub use state::{
     evaluate_comp_visual_candidate_for_promotion, evaluate_direct_flip_compatible,
     evaluate_overlay_test_mode, evaluate_overlays_enabled,
     evaluate_window_context_direct_flip_compatible, hook_profile, initialization_trace,
-    is_initialized, lut_bypass_runtime, lut_pipeline_summary, manifest_path, signature_resolution,
+    is_initialized, lut_bypass_runtime, lut_pipeline_selects_monitor, lut_pipeline_summary,
+    manifest_assignments, manifest_path, signature_resolution,
 };
 
 use std::ffi::c_void;
@@ -59,6 +60,15 @@ pub unsafe extern "system" fn dwm_lut_initialize(manifest_path: *const u16) -> u
 #[unsafe(no_mangle)]
 pub extern "system" fn dwm_lut_shutdown() -> u32 {
     bootstrap::ffi_shutdown()
+}
+
+/// # Safety
+///
+/// `manifest_path` must be null or point to a readable, NUL-terminated UTF-16
+/// string in the address space of the current process.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn dwm_lut_apply_manifest(manifest_path: *const u16) -> u32 {
+    bootstrap::ffi_apply_manifest(manifest_path)
 }
 
 #[unsafe(no_mangle)]
@@ -167,14 +177,44 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        BuildProfile, HookConfig, HookProfile, HookTarget, InitializationStage, LutBypassState,
-        ManifestLoadState, SignatureLocator, SignatureResolutionReport, build_profile,
-        dwm_lut_initialize, dwm_lut_shutdown, hook_profile, initialization_trace, is_initialized,
-        lut_bypass_runtime, lut_pipeline_summary, manifest_path, signature_resolution,
+        BackBufferFormat, BuildProfile, HookConfig, HookProfile, HookTarget, InitializationStage,
+        LutBypassState, ManifestLoadState, SignatureLocator, SignatureResolutionReport,
+        build_profile, dwm_lut_apply_manifest, dwm_lut_initialize, dwm_lut_shutdown, hook_profile,
+        initialization_trace, is_initialized, lut_bypass_runtime, lut_pipeline_selects_monitor,
+        lut_pipeline_summary, manifest_assignments, manifest_path, signature_resolution,
     };
     use crate::bootstrap::initialize_with_resolution;
     use crate::resolver::{LoadedModule, ResolvedTarget};
     use crate::state::{LutPipelineState, reset_state_for_tests};
+    use dwm_lut_config::{AdapterLuid, MonitorIdentity};
+
+    fn initial_test_monitor_identity() -> MonitorIdentity {
+        MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x00014e02,
+            },
+            target_id: 4357,
+        }
+    }
+
+    fn updated_test_monitor_identity() -> MonitorIdentity {
+        MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x00014e03,
+            },
+            target_id: 4358,
+        }
+    }
+
+    fn write_manifest_json(monitor: MonitorIdentity, cube_path: &Path) -> String {
+        let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
+        format!(
+            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"{}\",\n        \"target_id\": {}\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\"\n    }}\n  ]\n}}\n",
+            monitor.adapter_luid, monitor.target_id,
+        )
+    }
 
     fn synthetic_resolution(profile: &HookProfile) -> SignatureResolutionReport {
         let base_address = 0x1800_0000usize;
@@ -241,11 +281,11 @@ mod tests {
             .expect("clock should be valid")
             .as_nanos();
         let path = std::env::temp_dir().join(format!("dwm-lut-hook-test-{unique}.json"));
-        let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
-        let manifest = format!(
-            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\"\n    }}\n  ]\n}}\n"
-        );
-        fs::write(&path, manifest).expect("manifest file should be written");
+        fs::write(
+            &path,
+            write_manifest_json(initial_test_monitor_identity(), cube_path),
+        )
+        .expect("manifest file should be written");
         path
     }
 
@@ -461,6 +501,29 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_reports_in_progress_while_apply_manifest_guard_is_held() {
+        reset_state_for_tests();
+        let (expected_manifest_path, cube_path) = synthetic_manifest_paths();
+        let config = HookConfig {
+            manifest_path: expected_manifest_path.clone(),
+            profile: BuildProfile::Windows11_25H2,
+        };
+        let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
+
+        initialize_with_resolution(config, resolution).expect("initialization should succeed");
+        let _apply_manifest = super::bootstrap::hold_apply_manifest_for_tests()
+            .expect("test should acquire apply manifest guard");
+
+        assert_eq!(dwm_lut_shutdown(), 2);
+        assert!(is_initialized());
+
+        drop(_apply_manifest);
+        let _ = dwm_lut_shutdown();
+        let _ = fs::remove_file(expected_manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
     fn shutdown_releases_state_and_allows_reinitialization() {
         reset_state_for_tests();
         let (expected_manifest_path, cube_path) = synthetic_manifest_paths();
@@ -528,5 +591,135 @@ mod tests {
 
         let _ = fs::remove_file(expected_manifest_path);
         let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn apply_manifest_updates_manifest_on_initialized_hook() {
+        reset_state_for_tests();
+        let (initial_manifest_path, cube_path) = synthetic_manifest_paths();
+        let config = HookConfig {
+            manifest_path: initial_manifest_path.clone(),
+            profile: BuildProfile::Windows11_25H2,
+        };
+        let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
+
+        initialize_with_resolution(config, resolution).expect("initialization should succeed");
+        assert_eq!(
+            manifest_assignments().map(|assignments| assignments[0].target.identity),
+            Some(initial_test_monitor_identity())
+        );
+        assert_eq!(
+            lut_pipeline_selects_monitor(
+                initial_test_monitor_identity(),
+                BackBufferFormat::Bgra8Unorm,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            lut_pipeline_selects_monitor(
+                updated_test_monitor_identity(),
+                BackBufferFormat::Bgra8Unorm,
+            ),
+            Some(false)
+        );
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let updated_manifest_path =
+            std::env::temp_dir().join(format!("dwm-lut-hook-apply-{unique}.json"));
+        fs::write(
+            &updated_manifest_path,
+            write_manifest_json(updated_test_monitor_identity(), &cube_path),
+        )
+        .expect("updated manifest should be written");
+
+        let wide_path: Vec<u16> = updated_manifest_path
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect();
+        assert_eq!(unsafe { dwm_lut_apply_manifest(wide_path.as_ptr()) }, 0);
+        assert_eq!(manifest_path(), Some(updated_manifest_path.clone()));
+        assert_eq!(
+            manifest_assignments().map(|assignments| {
+                (
+                    assignments[0].target.identity,
+                    assignments[0].lut_path.clone(),
+                )
+            }),
+            Some((updated_test_monitor_identity(), cube_path.clone()))
+        );
+        assert_eq!(
+            lut_pipeline_selects_monitor(
+                initial_test_monitor_identity(),
+                BackBufferFormat::Bgra8Unorm,
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            lut_pipeline_selects_monitor(
+                updated_test_monitor_identity(),
+                BackBufferFormat::Bgra8Unorm,
+            ),
+            Some(true)
+        );
+        assert_eq!(super::desktop_redraw::request_count_for_tests(), 2);
+
+        let _ = fs::remove_file(initial_manifest_path);
+        let _ = fs::remove_file(updated_manifest_path);
+        let _ = fs::remove_file(cube_path);
+        let _ = dwm_lut_shutdown();
+    }
+
+    #[test]
+    fn apply_manifest_reports_not_initialized_when_hook_is_absent() {
+        reset_state_for_tests();
+
+        let (manifest_path, cube_path) = synthetic_manifest_paths();
+        let wide_path: Vec<u16> = manifest_path
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect();
+
+        assert_eq!(unsafe { dwm_lut_apply_manifest(wide_path.as_ptr()) }, 3);
+
+        let _ = fs::remove_file(manifest_path);
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn apply_manifest_invalid_manifest_keeps_existing_state() {
+        reset_state_for_tests();
+        let (initial_manifest_path, cube_path) = synthetic_manifest_paths();
+        let config = HookConfig {
+            manifest_path: initial_manifest_path.clone(),
+            profile: BuildProfile::Windows11_25H2,
+        };
+        let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
+
+        initialize_with_resolution(config, resolution).expect("initialization should succeed");
+        let before_summary = lut_pipeline_summary();
+
+        let invalid_manifest_path = std::env::temp_dir().join("dwm-lut-hook-invalid-manifest.json");
+        fs::write(&invalid_manifest_path, r#"{ "assignments": [] }"#)
+            .expect("invalid manifest should be written");
+        let wide_path: Vec<u16> = invalid_manifest_path
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect();
+
+        assert_eq!(unsafe { dwm_lut_apply_manifest(wide_path.as_ptr()) }, 6);
+        assert_eq!(manifest_path(), Some(initial_manifest_path.clone()));
+        assert_eq!(lut_pipeline_summary(), before_summary);
+        assert_eq!(super::desktop_redraw::request_count_for_tests(), 1);
+
+        let _ = fs::remove_file(initial_manifest_path);
+        let _ = fs::remove_file(invalid_manifest_path);
+        let _ = fs::remove_file(cube_path);
+        let _ = dwm_lut_shutdown();
     }
 }

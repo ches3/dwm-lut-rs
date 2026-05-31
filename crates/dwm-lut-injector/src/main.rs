@@ -7,7 +7,8 @@ mod win32;
 use cli::{CliCommand, ParseArgsResult, parse_args};
 use error::{HookShutdownStatus, InjectionStep, InjectorError};
 use injector::{
-    DisableOutcome, canonicalize_existing_file, disable_injected_hook, inject_and_initialize,
+    ApplyOutcome, DisableOutcome, apply_or_initialize, canonicalize_existing_file,
+    disable_injected_hook,
 };
 use staging::{default_hook_dll_path, stage_hook_dll};
 use win32::{enable_debug_privilege, find_process_id_by_name};
@@ -46,14 +47,32 @@ fn run_apply(options: cli::CliOptions) -> Result<(), InjectorError> {
     let pid = find_process_id_by_name("dwm.exe")?;
 
     enable_debug_privilege()?;
-    inject_and_initialize(pid, &staged_dll_path, &manifest_path)?;
+    let outcome = apply_or_initialize(pid, &staged_dll_path, &manifest_path)?;
 
-    println!(
-        "initialized dwm.exe (pid={pid}) with {} staged from {} and {}",
-        staged_dll_path.display(),
-        input_dll_path.display(),
-        manifest_path.display()
-    );
+    match outcome {
+        ApplyOutcome::Reloaded => {
+            println!(
+                "reloaded manifest in dwm.exe (pid={pid}) from {}",
+                manifest_path.display()
+            );
+        }
+        ApplyOutcome::Initialized => {
+            println!(
+                "initialized dwm.exe (pid={pid}) with {} staged from {} and {}",
+                staged_dll_path.display(),
+                input_dll_path.display(),
+                manifest_path.display()
+            );
+        }
+        ApplyOutcome::Reinitialized => {
+            println!(
+                "reinitialized dwm.exe (pid={pid}) with {} staged from {} and {}",
+                staged_dll_path.display(),
+                input_dll_path.display(),
+                manifest_path.display()
+            );
+        }
+    }
     Ok(())
 }
 

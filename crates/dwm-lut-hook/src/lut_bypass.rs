@@ -207,6 +207,12 @@ impl LutBypassRuntime {
         self.set_overlay_test_mode_control(OverlayTestModeControl::Unmodified);
     }
 
+    pub fn reload_for_new_manifest(&mut self, has_lut_assignments: bool) {
+        self.contexts.clear();
+        self.has_lut_assignments = has_lut_assignments;
+        self.restore_overlay_test_mode();
+    }
+
     pub fn context(&self, context_address: usize) -> Option<&ContextLutState> {
         self.contexts.get(&context_address)
     }
@@ -523,6 +529,39 @@ mod tests {
         );
 
         assert_eq!(overlay_test_mode, 0);
+
+        let _ = fs::remove_file(cube_path);
+    }
+
+    #[test]
+    fn reload_for_new_manifest_clears_active_contexts_and_restores_overlay_test_mode() {
+        let (pipeline, cube_path) = pipeline_for_single_sdr_monitor();
+        let mut overlay_test_mode = 0i32;
+        let mut runtime =
+            LutBypassRuntime::new(true, Some((&mut overlay_test_mode as *mut i32) as usize));
+
+        let _ = runtime.update_present(
+            &pipeline,
+            0x1234,
+            Some(test_identity()),
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            &[],
+        );
+
+        assert!(runtime.has_active_contexts());
+        assert_eq!(overlay_test_mode, 5);
+
+        runtime.reload_for_new_manifest(true);
+
+        assert!(!runtime.has_active_contexts());
+        assert_eq!(overlay_test_mode, 0);
+        assert_eq!(runtime.overlay_test_mode(0), 0);
 
         let _ = fs::remove_file(cube_path);
     }

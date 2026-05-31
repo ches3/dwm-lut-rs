@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use crate::error::{HookInitializeStatus, HookShutdownStatus, InjectionStep, InjectorError};
+use crate::error::{
+    ApplyManifestStatus, HookInitializeStatus, HookShutdownStatus, InitializeContext,
+    InjectionStep, InjectorError,
+};
 use crate::win32::{
     NamedRemoteModule, OwnedHandle, RemoteAllocation, RemoteModule, find_remote_module,
     find_remote_modules_by_name, open_target_process, resolve_remote_export_address,
@@ -29,10 +32,150 @@ pub(crate) enum DisableOutcome {
     NotInjected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyOutcome {
+    Reloaded,
+    Initialized,
+    Reinitialized,
+}
+
+enum ApplyManifestOutcome {
+    Reloaded,
+    Fallback,
+    Failed(ApplyManifestStatus),
+}
+
+fn try_remote_apply_manifest(
+    process: &OwnedHandle,
+    module: &NamedRemoteModule,
+    manifest_path: &Path,
+) -> Result<ApplyManifestOutcome, InjectorError> {
+    let module_path = PathBuf::from(module_export_path(&module.path, &module.name));
+    let remote_apply_manifest_address = match resolve_remote_module_export_address(
+        process,
+        module.module.base_address,
+        "dwm_lut_apply_manifest",
+        InjectionStep::ResolveApplyManifestExport,
+        &module_path,
+    ) {
+        Ok(address) => address,
+        Err(InjectorError::ExportNotFound { .. }) => return Ok(ApplyManifestOutcome::Fallback),
+        Err(error) => return Err(error),
+    };
+
+    let manifest_path_wide = wide_null(manifest_path.as_os_str());
+    let remote_manifest_path = RemoteAllocation::write_utf16(
+        process,
+        &manifest_path_wide,
+        InjectionStep::AllocateManifestPath,
+        InjectionStep::WriteManifestPath,
+    )?;
+    let apply_status = run_remote_thread(
+        process,
+        remote_apply_manifest_address,
+        remote_manifest_path.address(),
+        InjectionStep::StartApplyManifest,
+        InjectionStep::WaitApplyManifest,
+    )?;
+
+    match ApplyManifestStatus::from_code(apply_status) {
+        Some(ApplyManifestStatus::Success) => Ok(ApplyManifestOutcome::Reloaded),
+        Some(status) if status.should_fallback() => Ok(ApplyManifestOutcome::Fallback),
+        Some(status) => Ok(ApplyManifestOutcome::Failed(status)),
+        None => Err(InjectorError::UnknownHookApplyManifestStatus(apply_status)),
+    }
+}
+
+fn find_matching_staged_dll<'a>(
+    staged_dll_path: &Path,
+    modules: &'a [NamedRemoteModule],
+) -> Option<&'a NamedRemoteModule> {
+    let expected = staged_dll_basename(staged_dll_path)?;
+    modules
+        .iter()
+        .find(|module| matches_staged_dll_basename(expected, module))
+}
+
+fn staged_dll_basename(path: &Path) -> Option<&str> {
+    path.file_name()?.to_str()
+}
+
+fn matches_staged_dll_basename(expected: &str, module: &NamedRemoteModule) -> bool {
+    module_basename(&module.path, &module.name).eq_ignore_ascii_case(expected)
+}
+
+pub(crate) fn apply_or_initialize(
+    pid: u32,
+    staged_dll_path: &Path,
+    manifest_path: &Path,
+) -> Result<ApplyOutcome, InjectorError> {
+    let process = open_target_process(pid)?;
+    let loaded_hooks = find_remote_modules_by_name(
+        pid,
+        InjectionStep::ResolveShutdownExport,
+        is_staged_hook_module,
+    )?;
+
+    if loaded_hooks.is_empty() {
+        inject_and_initialize(
+            pid,
+            staged_dll_path,
+            manifest_path,
+            InitializeContext::FreshInstall,
+        )?;
+        return Ok(ApplyOutcome::Initialized);
+    }
+
+    if let Some(module) = find_matching_staged_dll(staged_dll_path, &loaded_hooks) {
+        match try_remote_apply_manifest(&process, module, manifest_path)? {
+            ApplyManifestOutcome::Reloaded => return Ok(ApplyOutcome::Reloaded),
+            ApplyManifestOutcome::Fallback => {
+                shutdown_for_reinject(pid)?;
+                inject_and_initialize(
+                    pid,
+                    staged_dll_path,
+                    manifest_path,
+                    InitializeContext::AfterReloadFallback,
+                )?;
+                return Ok(ApplyOutcome::Reinitialized);
+            }
+            ApplyManifestOutcome::Failed(status) => {
+                return Err(InjectorError::HookApplyManifestFailed(status));
+            }
+        }
+    }
+
+    shutdown_for_reinject(pid)?;
+    inject_and_initialize(
+        pid,
+        staged_dll_path,
+        manifest_path,
+        InitializeContext::AfterShutdown,
+    )?;
+    Ok(ApplyOutcome::Reinitialized)
+}
+
+pub(crate) fn canonicalize_existing_file(
+    path: &Path,
+    step: InjectionStep,
+    kind: &'static str,
+) -> Result<PathBuf, InjectorError> {
+    if !path.is_file() {
+        return Err(InjectorError::MissingFile {
+            kind,
+            path: path.to_path_buf(),
+        });
+    }
+
+    path.canonicalize()
+        .map_err(|source| InjectorError::StepFailed { step, source })
+}
+
 pub(crate) fn inject_and_initialize(
     pid: u32,
     dll_path: &Path,
     manifest_path: &Path,
+    context: InitializeContext,
 ) -> Result<(), InjectorError> {
     let process = open_target_process(pid)?;
     let remote_kernel32 = find_remote_module(pid, "kernel32.dll", InjectionStep::ResolveKernel32)?;
@@ -83,7 +226,7 @@ pub(crate) fn inject_and_initialize(
 
     match HookInitializeStatus::from_code(initialize_status) {
         Some(HookInitializeStatus::Success) => Ok(()),
-        Some(status) => Err(InjectorError::HookInitializeFailed(status)),
+        Some(status) => Err(InjectorError::HookInitializeFailed { status, context }),
         None => Err(InjectorError::UnknownHookInitializeStatus(
             initialize_status,
         )),
@@ -140,20 +283,14 @@ pub(crate) fn disable_injected_hook(pid: u32) -> Result<DisableOutcome, Injector
     aggregation.finish()
 }
 
-pub(crate) fn canonicalize_existing_file(
-    path: &Path,
-    step: InjectionStep,
-    kind: &'static str,
-) -> Result<PathBuf, InjectorError> {
-    if !path.is_file() {
-        return Err(InjectorError::MissingFile {
-            kind,
-            path: path.to_path_buf(),
-        });
+fn shutdown_for_reinject(pid: u32) -> Result<(), InjectorError> {
+    match disable_injected_hook(pid)? {
+        DisableOutcome::NotInjected => Ok(()),
+        DisableOutcome::ShutDown(HookShutdownStatus::Success)
+        | DisableOutcome::ShutDown(HookShutdownStatus::NotInitialized)
+        | DisableOutcome::ShutDown(HookShutdownStatus::AlreadyShutDown) => Ok(()),
+        DisableOutcome::ShutDown(status) => Err(InjectorError::HookShutdownFailed(status)),
     }
-
-    path.canonicalize()
-        .map_err(|source| InjectorError::StepFailed { step, source })
 }
 
 fn is_staged_hook_module(module: &NamedRemoteModule) -> bool {
@@ -342,8 +479,10 @@ mod tests {
 
     use super::{
         DisableOutcome, ShutdownAggregation, ShutdownDecision, evaluate_shutdown_status,
-        is_staged_hook_module_name, module_basename,
+        find_matching_staged_dll, is_staged_hook_module_name, matches_staged_dll_basename,
+        module_basename, staged_dll_basename,
     };
+    use crate::win32::NamedRemoteModule;
 
     #[test]
     fn staged_hook_module_match_is_limited_to_content_addressed_hook_dlls() {
@@ -478,5 +617,49 @@ mod tests {
                 DisableOutcome::ShutDown(HookShutdownStatus::AlreadyShutDown)
             );
         }
+    }
+
+    fn sample_remote_module(path: &str, name: &str) -> NamedRemoteModule {
+        NamedRemoteModule {
+            path: path.to_string(),
+            name: name.to_string(),
+            module: crate::win32::RemoteModule {
+                base_address: 0x1000,
+            },
+        }
+    }
+
+    #[test]
+    fn staged_dll_basename_matching_is_case_insensitive() {
+        let staged = PathBuf::from(
+            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdef.dll",
+        );
+        let module = sample_remote_module(
+            r"C:\ProgramData\dwm-lut-rs\hook\DWM_LUT_HOOK-0123456789ABCDEF0123456789ABCDEF.DLL",
+            "ignored.dll",
+        );
+
+        assert_eq!(
+            staged_dll_basename(&staged),
+            Some("dwm_lut_hook-0123456789abcdef0123456789abcdef.dll")
+        );
+        assert!(matches_staged_dll_basename(
+            "dwm_lut_hook-0123456789abcdef0123456789abcdef.dll",
+            &module
+        ));
+        assert!(find_matching_staged_dll(&staged, &[module]).is_some());
+    }
+
+    #[test]
+    fn staged_dll_basename_matching_rejects_different_content_hash() {
+        let staged = PathBuf::from(
+            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-11111111111111111111111111111111.dll",
+        );
+        let module = sample_remote_module(
+            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-22222222222222222222222222222222.dll",
+            "ignored.dll",
+        );
+
+        assert!(find_matching_staged_dll(&staged, &[module]).is_none());
     }
 }

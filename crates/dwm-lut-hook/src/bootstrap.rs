@@ -17,12 +17,15 @@ use crate::minhook::{
     MinHookCleanupOperation, MinHookError, register_plan, unregister_registered_hooks,
 };
 use crate::profile::{BuildProfile, HookProfile};
+
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
-    HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime, HookState,
-    InitializationStage, LoggerState, LutBypassState, LutPipelineState, ManifestLoadState,
-    ShutdownStart, SignatureResolutionState, begin_shutdown, clear_state_after_shutdown,
-    finish_failed_shutdown, install_state, is_initialized, minhook_cleanup_plan,
+    ApplyManifestStart, HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime,
+    HookState, InitializationStage, LoggerState, LutBypassState, LutPipelineState,
+    ManifestLoadState, ReplaceManifestPipelineError, ShutdownStart, SignatureResolutionState,
+    begin_apply_manifest, begin_shutdown, clear_state_after_shutdown, finish_apply_manifest,
+    finish_failed_shutdown, install_state, is_initialized, lock_present_apply,
+    minhook_cleanup_plan, replace_manifest_pipeline,
 };
 
 #[cfg(not(test))]
@@ -38,6 +41,14 @@ struct InitializationGuard;
 impl Drop for InitializationGuard {
     fn drop(&mut self) {
         clear_initialization_in_progress();
+    }
+}
+
+struct ApplyManifestGuard;
+
+impl Drop for ApplyManifestGuard {
+    fn drop(&mut self) {
+        finish_apply_manifest();
     }
 }
 
@@ -58,6 +69,14 @@ fn enter_initialization() -> Result<InitializationGuard, HookError> {
     Ok(InitializationGuard)
 }
 
+fn enter_apply_manifest() -> Result<ApplyManifestGuard, ApplyManifestError> {
+    match begin_apply_manifest() {
+        ApplyManifestStart::Started => Ok(ApplyManifestGuard),
+        ApplyManifestStart::NotInitialized => Err(ApplyManifestError::NotInitialized),
+        ApplyManifestStart::AlreadyInProgress => Err(ApplyManifestError::AlreadyInProgress),
+    }
+}
+
 fn is_initialization_in_progress() -> bool {
     #[cfg(not(test))]
     {
@@ -73,6 +92,11 @@ fn is_initialization_in_progress() -> bool {
 #[cfg(test)]
 pub(crate) fn hold_initialization_for_tests() -> Result<impl Drop, HookError> {
     enter_initialization()
+}
+
+#[cfg(test)]
+pub(crate) fn hold_apply_manifest_for_tests() -> Result<impl Drop, ApplyManifestError> {
+    enter_apply_manifest()
 }
 
 #[cfg(not(test))]
@@ -199,6 +223,64 @@ enum ShutdownStatus {
     AlreadyInProgress = 2,
     AlreadyShutDown = 3,
     MinHookCleanupFailed = 4,
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyManifestStatus {
+    Success = 0,
+    NullManifestPath = 1,
+    InvalidManifestPath = 2,
+    NotInitialized = 3,
+    AlreadyInProgress = 4,
+    ManifestLoadFailed = 5,
+    ManifestHasNoAssignments = 6,
+    LutPipelinePrepareFailed = 7,
+}
+
+#[derive(Debug)]
+pub enum ApplyManifestError {
+    NotInitialized,
+    AlreadyInProgress,
+    InvalidPath,
+    Manifest(ConfigError),
+    LutPipeline(LutPipelineError),
+    State(ReplaceManifestPipelineError),
+}
+
+impl fmt::Display for ApplyManifestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotInitialized => write!(f, "hook is not initialized"),
+            Self::AlreadyInProgress => write!(f, "hook initialization or shutdown is in progress"),
+            Self::InvalidPath => write!(f, "manifest path must not be empty"),
+            Self::Manifest(error) => write!(f, "{error}"),
+            Self::LutPipeline(error) => write!(f, "{error}"),
+            Self::State(ReplaceManifestPipelineError::NotInitialized) => {
+                write!(f, "hook is not initialized")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ApplyManifestError {}
+
+impl From<ConfigError> for ApplyManifestError {
+    fn from(value: ConfigError) -> Self {
+        Self::Manifest(value)
+    }
+}
+
+impl From<LutPipelineError> for ApplyManifestError {
+    fn from(value: LutPipelineError) -> Self {
+        Self::LutPipeline(value)
+    }
+}
+
+impl From<ReplaceManifestPipelineError> for ApplyManifestError {
+    fn from(value: ReplaceManifestPipelineError) -> Self {
+        Self::State(value)
+    }
 }
 
 pub fn build_profile() -> BuildProfile {
@@ -334,6 +416,100 @@ pub(crate) fn ffi_shutdown() -> u32 {
             cleanup_failures.len()
         );
         ShutdownStatus::Success as u32
+    }
+}
+
+pub(crate) fn ffi_apply_manifest(manifest_path: *const u16) -> u32 {
+    let manifest_path = match unsafe { wide_path_from_ptr(manifest_path) } {
+        Some(path) => path,
+        None => {
+            debug_log!(
+                "event=apply_manifest_failed status={} error={}",
+                ApplyManifestStatus::NullManifestPath as u32,
+                crate::debug_log::quoted("manifest path pointer is null")
+            );
+            return ApplyManifestStatus::NullManifestPath as u32;
+        }
+    };
+
+    debug_log!(
+        "event=apply_manifest_start manifest_path={}",
+        crate::debug_log::quoted(manifest_path.display())
+    );
+
+    match apply_manifest_from_path(manifest_path) {
+        Ok(()) => {
+            debug_log!("event=apply_manifest_success");
+            ApplyManifestStatus::Success as u32
+        }
+        Err(error) => finish_apply_manifest_error(error),
+    }
+}
+
+fn apply_manifest_from_path(manifest_path: PathBuf) -> Result<(), ApplyManifestError> {
+    if manifest_path.as_os_str().is_empty() {
+        return Err(ApplyManifestError::InvalidPath);
+    }
+    if is_initialization_in_progress() {
+        return Err(ApplyManifestError::AlreadyInProgress);
+    }
+    let _guard = enter_apply_manifest()?;
+
+    let manifest = load_manifest(&manifest_path)?;
+    debug_log!(
+        "event=apply_manifest_loaded assignment_count={}",
+        manifest.assignments.len()
+    );
+
+    let lut_pipeline = LutPipeline::load(&manifest)?;
+    debug_log!(
+        "event=apply_manifest_pipeline_prepared lut_count={}",
+        lut_pipeline.summary().lut_count
+    );
+
+    let renderer_device_count = {
+        let _present_guard = lock_present_apply();
+        replace_manifest_pipeline(manifest_path, manifest, lut_pipeline)?;
+        crate::d3d11_renderer::shutdown_renderer_resources()
+    };
+    debug_log!(
+        "event=apply_manifest_renderer_resources_released device_resource_count={}",
+        renderer_device_count
+    );
+    crate::desktop_redraw::request_desktop_redraw();
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn finish_apply_manifest_error(error: ApplyManifestError) -> u32 {
+    let error_message = error.to_string();
+    let status = map_apply_manifest_error(&error);
+    debug_log!(
+        "event=apply_manifest_failed status={} error={}",
+        status as u32,
+        crate::debug_log::quoted(error_message)
+    );
+    status as u32
+}
+
+#[cfg(not(debug_assertions))]
+fn finish_apply_manifest_error(error: ApplyManifestError) -> u32 {
+    map_apply_manifest_error(&error) as u32
+}
+
+fn map_apply_manifest_error(error: &ApplyManifestError) -> ApplyManifestStatus {
+    match error {
+        ApplyManifestError::InvalidPath => ApplyManifestStatus::InvalidManifestPath,
+        ApplyManifestError::NotInitialized
+        | ApplyManifestError::State(ReplaceManifestPipelineError::NotInitialized) => {
+            ApplyManifestStatus::NotInitialized
+        }
+        ApplyManifestError::AlreadyInProgress => ApplyManifestStatus::AlreadyInProgress,
+        ApplyManifestError::Manifest(_) => ApplyManifestStatus::ManifestLoadFailed,
+        ApplyManifestError::LutPipeline(LutPipelineError::NoAssignments) => {
+            ApplyManifestStatus::ManifestHasNoAssignments
+        }
+        ApplyManifestError::LutPipeline(_) => ApplyManifestStatus::LutPipelinePrepareFailed,
     }
 }
 

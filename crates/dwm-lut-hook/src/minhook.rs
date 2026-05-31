@@ -1247,48 +1247,50 @@ unsafe extern "system" fn present_detour_impl(
     };
     match unsafe { collect_present_inputs(this, overlay_swap_chain, rect_vec) } {
         Ok(inputs) => {
-            let _ = state::prepare_present_lut_context(
-                this,
-                inputs.monitor_identity,
-                inputs.clip_box,
-                crate::DXGI_FORMAT_B8G8R8A8_UNORM,
-                &inputs.dirty_rects,
-            );
-            let render_result = state::render_present_lut(
-                overlay_swap_chain,
-                inputs.monitor_identity,
-                inputs.clip_box,
-                &inputs.dirty_rects,
-            );
-            if inputs.hardware_protected
-                && should_log_present_hardware_protected_render_result(overlay_swap_chain)
-            {
-                debug_log!(
-                    "event=present_hardware_protected_render_result this=0x{:x} overlay_swap_chain=0x{:x} lut_applied={} dxgi_format={:?} lut_index={:?} present_dirty_rect={:?}",
+            if let Some(_present_guard) = state::try_lock_present_apply() {
+                let _ = state::prepare_present_lut_context(
                     this,
+                    inputs.monitor_identity,
+                    inputs.clip_box,
+                    crate::DXGI_FORMAT_B8G8R8A8_UNORM,
+                    &inputs.dirty_rects,
+                );
+                let render_result = state::render_present_lut(
                     overlay_swap_chain,
-                    render_result.lut_applied,
-                    render_result.dxgi_format,
-                    render_result.lut_index,
-                    render_result.present_dirty_rect
+                    inputs.monitor_identity,
+                    inputs.clip_box,
+                    &inputs.dirty_rects,
+                );
+                if inputs.hardware_protected
+                    && should_log_present_hardware_protected_render_result(overlay_swap_chain)
+                {
+                    debug_log!(
+                        "event=present_hardware_protected_render_result this=0x{:x} overlay_swap_chain=0x{:x} lut_applied={} dxgi_format={:?} lut_index={:?} present_dirty_rect={:?}",
+                        this,
+                        overlay_swap_chain,
+                        render_result.lut_applied,
+                        render_result.dxgi_format,
+                        render_result.lut_index,
+                        render_result.present_dirty_rect
+                    );
+                }
+                if let Some(rect) = render_result.present_dirty_rect {
+                    original_rect_vec = full_present_rect_vec(
+                        rect,
+                        &mut present_rect_storage,
+                        &mut present_rect_vec_storage,
+                    );
+                }
+                let _ = state::evaluate_rendered_present_hook(
+                    this,
+                    inputs.clip_box,
+                    render_result
+                        .dxgi_format
+                        .unwrap_or(crate::DXGI_FORMAT_B8G8R8A8_UNORM),
+                    &inputs.dirty_rects,
+                    render_result,
                 );
             }
-            if let Some(rect) = render_result.present_dirty_rect {
-                original_rect_vec = full_present_rect_vec(
-                    rect,
-                    &mut present_rect_storage,
-                    &mut present_rect_vec_storage,
-                );
-            }
-            let _ = state::evaluate_rendered_present_hook(
-                this,
-                inputs.clip_box,
-                render_result
-                    .dxgi_format
-                    .unwrap_or(crate::DXGI_FORMAT_B8G8R8A8_UNORM),
-                &inputs.dirty_rects,
-                render_result,
-            );
         }
         Err(error) => {
             #[cfg(debug_assertions)]

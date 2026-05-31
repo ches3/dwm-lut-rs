@@ -37,6 +37,28 @@ pub(crate) enum HookInitializeStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InitializeContext {
+    FreshInstall,
+    AfterShutdown,
+    AfterReloadFallback,
+}
+
+pub(crate) fn format_hook_initialize_failure(
+    context: InitializeContext,
+    status: HookInitializeStatus,
+) -> String {
+    match context {
+        InitializeContext::FreshInstall => format!("hook initialize failed: {status}"),
+        InitializeContext::AfterShutdown => {
+            format!("existing hook was shut down, but initialize failed: {status}")
+        }
+        InitializeContext::AfterReloadFallback => format!(
+            "manifest reload was unavailable, existing hook was shut down, but initialize failed: {status}"
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookShutdownStatus {
     Success = 0,
     NotInitialized = 1,
@@ -190,6 +212,61 @@ impl fmt::Display for HookInitializeStatus {
     }
 }
 
+/// FFI status codes returned by `dwm_lut_apply_manifest`.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyManifestStatus {
+    Success = 0,
+    NullManifestPath = 1,
+    InvalidManifestPath = 2,
+    NotInitialized = 3,
+    AlreadyInProgress = 4,
+    ManifestLoadFailed = 5,
+    ManifestHasNoAssignments = 6,
+    LutPipelinePrepareFailed = 7,
+}
+
+impl ApplyManifestStatus {
+    pub(crate) fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Success),
+            1 => Some(Self::NullManifestPath),
+            2 => Some(Self::InvalidManifestPath),
+            3 => Some(Self::NotInitialized),
+            4 => Some(Self::AlreadyInProgress),
+            5 => Some(Self::ManifestLoadFailed),
+            6 => Some(Self::ManifestHasNoAssignments),
+            7 => Some(Self::LutPipelinePrepareFailed),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn should_fallback(self) -> bool {
+        matches!(self, Self::NotInitialized)
+    }
+}
+
+impl fmt::Display for ApplyManifestStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Success => write!(f, "success"),
+            Self::NullManifestPath => write!(f, "manifest path pointer was null"),
+            Self::InvalidManifestPath => write!(f, "manifest path was empty"),
+            Self::NotInitialized => write!(f, "hook DLL is loaded but not initialized"),
+            Self::AlreadyInProgress => {
+                write!(f, "hook initialization or shutdown is in progress")
+            }
+            Self::ManifestLoadFailed => write!(f, "manifest could not be loaded"),
+            Self::ManifestHasNoAssignments => {
+                write!(f, "manifest does not contain any LUT assignments")
+            }
+            Self::LutPipelinePrepareFailed => {
+                write!(f, "LUT pipeline resources could not be prepared")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InjectionStep {
     FindDwmProcess,
@@ -226,6 +303,9 @@ pub(crate) enum InjectionStep {
     WaitInitialize,
     StartShutdown,
     WaitShutdown,
+    ResolveApplyManifestExport,
+    StartApplyManifest,
+    WaitApplyManifest,
 }
 
 impl fmt::Display for InjectionStep {
@@ -265,6 +345,11 @@ impl fmt::Display for InjectionStep {
             Self::WaitInitialize => write!(f, "remote initialize wait"),
             Self::StartShutdown => write!(f, "remote shutdown launch"),
             Self::WaitShutdown => write!(f, "remote shutdown wait"),
+            Self::ResolveApplyManifestExport => {
+                write!(f, "dwm_lut_apply_manifest export resolution")
+            }
+            Self::StartApplyManifest => write!(f, "remote apply manifest launch"),
+            Self::WaitApplyManifest => write!(f, "remote apply manifest wait"),
         }
     }
 }
@@ -296,8 +381,13 @@ pub(crate) enum InjectorError {
         export: String,
         dll_path: PathBuf,
     },
-    HookInitializeFailed(HookInitializeStatus),
+    HookInitializeFailed {
+        status: HookInitializeStatus,
+        context: InitializeContext,
+    },
     UnknownHookInitializeStatus(u32),
+    HookApplyManifestFailed(ApplyManifestStatus),
+    UnknownHookApplyManifestStatus(u32),
     HookShutdownFailed(HookShutdownStatus),
     UnknownHookShutdownStatus(u32),
 }
@@ -332,11 +422,20 @@ impl fmt::Display for InjectorError {
             Self::ExportNotFound { export, dll_path } => {
                 write!(f, "export {export} was not found in {}", dll_path.display())
             }
-            Self::HookInitializeFailed(status) => {
-                write!(f, "hook initialize failed: {status}")
+            Self::HookInitializeFailed { status, context } => {
+                write!(f, "{}", format_hook_initialize_failure(*context, *status))
             }
             Self::UnknownHookInitializeStatus(code) => {
                 write!(f, "hook initialize returned unknown status {code:#x}")
+            }
+            Self::HookApplyManifestFailed(status) => {
+                write!(
+                    f,
+                    "manifest reload failed: {status} (existing hook unchanged)"
+                )
+            }
+            Self::UnknownHookApplyManifestStatus(code) => {
+                write!(f, "manifest reload returned unknown status {code:#x}")
             }
             Self::HookShutdownFailed(status) => {
                 write!(f, "hook shutdown failed: {status}")
@@ -349,3 +448,73 @@ impl fmt::Display for InjectorError {
 }
 
 impl std::error::Error for InjectorError {}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ApplyManifestStatus, HookInitializeStatus, InitializeContext,
+        format_hook_initialize_failure,
+    };
+
+    #[test]
+    fn initialize_failure_message_includes_apply_context() {
+        assert_eq!(
+            format_hook_initialize_failure(
+                InitializeContext::FreshInstall,
+                HookInitializeStatus::PresentSignatureNotFound,
+            ),
+            "hook initialize failed: Present signature was not found"
+        );
+        assert_eq!(
+            format_hook_initialize_failure(
+                InitializeContext::AfterShutdown,
+                HookInitializeStatus::PresentSignatureNotFound,
+            ),
+            "existing hook was shut down, but initialize failed: Present signature was not found"
+        );
+        assert_eq!(
+            format_hook_initialize_failure(
+                InitializeContext::AfterReloadFallback,
+                HookInitializeStatus::PresentSignatureNotFound,
+            ),
+            "manifest reload was unavailable, existing hook was shut down, but initialize failed: Present signature was not found"
+        );
+    }
+
+    #[test]
+    fn apply_manifest_status_codes_are_stable() {
+        assert_eq!(ApplyManifestStatus::Success as u32, 0);
+        assert_eq!(ApplyManifestStatus::NullManifestPath as u32, 1);
+        assert_eq!(ApplyManifestStatus::InvalidManifestPath as u32, 2);
+        assert_eq!(ApplyManifestStatus::NotInitialized as u32, 3);
+        assert_eq!(ApplyManifestStatus::AlreadyInProgress as u32, 4);
+        assert_eq!(ApplyManifestStatus::ManifestLoadFailed as u32, 5);
+        assert_eq!(ApplyManifestStatus::ManifestHasNoAssignments as u32, 6);
+        assert_eq!(ApplyManifestStatus::LutPipelinePrepareFailed as u32, 7);
+    }
+
+    #[test]
+    fn apply_manifest_status_from_code_roundtrips_all_variants() {
+        const VARIANTS: &[(u32, ApplyManifestStatus)] = &[
+            (0, ApplyManifestStatus::Success),
+            (1, ApplyManifestStatus::NullManifestPath),
+            (2, ApplyManifestStatus::InvalidManifestPath),
+            (3, ApplyManifestStatus::NotInitialized),
+            (4, ApplyManifestStatus::AlreadyInProgress),
+            (5, ApplyManifestStatus::ManifestLoadFailed),
+            (6, ApplyManifestStatus::ManifestHasNoAssignments),
+            (7, ApplyManifestStatus::LutPipelinePrepareFailed),
+        ];
+
+        for (code, status) in VARIANTS {
+            assert_eq!(ApplyManifestStatus::from_code(*code), Some(*status));
+        }
+        assert_eq!(ApplyManifestStatus::from_code(8), None);
+    }
+
+    #[test]
+    fn apply_manifest_not_initialized_is_fallback_eligible() {
+        assert!(ApplyManifestStatus::NotInitialized.should_fallback());
+        assert!(!ApplyManifestStatus::ManifestLoadFailed.should_fallback());
+    }
+}
