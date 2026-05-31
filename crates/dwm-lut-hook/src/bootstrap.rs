@@ -20,10 +20,10 @@ use crate::profile::{BuildProfile, HookProfile};
 
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
-    ApplyPayloadStart, HookConfig, HookRegistrationPlan, HookRuntime, HookState,
-    ReplacePayloadPipelineError, ShutdownStart, begin_apply_payload, begin_shutdown,
-    clear_state_after_shutdown, finish_apply_payload, finish_failed_shutdown, install_state,
-    is_initialized, lock_present_apply, minhook_cleanup_plan, replace_payload_pipeline,
+    ApplyPayloadStart, HookRegistrationPlan, HookRuntime, HookState, ReplacePayloadPipelineError,
+    ShutdownStart, begin_apply_payload, begin_shutdown, clear_state_after_shutdown,
+    finish_apply_payload, finish_failed_shutdown, install_state, is_initialized,
+    lock_present_apply, minhook_cleanup_plan, replace_payload_pipeline,
 };
 
 #[cfg(not(test))]
@@ -201,12 +201,12 @@ pub fn build_profile() -> BuildProfile {
 
 #[cfg(test)]
 pub(crate) fn initialize_with_resolution(
-    config: HookConfig,
+    build_profile: BuildProfile,
     payload: HookPayload,
     resolution: SignatureResolutionReport,
 ) -> Result<(), HookError> {
     let _guard = enter_initialization()?;
-    let state = prepare_initial_state_with_resolution(config, payload, resolution)?;
+    let state = prepare_initial_state_with_resolution(build_profile, payload, resolution)?;
     install_prepared_state(state)
 }
 
@@ -230,11 +230,7 @@ pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) 
         }
     };
 
-    let config = HookConfig {
-        profile: build_profile(),
-    };
-
-    match initialize_from_payload(config, payload) {
+    match initialize_from_payload(build_profile(), payload) {
         Ok(()) => {
             debug_log!("event=initialize_success");
             InitializeStatus::Success as u32
@@ -436,10 +432,13 @@ fn finish_initialize_error(error: HookError) -> u32 {
     map_hook_error(error) as u32
 }
 
-fn initialize_from_payload(config: HookConfig, payload: HookPayload) -> Result<(), HookError> {
+fn initialize_from_payload(
+    build_profile: BuildProfile,
+    payload: HookPayload,
+) -> Result<(), HookError> {
     let _guard = enter_initialization()?;
 
-    let state = prepare_initial_state_from_payload(config, payload)?;
+    let state = prepare_initial_state_from_payload(build_profile, payload)?;
     install_prepared_state(state)
 }
 
@@ -457,14 +456,18 @@ fn rollback_registered_state_hooks(state: &HookState) {
 }
 
 fn prepare_initial_state_from_payload(
-    config: HookConfig,
+    build_profile: BuildProfile,
     payload: HookPayload,
 ) -> Result<HookState, HookError> {
-    prepare_initial_state_from_payload_with_profile_resolver(config, payload, resolve_profile)
+    prepare_initial_state_from_payload_with_profile_resolver(
+        build_profile,
+        payload,
+        resolve_profile,
+    )
 }
 
 fn prepare_initial_state_from_payload_with_profile_resolver<F>(
-    config: HookConfig,
+    build_profile: BuildProfile,
     payload: HookPayload,
     resolver: F,
 ) -> Result<HookState, HookError>
@@ -482,7 +485,7 @@ where
         lut_pipeline.summary().lut_count
     );
 
-    let profile = HookProfile::for_build(config.profile);
+    let profile = HookProfile::for_build(build_profile);
 
     let resolution = resolver(&profile)?;
     debug_log!(
@@ -518,11 +521,13 @@ where
 
 #[cfg(test)]
 pub(crate) fn prepare_initial_state_with_resolution(
-    config: HookConfig,
+    build_profile: BuildProfile,
     payload: HookPayload,
     resolution: SignatureResolutionReport,
 ) -> Result<HookState, HookError> {
-    prepare_initial_state_from_payload_with_profile_resolver(config, payload, |_| Ok(resolution))
+    prepare_initial_state_from_payload_with_profile_resolver(build_profile, payload, |_| {
+        Ok(resolution)
+    })
 }
 
 fn finalize_initial_state(

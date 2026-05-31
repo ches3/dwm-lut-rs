@@ -32,7 +32,7 @@ pub use resolver::{
     SkippedSignatureReason, resolve_profile,
 };
 pub use state::{
-    HookConfig, HookRegistrationPlan, HookRegistrationTarget, HookRuntime, HookState,
+    HookRegistrationPlan, HookRegistrationTarget, HookRuntime, HookState,
     evaluate_comp_swap_chain_direct_flip_compatible,
     evaluate_comp_swap_chain_independent_flip_compatible,
     evaluate_comp_visual_candidate_for_promotion, evaluate_direct_flip_compatible,

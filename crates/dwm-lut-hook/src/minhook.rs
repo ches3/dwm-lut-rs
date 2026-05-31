@@ -1418,7 +1418,7 @@ mod tests {
 
     use crate::profile::HookTarget;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
-    use crate::state::{self, HookConfig, HookRegistrationPlan, HookRegistrationTarget};
+    use crate::state::{self, HookRegistrationPlan, HookRegistrationTarget};
     use crate::{
         BackBufferFormat, BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM,
         DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect, HookProfile, SignatureLocator,
@@ -1607,11 +1607,9 @@ mod tests {
     }
 
     fn initialize_test_state_from_payload(payload: HookPayload) {
-        let config = HookConfig {
-            profile: BuildProfile::Windows11_25H2,
-        };
-        let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
-        crate::bootstrap::initialize_with_resolution(config, payload, resolution)
+        let build_profile = BuildProfile::Windows11_25H2;
+        let resolution = synthetic_resolution(&HookProfile::for_build(build_profile));
+        crate::bootstrap::initialize_with_resolution(build_profile, payload, resolution)
             .expect("initialization should succeed with synthetic resolution");
     }
 

@@ -9,14 +9,9 @@ use dwm_lut_payload::{HookPayload, MonitorIdentity};
 use crate::lut_bypass::{LutBypassRuntime, PresentHookOutcome};
 use crate::lut_pipeline::LutPipeline;
 use crate::minhook::{MinHookRuntime, RegisteredHook};
-use crate::profile::{BuildProfile, HookProfile, HookTarget};
+use crate::profile::{HookProfile, HookTarget};
 use crate::resolver::SignatureResolutionReport;
 use crate::{ClipBox, DirtyRect};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HookConfig {
-    pub profile: BuildProfile,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookRegistrationTarget {
