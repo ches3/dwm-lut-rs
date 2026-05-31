@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod error;
 mod injector;
+mod monitor;
 mod staging;
 mod win32;
 
