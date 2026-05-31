@@ -20,11 +20,10 @@ use crate::profile::{BuildProfile, HookProfile};
 
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
-    ApplyPayloadStart, HookConfig, HookRegistrationPlan, HookRuntime, HookState, LutBypassState,
-    LutPipelineState, ReplacePayloadPipelineError, ShutdownStart, begin_apply_payload,
-    begin_shutdown, clear_state_after_shutdown, finish_apply_payload, finish_failed_shutdown,
-    install_state, is_initialized, lock_present_apply, minhook_cleanup_plan,
-    replace_payload_pipeline,
+    ApplyPayloadStart, HookConfig, HookRegistrationPlan, HookRuntime, HookState,
+    ReplacePayloadPipelineError, ShutdownStart, begin_apply_payload, begin_shutdown,
+    clear_state_after_shutdown, finish_apply_payload, finish_failed_shutdown, install_state,
+    is_initialized, lock_present_apply, minhook_cleanup_plan, replace_payload_pipeline,
 };
 
 #[cfg(not(test))]
@@ -552,9 +551,9 @@ fn finalize_initial_state(
         profile,
         runtime: HookRuntime {
             minhook,
-            lut_pipeline: LutPipelineState::Ready(Arc::new(lut_pipeline)),
+            lut_pipeline: Arc::new(lut_pipeline),
             hooks: registered_hooks,
-            lut_bypass: LutBypassState::Ready(lut_bypass),
+            lut_bypass,
         },
     })
 }

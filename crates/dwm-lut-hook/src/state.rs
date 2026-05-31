@@ -54,21 +54,11 @@ impl HookRegistrationPlan {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum LutPipelineState {
-    Ready(Arc<LutPipeline>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LutBypassState {
-    Ready(LutBypassRuntime),
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct HookRuntime {
     pub minhook: MinHookRuntime,
-    pub lut_pipeline: LutPipelineState,
+    pub lut_pipeline: Arc<LutPipeline>,
     pub hooks: Vec<RegisteredHook>,
-    pub lut_bypass: LutBypassState,
+    pub lut_bypass: LutBypassRuntime,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,9 +153,7 @@ pub fn hook_profile() -> Option<HookProfile> {
 }
 
 pub fn lut_bypass_runtime() -> Option<LutBypassRuntime> {
-    with_state(|state| match &state.runtime.lut_bypass {
-        LutBypassState::Ready(runtime) => runtime.clone(),
-    })
+    with_state(|state| state.runtime.lut_bypass.clone())
 }
 
 pub(crate) fn evaluate_present_hook(
@@ -178,11 +166,8 @@ pub(crate) fn evaluate_present_hook(
 ) -> Option<PresentHookOutcome> {
     with_state_mut(|state| {
         let runtime = &mut state.runtime;
-        let LutPipelineState::Ready(lut_pipeline) = &runtime.lut_pipeline;
-        let LutBypassState::Ready(lut_bypass) = &mut runtime.lut_bypass;
-
-        lut_bypass.update_present(
-            lut_pipeline,
+        runtime.lut_bypass.update_present(
+            &runtime.lut_pipeline,
             context_address,
             monitor_identity,
             clip_box,
@@ -395,12 +380,9 @@ pub(crate) fn evaluate_rendered_present_hook(
 ) -> Option<PresentHookOutcome> {
     with_state_mut(|state| {
         let runtime = &mut state.runtime;
-        let LutPipelineState::Ready(lut_pipeline) = &runtime.lut_pipeline;
-        let LutBypassState::Ready(lut_bypass) = &mut runtime.lut_bypass;
-
         if render_result.lut_index.is_some() {
-            lut_bypass.update_present_with_lut_index(
-                lut_pipeline,
+            runtime.lut_bypass.update_present_with_lut_index(
+                &runtime.lut_pipeline,
                 context_address,
                 clip_box,
                 dxgi_format,
@@ -408,8 +390,8 @@ pub(crate) fn evaluate_rendered_present_hook(
                 render_result.lut_index,
             )
         } else {
-            lut_bypass.update_present(
-                lut_pipeline,
+            runtime.lut_bypass.update_present(
+                &runtime.lut_pipeline,
                 context_address,
                 None,
                 clip_box,
@@ -427,8 +409,10 @@ pub(crate) fn render_present_lut(
     dirty_rects: &[DirtyRect],
 ) -> crate::d3d11_renderer::RenderPresentLutResult {
     let Some((lut_pipeline, swap_chain_path)) = with_state(|state| {
-        let LutPipelineState::Ready(lut_pipeline) = &state.runtime.lut_pipeline;
-        (lut_pipeline.clone(), state.profile.hypotheses.swap_chain)
+        (
+            state.runtime.lut_pipeline.clone(),
+            state.profile.hypotheses.swap_chain,
+        )
     }) else {
         return crate::d3d11_renderer::RenderPresentLutResult::default();
     };
@@ -463,10 +447,11 @@ pub(crate) fn prepare_present_lut_context(
 }
 
 pub fn evaluate_overlays_enabled(context_address: usize, original_enabled: bool) -> Option<bool> {
-    with_state_mut(|state| match &mut state.runtime.lut_bypass {
-        LutBypassState::Ready(runtime) => {
-            runtime.overlays_enabled(context_address, original_enabled)
-        }
+    with_state_mut(|state| {
+        state
+            .runtime
+            .lut_bypass
+            .overlays_enabled(context_address, original_enabled)
     })
 }
 
@@ -474,57 +459,58 @@ pub fn evaluate_direct_flip_compatible(
     context_address: usize,
     original_compatible: bool,
 ) -> Option<bool> {
-    with_state_mut(|state| match &mut state.runtime.lut_bypass {
-        LutBypassState::Ready(runtime) => {
-            runtime.direct_flip_compatible(context_address, original_compatible)
-        }
+    with_state_mut(|state| {
+        state
+            .runtime
+            .lut_bypass
+            .direct_flip_compatible(context_address, original_compatible)
     })
 }
 
 pub fn evaluate_window_context_direct_flip_compatible(original_compatible: bool) -> Option<bool> {
-    with_state(|state| match &state.runtime.lut_bypass {
-        LutBypassState::Ready(runtime) => {
-            runtime.window_context_direct_flip_compatible(original_compatible)
-        }
+    with_state(|state| {
+        state
+            .runtime
+            .lut_bypass
+            .window_context_direct_flip_compatible(original_compatible)
     })
 }
 
 pub fn evaluate_comp_swap_chain_direct_flip_compatible(original_compatible: bool) -> Option<bool> {
-    with_state(|state| match &state.runtime.lut_bypass {
-        LutBypassState::Ready(runtime) => {
-            runtime.comp_swap_chain_direct_flip_compatible(original_compatible)
-        }
+    with_state(|state| {
+        state
+            .runtime
+            .lut_bypass
+            .comp_swap_chain_direct_flip_compatible(original_compatible)
     })
 }
 
 pub fn evaluate_comp_swap_chain_independent_flip_compatible(
     original_compatible: bool,
 ) -> Option<bool> {
-    with_state(|state| match &state.runtime.lut_bypass {
-        LutBypassState::Ready(runtime) => {
-            runtime.comp_swap_chain_independent_flip_compatible(original_compatible)
-        }
+    with_state(|state| {
+        state
+            .runtime
+            .lut_bypass
+            .comp_swap_chain_independent_flip_compatible(original_compatible)
     })
 }
 
 pub fn evaluate_comp_visual_candidate_for_promotion(original_candidate: bool) -> Option<bool> {
-    with_state(|state| match &state.runtime.lut_bypass {
-        LutBypassState::Ready(runtime) => {
-            runtime.comp_visual_candidate_for_promotion(original_candidate)
-        }
+    with_state(|state| {
+        state
+            .runtime
+            .lut_bypass
+            .comp_visual_candidate_for_promotion(original_candidate)
     })
 }
 
 pub fn evaluate_overlay_test_mode(original_mode: i32) -> Option<i32> {
-    with_state(|state| match &state.runtime.lut_bypass {
-        LutBypassState::Ready(runtime) => runtime.overlay_test_mode(original_mode),
-    })
+    with_state(|state| state.runtime.lut_bypass.overlay_test_mode(original_mode))
 }
 
 pub(crate) fn restore_overlay_test_mode() {
-    let _ = with_state_mut(|state| match &mut state.runtime.lut_bypass {
-        LutBypassState::Ready(runtime) => runtime.restore_overlay_test_mode(),
-    });
+    let _ = with_state_mut(|state| state.runtime.lut_bypass.restore_overlay_test_mode());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -540,9 +526,11 @@ pub fn replace_payload_pipeline(
 
     with_state_mut(|state| {
         state.payload = payload;
-        state.runtime.lut_pipeline = LutPipelineState::Ready(Arc::new(lut_pipeline));
-        let LutBypassState::Ready(lut_bypass) = &mut state.runtime.lut_bypass;
-        lut_bypass.reload_for_new_payload(has_lut_assignments);
+        state.runtime.lut_pipeline = Arc::new(lut_pipeline);
+        state
+            .runtime
+            .lut_bypass
+            .reload_for_new_payload(has_lut_assignments);
     })
     .ok_or(ReplacePayloadPipelineError::NotInitialized)
 }
