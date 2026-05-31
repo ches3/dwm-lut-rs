@@ -4,6 +4,7 @@ mod error;
 mod injector;
 mod lut;
 mod monitor;
+mod monitor_list;
 mod staging;
 mod win32;
 
@@ -27,6 +28,7 @@ fn run() -> Result<(), InjectorError> {
     match parse_args()? {
         ParseArgsResult::Run(CliCommand::Apply(options)) => run_apply(options),
         ParseArgsResult::Run(CliCommand::Disable) => run_disable(),
+        ParseArgsResult::Run(CliCommand::Monitors) => monitor_list::run_monitors(),
         ParseArgsResult::Help(message) => {
             println!("{message}");
             Ok(())

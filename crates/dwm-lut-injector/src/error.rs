@@ -153,6 +153,7 @@ pub(crate) enum InjectorError {
     UnknownApplyPayloadStatus(u32),
     HookShutdownFailed(ShutdownStatus),
     UnknownShutdownStatus(u32),
+    MonitorEnumeration(String),
 }
 
 impl From<crate::config::ConfigError> for InjectorError {
@@ -218,6 +219,7 @@ impl fmt::Display for InjectorError {
             Self::UnknownShutdownStatus(code) => {
                 write!(f, "hook shutdown returned unknown status {code:#x}")
             }
+            Self::MonitorEnumeration(message) => write!(f, "monitor enumeration failed: {message}"),
         }
     }
 }

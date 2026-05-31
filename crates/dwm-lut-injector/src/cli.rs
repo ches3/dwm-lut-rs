@@ -14,6 +14,7 @@ pub(crate) struct CliOptions {
 pub(crate) enum CliCommand {
     Apply(CliOptions),
     Disable,
+    Monitors,
 }
 
 #[derive(Debug)]
@@ -45,6 +46,7 @@ where
     match first_string.as_ref() {
         "apply" => parse_apply_args(args),
         "disable" => parse_disable_args(args),
+        "monitors" => parse_monitors_args(args),
         other => Err(InjectorError::Usage(usage_message(&format!(
             "unknown command: {other}"
         )))),
@@ -103,8 +105,21 @@ fn parse_disable_args(
     Ok(ParseArgsResult::Run(CliCommand::Disable))
 }
 
+fn parse_monitors_args(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<ParseArgsResult, InjectorError> {
+    if let Some(arg) = args.next() {
+        return Err(InjectorError::Usage(usage_message(&format!(
+            "unknown argument for monitors: {}",
+            arg.to_string_lossy()
+        ))));
+    }
+
+    Ok(ParseArgsResult::Run(CliCommand::Monitors))
+}
+
 fn usage_message(problem: &str) -> String {
-    let usage = "usage: dwm-lut-injector apply [--dll <hook-dll-path>] --config <config-path>\n       dwm-lut-injector disable";
+    let usage = "usage: dwm-lut-injector apply [--dll <hook-dll-path>] --config <config-path>\n       dwm-lut-injector disable\n       dwm-lut-injector monitors";
     if problem.is_empty() {
         usage.to_string()
     } else {
@@ -184,6 +199,30 @@ mod tests {
     }
 
     #[test]
+    fn accepts_monitors_command_without_config() {
+        let parsed = parse_args_from(["dwm-lut-injector", "monitors"])
+            .expect("monitors command should parse");
+
+        match parsed {
+            ParseArgsResult::Run(CliCommand::Monitors) => {}
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_monitors_arguments() {
+        let error = parse_args_from(["dwm-lut-injector", "monitors", "--config", "config.json"])
+            .expect_err("monitors must reject arguments");
+
+        match error {
+            InjectorError::Usage(message) => {
+                assert!(message.contains("unknown argument for monitors: --config"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
     fn accepts_explicit_dll_argument() {
         let parsed = parse_args_from([
             "dwm-lut-injector",
@@ -207,7 +246,7 @@ mod tests {
     fn run_options(parsed: ParseArgsResult) -> CliOptions {
         match parsed {
             ParseArgsResult::Run(CliCommand::Apply(options)) => options,
-            ParseArgsResult::Run(CliCommand::Disable) => {
+            ParseArgsResult::Run(CliCommand::Disable | CliCommand::Monitors) => {
                 panic!("expected apply command arguments")
             }
             ParseArgsResult::Help(_) => panic!("expected normal execution arguments"),
