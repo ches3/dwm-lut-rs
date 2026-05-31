@@ -18,11 +18,6 @@ pub struct HookConfig {
     pub profile: BuildProfile,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoggerState {
-    Ready,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PayloadLoadState {
     Loaded { assignment_count: usize },
@@ -86,7 +81,6 @@ pub enum LutBypassState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookRuntime {
-    pub logger: LoggerState,
     pub payload_load: PayloadLoadState,
     pub minhook: MinHookRuntime,
     pub resolution: SignatureResolutionState,

@@ -33,7 +33,7 @@ pub use resolver::{
 };
 pub use state::{
     HookConfig, HookRegistrationPlan, HookRegistrationState, HookRegistrationTarget, HookRuntime,
-    HookState, LoggerState, LutBypassState, PayloadLoadState, SignatureResolutionState,
+    HookState, LutBypassState, PayloadLoadState, SignatureResolutionState,
     evaluate_comp_swap_chain_direct_flip_compatible,
     evaluate_comp_swap_chain_independent_flip_compatible,
     evaluate_comp_visual_candidate_for_promotion, evaluate_direct_flip_compatible,

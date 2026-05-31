@@ -21,11 +21,10 @@ use crate::profile::{BuildProfile, HookProfile};
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
     ApplyPayloadStart, HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime,
-    HookState, LoggerState, LutBypassState, LutPipelineState, PayloadLoadState,
-    ReplacePayloadPipelineError, ShutdownStart, SignatureResolutionState, begin_apply_payload,
-    begin_shutdown, clear_state_after_shutdown, finish_apply_payload, finish_failed_shutdown,
-    install_state, is_initialized, lock_present_apply, minhook_cleanup_plan,
-    replace_payload_pipeline,
+    HookState, LutBypassState, LutPipelineState, PayloadLoadState, ReplacePayloadPipelineError,
+    ShutdownStart, SignatureResolutionState, begin_apply_payload, begin_shutdown,
+    clear_state_after_shutdown, finish_apply_payload, finish_failed_shutdown, install_state,
+    is_initialized, lock_present_apply, minhook_cleanup_plan, replace_payload_pipeline,
 };
 
 #[cfg(not(test))]
@@ -558,7 +557,6 @@ fn finalize_initial_state(
         config: config.clone(),
         profile,
         runtime: HookRuntime {
-            logger: LoggerState::Ready,
             payload_load: PayloadLoadState::Loaded { assignment_count },
             minhook,
             resolution: SignatureResolutionState::Resolved(resolution),
