@@ -21,11 +21,11 @@ use crate::profile::{BuildProfile, HookProfile};
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
     ApplyPayloadStart, HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime,
-    HookState, InitializationStage, LoggerState, LutBypassState, LutPipelineState,
-    PayloadLoadState, ReplacePayloadPipelineError, ShutdownStart, SignatureResolutionState,
-    begin_apply_payload, begin_shutdown, clear_state_after_shutdown, finish_apply_payload,
-    finish_failed_shutdown, install_state, is_initialized, lock_present_apply,
-    minhook_cleanup_plan, replace_payload_pipeline,
+    HookState, LoggerState, LutBypassState, LutPipelineState, PayloadLoadState,
+    ReplacePayloadPipelineError, ShutdownStart, SignatureResolutionState, begin_apply_payload,
+    begin_shutdown, clear_state_after_shutdown, finish_apply_payload, finish_failed_shutdown,
+    install_state, is_initialized, lock_present_apply, minhook_cleanup_plan,
+    replace_payload_pipeline,
 };
 
 #[cfg(not(test))]
@@ -552,17 +552,6 @@ fn finalize_initial_state(
         .map(|target| target.address);
     let lut_bypass =
         LutBypassRuntime::new(!payload.assignments.is_empty(), overlay_test_mode_address);
-    let initialization_trace = vec![
-        InitializationStage::LoggerReady,
-        InitializationStage::PayloadDecoded,
-        InitializationStage::LutPipelinePrepared,
-        InitializationStage::ProfileSelected,
-        InitializationStage::TargetModuleResolved,
-        InitializationStage::SignaturesResolved,
-        InitializationStage::HookRegistrationEnabled,
-        InitializationStage::LutBypassStatePrepared,
-        InitializationStage::GlobalStateCommitted,
-    ];
 
     Ok(HookState {
         payload,
@@ -579,7 +568,6 @@ fn finalize_initial_state(
                 hooks: registered_hooks,
             },
             lut_bypass: LutBypassState::Ready(lut_bypass),
-            initialization_trace,
         },
     })
 }

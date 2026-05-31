@@ -33,14 +33,14 @@ pub use resolver::{
 };
 pub use state::{
     HookConfig, HookRegistrationPlan, HookRegistrationState, HookRegistrationTarget, HookRuntime,
-    HookState, InitializationStage, LoggerState, LutBypassState, PayloadLoadState,
-    SignatureResolutionState, evaluate_comp_swap_chain_direct_flip_compatible,
+    HookState, LoggerState, LutBypassState, PayloadLoadState, SignatureResolutionState,
+    evaluate_comp_swap_chain_direct_flip_compatible,
     evaluate_comp_swap_chain_independent_flip_compatible,
     evaluate_comp_visual_candidate_for_promotion, evaluate_direct_flip_compatible,
     evaluate_overlay_test_mode, evaluate_overlays_enabled,
-    evaluate_window_context_direct_flip_compatible, hook_profile, initialization_trace,
-    is_initialized, lut_bypass_runtime, lut_pipeline_selects_monitor, lut_pipeline_summary,
-    payload_assignments, signature_resolution,
+    evaluate_window_context_direct_flip_compatible, hook_profile, is_initialized,
+    lut_bypass_runtime, lut_pipeline_selects_monitor, lut_pipeline_summary, payload_assignments,
+    signature_resolution,
 };
 
 use std::ffi::c_void;

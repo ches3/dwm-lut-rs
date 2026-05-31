@@ -29,19 +29,6 @@ pub enum PayloadLoadState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InitializationStage {
-    LoggerReady,
-    ProfileSelected,
-    TargetModuleResolved,
-    SignaturesResolved,
-    PayloadDecoded,
-    LutPipelinePrepared,
-    HookRegistrationEnabled,
-    LutBypassStatePrepared,
-    GlobalStateCommitted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookRegistrationTarget {
     pub target: HookTarget,
     pub capture_key: &'static str,
@@ -106,7 +93,6 @@ pub struct HookRuntime {
     pub lut_pipeline: LutPipelineState,
     pub hook_registration: HookRegistrationState,
     pub lut_bypass: LutBypassState,
-    pub initialization_trace: Vec<InitializationStage>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,10 +206,6 @@ pub fn signature_resolution() -> Option<SignatureResolutionReport> {
     with_state(|state| match &state.runtime.resolution {
         SignatureResolutionState::Resolved(report) => report.clone(),
     })
-}
-
-pub fn initialization_trace() -> Option<Vec<InitializationStage>> {
-    with_state(|state| state.runtime.initialization_trace.clone())
 }
 
 pub fn lut_pipeline_summary() -> Option<LutPipelineSummary> {
