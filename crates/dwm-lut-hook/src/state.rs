@@ -4,10 +4,10 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
-use dwm_lut_payload::{HookPayload, MonitorIdentity, PayloadAssignment};
+use dwm_lut_payload::{HookPayload, MonitorIdentity};
 
 use crate::lut_bypass::{LutBypassRuntime, PresentHookOutcome};
-use crate::lut_pipeline::{BackBufferFormat, LutPipeline, LutPipelineSummary};
+use crate::lut_pipeline::LutPipeline;
 use crate::minhook::{MinHookRuntime, RegisteredHook};
 use crate::profile::{BuildProfile, HookProfile, HookTarget};
 use crate::resolver::SignatureResolutionReport;
@@ -16,11 +16,6 @@ use crate::{ClipBox, DirtyRect};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookConfig {
     pub profile: BuildProfile,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PayloadLoadState {
-    Loaded { assignment_count: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,17 +53,6 @@ impl HookRegistrationPlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SignatureResolutionState {
-    Resolved(SignatureResolutionReport),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HookRegistrationState {
-    pub plan: HookRegistrationPlan,
-    pub hooks: Vec<RegisteredHook>,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum LutPipelineState {
     Ready(Arc<LutPipeline>),
@@ -81,18 +65,15 @@ pub enum LutBypassState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookRuntime {
-    pub payload_load: PayloadLoadState,
     pub minhook: MinHookRuntime,
-    pub resolution: SignatureResolutionState,
     pub lut_pipeline: LutPipelineState,
-    pub hook_registration: HookRegistrationState,
+    pub hooks: Vec<RegisteredHook>,
     pub lut_bypass: LutBypassState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookState {
     pub payload: HookPayload,
-    pub config: HookConfig,
     pub profile: HookProfile,
     pub runtime: HookRuntime,
 }
@@ -177,35 +158,8 @@ pub fn is_initialized() -> bool {
     }
 }
 
-pub fn payload_assignments() -> Option<Vec<PayloadAssignment>> {
-    with_state(|state| state.payload.assignments.clone())
-}
-
-pub fn lut_pipeline_selects_monitor(
-    identity: MonitorIdentity,
-    format: BackBufferFormat,
-) -> Option<bool> {
-    with_state(|state| match &state.runtime.lut_pipeline {
-        LutPipelineState::Ready(pipeline) => pipeline
-            .select_lut_index_for_monitor_identity(identity, format)
-            .is_some(),
-    })
-}
-
 pub fn hook_profile() -> Option<HookProfile> {
     with_state(|state| state.profile.clone())
-}
-
-pub fn signature_resolution() -> Option<SignatureResolutionReport> {
-    with_state(|state| match &state.runtime.resolution {
-        SignatureResolutionState::Resolved(report) => report.clone(),
-    })
-}
-
-pub fn lut_pipeline_summary() -> Option<LutPipelineSummary> {
-    with_state(|state| match &state.runtime.lut_pipeline {
-        LutPipelineState::Ready(runtime) => runtime.summary(),
-    })
 }
 
 pub fn lut_bypass_runtime() -> Option<LutBypassRuntime> {
@@ -429,12 +383,7 @@ pub(crate) fn finish_failed_shutdown() {
 }
 
 pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
-    with_state(|state| {
-        (
-            state.runtime.minhook.clone(),
-            state.runtime.hook_registration.hooks.clone(),
-        )
-    })
+    with_state(|state| (state.runtime.minhook.clone(), state.runtime.hooks.clone()))
 }
 
 pub(crate) fn evaluate_rendered_present_hook(
@@ -587,12 +536,10 @@ pub fn replace_payload_pipeline(
     payload: HookPayload,
     lut_pipeline: LutPipeline,
 ) -> Result<(), ReplacePayloadPipelineError> {
-    let assignment_count = payload.assignments.len();
     let has_lut_assignments = !payload.assignments.is_empty();
 
     with_state_mut(|state| {
         state.payload = payload;
-        state.runtime.payload_load = PayloadLoadState::Loaded { assignment_count };
         state.runtime.lut_pipeline = LutPipelineState::Ready(Arc::new(lut_pipeline));
         let LutBypassState::Ready(lut_bypass) = &mut state.runtime.lut_bypass;
         lut_bypass.reload_for_new_payload(has_lut_assignments);

@@ -20,11 +20,11 @@ use crate::profile::{BuildProfile, HookProfile};
 
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
-    ApplyPayloadStart, HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime,
-    HookState, LutBypassState, LutPipelineState, PayloadLoadState, ReplacePayloadPipelineError,
-    ShutdownStart, SignatureResolutionState, begin_apply_payload, begin_shutdown,
-    clear_state_after_shutdown, finish_apply_payload, finish_failed_shutdown, install_state,
-    is_initialized, lock_present_apply, minhook_cleanup_plan, replace_payload_pipeline,
+    ApplyPayloadStart, HookConfig, HookRegistrationPlan, HookRuntime, HookState, LutBypassState,
+    LutPipelineState, ReplacePayloadPipelineError, ShutdownStart, begin_apply_payload,
+    begin_shutdown, clear_state_after_shutdown, finish_apply_payload, finish_failed_shutdown,
+    install_state, is_initialized, lock_present_apply, minhook_cleanup_plan,
+    replace_payload_pipeline,
 };
 
 #[cfg(not(test))]
@@ -454,10 +454,7 @@ fn install_prepared_state(state: HookState) -> Result<(), HookError> {
 }
 
 fn rollback_registered_state_hooks(state: &HookState) {
-    unregister_registered_hooks(
-        &state.runtime.minhook,
-        &state.runtime.hook_registration.hooks,
-    );
+    unregister_registered_hooks(&state.runtime.minhook, &state.runtime.hooks);
 }
 
 fn prepare_initial_state_from_payload(
@@ -517,7 +514,7 @@ where
         }
     }
 
-    finalize_initial_state(config, payload, profile, resolution, lut_pipeline)
+    finalize_initial_state(payload, profile, resolution, lut_pipeline)
 }
 
 #[cfg(test)]
@@ -530,13 +527,11 @@ pub(crate) fn prepare_initial_state_with_resolution(
 }
 
 fn finalize_initial_state(
-    config: HookConfig,
     payload: HookPayload,
     profile: HookProfile,
     resolution: SignatureResolutionReport,
     lut_pipeline: LutPipeline,
 ) -> Result<HookState, HookError> {
-    let assignment_count = payload.assignments.len();
     let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
     let (minhook, registered_hooks) = register_plan(&registration_plan)?;
     debug_log!(
@@ -554,17 +549,11 @@ fn finalize_initial_state(
 
     Ok(HookState {
         payload,
-        config: config.clone(),
         profile,
         runtime: HookRuntime {
-            payload_load: PayloadLoadState::Loaded { assignment_count },
             minhook,
-            resolution: SignatureResolutionState::Resolved(resolution),
             lut_pipeline: LutPipelineState::Ready(Arc::new(lut_pipeline)),
-            hook_registration: HookRegistrationState {
-                plan: registration_plan,
-                hooks: registered_hooks,
-            },
+            hooks: registered_hooks,
             lut_bypass: LutBypassState::Ready(lut_bypass),
         },
     })
