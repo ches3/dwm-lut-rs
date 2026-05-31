@@ -3,12 +3,11 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub use dwm_lut_payload::{ColorMode, MonitorIdentity, MonitorTarget, PayloadLut};
-use dwm_lut_payload::{
-    HookPayload, PayloadAssignment, PayloadError, validate_lut, validate_payload,
-};
+pub use dwm_lut_payload::{ColorMode, MonitorIdentity, MonitorTarget};
+use dwm_lut_payload::{HookPayload, PayloadAssignment, PayloadError, validate_payload};
 use serde::Deserialize;
 
+use crate::lut::parse_lut;
 use crate::monitor::resolve_monitor_identity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,8 +42,6 @@ pub struct FileAssignment {
 pub struct FileConfig {
     pub assignments: Vec<FileAssignment>,
 }
-
-pub type LutCube = PayloadLut;
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -91,7 +88,7 @@ impl From<std::io::Error> for ConfigError {
 }
 
 impl ConfigError {
-    fn parse_at(line: usize, message: impl Into<String>) -> Self {
+    pub(crate) fn parse_at(line: usize, message: impl Into<String>) -> Self {
         Self::Parse {
             line: Some(line),
             message: message.into(),
@@ -153,7 +150,7 @@ pub fn config_to_payload(config: &LutConfig) -> Result<HookPayload, ConfigError>
     for assignment in &config.assignments {
         assignments.push(PayloadAssignment {
             target: assignment.target,
-            lut: parse_cube(&assignment.lut_path)?,
+            lut: parse_lut(&assignment.lut_path)?,
         });
     }
 
@@ -238,277 +235,12 @@ pub fn resolve_file_config(
     Ok(config)
 }
 
-pub fn parse_cube(path: &Path) -> Result<LutCube, ConfigError> {
-    let contents = fs::read_to_string(path)?;
-    let lut = parse_cube_str(&contents)?;
-    validate_lut(&lut).map_err(|source| ConfigError::InvalidLut {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(lut)
-}
-
-pub fn parse_cube_str(contents: &str) -> Result<LutCube, ConfigError> {
-    let mut size = None;
-    let mut domain_min = [0.0, 0.0, 0.0];
-    let mut domain_max = [1.0, 1.0, 1.0];
-    let mut domain_min_seen = false;
-    let mut domain_max_seen = false;
-    let mut lut_data_started = false;
-    let mut values = Vec::new();
-
-    for (index, raw_line) in contents.lines().enumerate() {
-        let line_no = index + 1;
-        let line = strip_comments(raw_line).trim();
-
-        if line.is_empty() {
-            continue;
-        }
-
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        match tokens[0] {
-            "TITLE" => continue,
-            "LUT_1D_SIZE" => {
-                return Err(ConfigError::Unsupported("1D .cube LUTs are not supported"));
-            }
-            "LUT_3D_SIZE" => {
-                if size.is_some() {
-                    return Err(ConfigError::parse_at(
-                        line_no,
-                        "LUT_3D_SIZE must appear only once",
-                    ));
-                }
-
-                size = Some(parse_u32_directive("LUT_3D_SIZE", line_no, &tokens[1..])?);
-            }
-            "DOMAIN_MIN" => {
-                if lut_data_started {
-                    return Err(ConfigError::parse_at(
-                        line_no,
-                        "DOMAIN_MIN must appear before LUT data",
-                    ));
-                }
-                if domain_min_seen {
-                    return Err(ConfigError::parse_at(
-                        line_no,
-                        "DOMAIN_MIN must appear only once",
-                    ));
-                }
-
-                domain_min = parse_triplet_directive("DOMAIN_MIN", line_no, &tokens[1..])?;
-                domain_min_seen = true;
-            }
-            "DOMAIN_MAX" => {
-                if lut_data_started {
-                    return Err(ConfigError::parse_at(
-                        line_no,
-                        "DOMAIN_MAX must appear before LUT data",
-                    ));
-                }
-                if domain_max_seen {
-                    return Err(ConfigError::parse_at(
-                        line_no,
-                        "DOMAIN_MAX must appear only once",
-                    ));
-                }
-
-                domain_max = parse_triplet_directive("DOMAIN_MAX", line_no, &tokens[1..])?;
-                domain_max_seen = true;
-            }
-            _ => {
-                let lut_size = size.ok_or_else(|| {
-                    ConfigError::parse_at(line_no, "encountered LUT data before LUT_3D_SIZE")
-                })?;
-                let expected_entries = expected_entry_count(lut_size)?;
-
-                values.push(parse_triplet_directive("LUT value", line_no, &tokens)?);
-                lut_data_started = true;
-
-                if values.len() > expected_entries {
-                    return Err(ConfigError::parse_at(
-                        line_no,
-                        format!("too many LUT entries: expected {expected_entries}, found more"),
-                    ));
-                }
-            }
-        }
-    }
-
-    let size = size.ok_or_else(|| ConfigError::parse_message("missing LUT_3D_SIZE directive"))?;
-
-    Ok(LutCube {
-        size,
-        domain_min,
-        domain_max,
-        values,
-    })
-}
-
-fn strip_comments(line: &str) -> &str {
-    match line.find('#') {
-        Some(index) => &line[..index],
-        None => line,
-    }
-}
-
-fn parse_u32_directive(directive: &str, line_no: usize, args: &[&str]) -> Result<u32, ConfigError> {
-    if args.len() != 1 {
-        return Err(ConfigError::parse_at(
-            line_no,
-            format!("{directive} expects exactly 1 value"),
-        ));
-    }
-
-    let value = args[0].parse::<u32>().map_err(|_| {
-        ConfigError::parse_at(line_no, format!("{directive} must be an unsigned integer"))
-    })?;
-
-    if value == 0 {
-        return Err(ConfigError::parse_at(
-            line_no,
-            format!("{directive} must be greater than 0"),
-        ));
-    }
-
-    Ok(value)
-}
-
-fn parse_triplet_directive(
-    directive: &str,
-    line_no: usize,
-    args: &[&str],
-) -> Result<[f32; 3], ConfigError> {
-    if args.len() != 3 {
-        return Err(ConfigError::parse_at(
-            line_no,
-            format!("{directive} expects exactly 3 values"),
-        ));
-    }
-
-    Ok([
-        parse_f32(line_no, directive, args[0])?,
-        parse_f32(line_no, directive, args[1])?,
-        parse_f32(line_no, directive, args[2])?,
-    ])
-}
-
-fn parse_f32(line_no: usize, directive: &str, value: &str) -> Result<f32, ConfigError> {
-    let parsed = value.parse::<f32>().map_err(|_| {
-        ConfigError::parse_at(
-            line_no,
-            format!("{directive} contains an invalid float: {value}"),
-        )
-    })?;
-
-    Ok(parsed)
-}
-
-fn expected_entry_count(size: u32) -> Result<usize, ConfigError> {
-    let size = usize::try_from(size)
-        .map_err(|_| ConfigError::parse_message("LUT_3D_SIZE does not fit into usize"))?;
-
-    size.checked_mul(size)
-        .and_then(|value| value.checked_mul(size))
-        .ok_or_else(|| ConfigError::parse_message("LUT_3D_SIZE is too large"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{
-        ColorMode, ConfigError, MonitorIdentity, parse_config_str, parse_cube_str,
-        resolve_file_config,
-    };
+    use super::{ColorMode, ConfigError, MonitorIdentity, parse_config_str, resolve_file_config};
     use dwm_lut_payload::AdapterLuid;
-
-    #[test]
-    fn parse_cube_accepts_comments_and_fractional_values() {
-        let cube = parse_cube_str(
-            r#"
-# generated by test
-TITLE "sample"
-LUT_3D_SIZE 2
-DOMAIN_MIN -1.0 0.0 .5
-DOMAIN_MAX 1.0 1.0 1.0
-
-0.0 0.0 0.0
-.5 -.25 1.0
-0.1 0.2 0.3
-0.4 0.5 0.6
-0.7 0.8 0.9
-1.0 1.0 1.0
--0.2 .25 .75
-0.9 0.1 0.2 # trailing comment
-"#,
-        )
-        .expect("cube should parse");
-
-        assert_eq!(cube.size, 2);
-        assert_eq!(cube.domain_min, [-1.0, 0.0, 0.5]);
-        assert_eq!(cube.domain_max, [1.0, 1.0, 1.0]);
-        assert_eq!(cube.values.len(), 8);
-        assert_eq!(cube.values[1], [0.5, -0.25, 1.0]);
-        assert_eq!(cube.values[6], [-0.2, 0.25, 0.75]);
-    }
-
-    #[test]
-    fn parse_cube_reports_missing_size() {
-        let error = parse_cube_str("0.0 0.0 0.0").expect_err("parse should fail");
-
-        match error {
-            ConfigError::Parse {
-                line: Some(1),
-                message,
-            } => {
-                assert!(message.contains("before LUT_3D_SIZE"));
-            }
-            other => panic!("unexpected error: {other}"),
-        }
-    }
-
-    #[test]
-    fn parse_cube_rejects_duplicate_size_directive() {
-        let error = parse_cube_str(
-            r#"
-LUT_3D_SIZE 2
-LUT_3D_SIZE 3
-"#,
-        )
-        .expect_err("parse should fail");
-
-        match error {
-            ConfigError::Parse {
-                line: Some(3),
-                message,
-            } => {
-                assert!(message.contains("must appear only once"));
-            }
-            other => panic!("unexpected error: {other}"),
-        }
-    }
-
-    #[test]
-    fn parse_cube_rejects_domain_directive_after_lut_data() {
-        let error = parse_cube_str(
-            r#"
-LUT_3D_SIZE 2
-0.0 0.0 0.0
-DOMAIN_MAX 1.0 1.0 1.0
-"#,
-        )
-        .expect_err("parse should fail");
-
-        match error {
-            ConfigError::Parse {
-                line: Some(4),
-                message,
-            } => {
-                assert!(message.contains("DOMAIN_MAX must appear before LUT data"));
-            }
-            other => panic!("unexpected error: {other}"),
-        }
-    }
 
     fn test_monitor_device_path() -> &'static str {
         r"\\?\DISPLAY#TEST#5&2b0371&0&UID4357#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}"
