@@ -363,7 +363,7 @@ pub(crate) fn finish_failed_shutdown() {
 }
 
 pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
-    with_state(|state| (state.runtime.minhook.clone(), state.runtime.hooks.clone()))
+    with_state(|state| (state.runtime.minhook, state.runtime.hooks.clone()))
 }
 
 pub(crate) fn evaluate_rendered_present_hook(

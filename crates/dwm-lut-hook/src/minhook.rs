@@ -33,18 +33,32 @@ pub type MhEnableHookApi = unsafe extern "system" fn(target: *mut c_void) -> MhS
 pub type MhDisableHookApi = unsafe extern "system" fn(target: *mut c_void) -> MhStatus;
 pub type MhRemoveHookApi = unsafe extern "system" fn(target: *mut c_void) -> MhStatus;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MinHookState {
-    pub module_name: &'static str,
-    pub module_handle: usize,
     pub owns_initialization: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub struct MinHookRuntime {
     pub state: MinHookState,
-    api_addresses: MinHookApiAddresses,
+    apis: MinHookApis,
 }
+
+impl std::fmt::Debug for MinHookRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MinHookRuntime")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for MinHookRuntime {
+    fn eq(&self, other: &Self) -> bool {
+        self.state == other.state && apis_eq(self.apis, other.apis)
+    }
+}
+
+impl Eq for MinHookRuntime {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MinHookError {
@@ -142,48 +156,13 @@ pub(crate) struct MinHookApis {
     pub remove_hook: MhRemoveHookApi,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MinHookApiAddresses {
-    initialize: usize,
-    uninitialize: usize,
-    create_hook: usize,
-    enable_hook: usize,
-    disable_hook: usize,
-    remove_hook: usize,
-}
-
-impl MinHookApiAddresses {
-    fn from_apis(apis: MinHookApis) -> Self {
-        Self {
-            initialize: apis.initialize as usize,
-            uninitialize: apis.uninitialize as usize,
-            create_hook: apis.create_hook as usize,
-            enable_hook: apis.enable_hook as usize,
-            disable_hook: apis.disable_hook as usize,
-            remove_hook: apis.remove_hook as usize,
-        }
-    }
-
-    unsafe fn to_apis(self) -> MinHookApis {
-        MinHookApis {
-            initialize: unsafe { std::mem::transmute::<usize, MhInitializeApi>(self.initialize) },
-            uninitialize: unsafe {
-                std::mem::transmute::<usize, MhUninitializeApi>(self.uninitialize)
-            },
-            create_hook: unsafe { std::mem::transmute::<usize, MhCreateHookApi>(self.create_hook) },
-            enable_hook: unsafe { std::mem::transmute::<usize, MhEnableHookApi>(self.enable_hook) },
-            disable_hook: unsafe {
-                std::mem::transmute::<usize, MhDisableHookApi>(self.disable_hook)
-            },
-            remove_hook: unsafe { std::mem::transmute::<usize, MhRemoveHookApi>(self.remove_hook) },
-        }
-    }
-}
-
-struct LoadedMinHook {
-    module_name: &'static str,
-    module_handle: usize,
-    apis: MinHookApis,
+fn apis_eq(left: MinHookApis, right: MinHookApis) -> bool {
+    left.initialize as usize == right.initialize as usize
+        && left.uninitialize as usize == right.uninitialize as usize
+        && left.create_hook as usize == right.create_hook as usize
+        && left.enable_hook as usize == right.enable_hook as usize
+        && left.disable_hook as usize == right.disable_hook as usize
+        && left.remove_hook as usize == right.remove_hook as usize
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,45 +174,39 @@ pub struct RegisteredHook {
 pub(crate) fn register_plan(
     plan: &HookRegistrationPlan,
 ) -> Result<(MinHookRuntime, Vec<RegisteredHook>), MinHookError> {
-    let loaded = load_minhook_apis()?;
-    let apis = loaded.apis;
+    let apis = minhook_apis();
     let status = unsafe { (apis.initialize)() };
     if status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED {
-        free_minhook_module(loaded.module_handle);
         return Err(MinHookError::new(
             MinHookOperation::Initialize,
             Some(status),
         ));
     }
-    let owns_minhook_initialization = status == MH_OK;
+    let owns_initialization = status == MH_OK;
 
     let registered = match register_plan_with_apis(plan, apis) {
         Ok(registered) => registered,
         Err(error) => {
-            if !error.has_remove_hook_cleanup_failure() {
-                if owns_minhook_initialization {
-                    unsafe {
-                        (apis.uninitialize)();
-                    }
+            if !error.has_remove_hook_cleanup_failure() && owns_initialization {
+                unsafe {
+                    (apis.uninitialize)();
                 }
-                free_minhook_module(loaded.module_handle);
-            } else {
-                // A remove failure means at least one hook may still reference
-                // MinHook state. Keep that state initialized for the process
-                // lifetime instead of tearing down data that may still be used.
             }
+            // A remove failure means at least one hook may still reference
+            // MinHook state. Keep that state initialized for the process
+            // lifetime instead of tearing down data that may still be used.
             return Err(error);
         }
     };
-    let runtime = MinHookRuntime {
-        state: MinHookState {
-            module_name: loaded.module_name,
-            module_handle: loaded.module_handle,
-            owns_initialization: owns_minhook_initialization,
+    Ok((
+        MinHookRuntime {
+            state: MinHookState {
+                owns_initialization,
+            },
+            apis,
         },
-        api_addresses: MinHookApiAddresses::from_apis(apis),
-    };
-    Ok((runtime, registered))
+        registered,
+    ))
 }
 
 pub(crate) fn register_plan_with_apis(
@@ -258,8 +231,7 @@ pub(crate) fn register_plan_with_apis(
 
         created.push(CreatedHook {
             target: target.target,
-            target_address,
-            target_address_value: target.address,
+            target_address: target.address,
         });
     }
 
@@ -273,30 +245,24 @@ pub(crate) fn register_plan_with_apis(
         ));
     }
 
-    let mut registered = Vec::with_capacity(created.len());
-    for hook in created {
-        registered.push(RegisteredHook {
+    Ok(created
+        .into_iter()
+        .map(|hook| RegisteredHook {
             target: hook.target,
-            target_address: hook.target_address_value,
-        });
-    }
-
-    Ok(registered)
+            target_address: hook.target_address,
+        })
+        .collect())
 }
 
 pub(crate) fn unregister_registered_hooks(
     runtime: &MinHookRuntime,
     hooks: &[RegisteredHook],
 ) -> Vec<MinHookCleanupFailure> {
-    let apis = unsafe { runtime.api_addresses.to_apis() };
-    let failures = unregister_registered_hooks_with_apis(hooks, apis);
-    if !cleanup_has_remove_hook_failure(&failures) {
-        if runtime.state.owns_initialization {
-            unsafe {
-                (apis.uninitialize)();
-            }
+    let failures = unregister_registered_hooks_with_apis(hooks, runtime.apis);
+    if !cleanup_has_remove_hook_failure(&failures) && runtime.state.owns_initialization {
+        unsafe {
+            (runtime.apis.uninitialize)();
         }
-        free_minhook_module(runtime.state.module_handle);
     }
     failures
 }
@@ -335,14 +301,13 @@ pub(crate) fn unregister_registered_hooks_with_apis(
 
 struct CreatedHook {
     target: HookTarget,
-    target_address: *mut c_void,
-    target_address_value: usize,
+    target_address: usize,
 }
 
 fn remove_created_hooks(apis: &MinHookApis, created: &[CreatedHook]) -> Vec<MinHookCleanupFailure> {
     let mut failures = Vec::new();
     for hook in created.iter().rev() {
-        let status = unsafe { (apis.remove_hook)(hook.target_address) };
+        let status = unsafe { (apis.remove_hook)(hook.target_address as *mut c_void) };
         if status != MH_OK {
             failures.push(MinHookCleanupFailure {
                 operation: MinHookCleanupOperation::RemoveHook,
@@ -356,24 +321,24 @@ fn remove_created_hooks(apis: &MinHookApis, created: &[CreatedHook]) -> Vec<MinH
     failures
 }
 
-#[cfg(not(test))]
-fn load_minhook_apis() -> Result<LoadedMinHook, MinHookError> {
-    Ok(LoadedMinHook {
-        module_name: "minhook-sys",
-        module_handle: 0,
-        apis: MinHookApis {
+fn minhook_apis() -> MinHookApis {
+    #[cfg(not(test))]
+    {
+        MinHookApis {
             initialize: minhook_sys::MH_Initialize,
             uninitialize: minhook_sys::MH_Uninitialize,
             create_hook: minhook_sys::MH_CreateHook,
             enable_hook: minhook_sys::MH_EnableHook,
             disable_hook: minhook_sys::MH_DisableHook,
             remove_hook: minhook_sys::MH_RemoveHook,
-        },
-    })
-}
+        }
+    }
 
-#[cfg(not(test))]
-fn free_minhook_module(_module_handle: usize) {}
+    #[cfg(test)]
+    {
+        test_minhook_apis()
+    }
+}
 
 #[cfg(test)]
 #[derive(Default)]
@@ -472,18 +437,6 @@ fn test_minhook_apis() -> MinHookApis {
         remove_hook: test_remove_hook,
     }
 }
-
-#[cfg(test)]
-fn load_minhook_apis() -> Result<LoadedMinHook, MinHookError> {
-    Ok(LoadedMinHook {
-        module_name: "test-minhook",
-        module_handle: 0,
-        apis: test_minhook_apis(),
-    })
-}
-
-#[cfg(test)]
-fn free_minhook_module(_module_handle: usize) {}
 
 #[cfg(test)]
 unsafe extern "system" fn test_initialize() -> MhStatus {
@@ -671,6 +624,18 @@ impl<K: Ord> DiagnosticLogLimiter<K> {
 }
 
 #[cfg(debug_assertions)]
+fn should_log_diagnostic<K: Ord>(
+    limiter: &OnceLock<Mutex<DiagnosticLogLimiter<K>>>,
+    key: K,
+) -> bool {
+    limiter
+        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
+        .lock()
+        .map(|mut limiter| limiter.should_log(key))
+        .unwrap_or(true)
+}
+
+#[cfg(debug_assertions)]
 static PRESENT_DETOUR_LOG_LIMITER: OnceLock<Mutex<DiagnosticLogLimiter<PresentDetourLogKey>>> =
     OnceLock::new();
 
@@ -688,80 +653,74 @@ static PRESENT_HARDWARE_PROTECTED_RENDER_RESULT_LOG_LIMITER: OnceLock<
     Mutex<DiagnosticLogLimiter<PresentHardwareProtectedLogKey>>,
 > = OnceLock::new();
 
-#[cfg(debug_assertions)]
 fn should_log_present_detour_enter(overlay_swap_chain: usize) -> bool {
-    PRESENT_DETOUR_LOG_LIMITER
-        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
-        .lock()
-        .map(|mut limiter| limiter.should_log(PresentDetourLogKey { overlay_swap_chain }))
-        .unwrap_or(true)
+    #[cfg(debug_assertions)]
+    {
+        should_log_diagnostic(
+            &PRESENT_DETOUR_LOG_LIMITER,
+            PresentDetourLogKey { overlay_swap_chain },
+        )
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = overlay_swap_chain;
+        false
+    }
 }
 
-#[cfg(not(debug_assertions))]
-fn should_log_present_detour_enter(_overlay_swap_chain: usize) -> bool {
-    false
-}
-
-#[cfg(debug_assertions)]
 fn should_log_present_input_collected(
     overlay_swap_chain: usize,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rect_count: usize,
 ) -> bool {
-    PRESENT_INPUT_LOG_LIMITER
-        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
-        .lock()
-        .map(|mut limiter| {
-            limiter.should_log(PresentInputLogKey {
+    #[cfg(debug_assertions)]
+    {
+        should_log_diagnostic(
+            &PRESENT_INPUT_LOG_LIMITER,
+            PresentInputLogKey {
                 overlay_swap_chain,
                 adapter_luid_low: monitor_identity.map(|identity| identity.adapter_luid.low_part),
                 adapter_luid_high: monitor_identity.map(|identity| identity.adapter_luid.high_part),
                 target_id: monitor_identity.map(|identity| identity.target_id),
                 dirty_rect_count,
-            })
-        })
-        .unwrap_or(true)
+            },
+        )
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (overlay_swap_chain, monitor_identity, dirty_rect_count);
+        false
+    }
 }
 
-#[cfg(not(debug_assertions))]
-fn should_log_present_input_collected(
-    _overlay_swap_chain: usize,
-    _monitor_identity: Option<MonitorIdentity>,
-    _dirty_rect_count: usize,
-) -> bool {
-    false
-}
-
-#[cfg(debug_assertions)]
 fn should_log_present_input_hardware_protected(overlay_swap_chain: usize) -> bool {
-    PRESENT_INPUT_HARDWARE_PROTECTED_LOG_LIMITER
-        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
-        .lock()
-        .map(|mut limiter| {
-            limiter.should_log(PresentHardwareProtectedLogKey { overlay_swap_chain })
-        })
-        .unwrap_or(true)
+    #[cfg(debug_assertions)]
+    {
+        should_log_diagnostic(
+            &PRESENT_INPUT_HARDWARE_PROTECTED_LOG_LIMITER,
+            PresentHardwareProtectedLogKey { overlay_swap_chain },
+        )
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = overlay_swap_chain;
+        false
+    }
 }
 
-#[cfg(not(debug_assertions))]
-fn should_log_present_input_hardware_protected(_overlay_swap_chain: usize) -> bool {
-    false
-}
-
-#[cfg(debug_assertions)]
 fn should_log_present_hardware_protected_render_result(overlay_swap_chain: usize) -> bool {
-    PRESENT_HARDWARE_PROTECTED_RENDER_RESULT_LOG_LIMITER
-        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
-        .lock()
-        .map(|mut limiter| {
-            limiter.should_log(PresentHardwareProtectedLogKey { overlay_swap_chain })
-        })
-        .unwrap_or(true)
-}
-
-#[cfg(not(debug_assertions))]
-fn should_log_present_hardware_protected_render_result(_overlay_swap_chain: usize) -> bool {
-    false
+    #[cfg(debug_assertions)]
+    {
+        should_log_diagnostic(
+            &PRESENT_HARDWARE_PROTECTED_RENDER_RESULT_LOG_LIMITER,
+            PresentHardwareProtectedLogKey { overlay_swap_chain },
+        )
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = overlay_swap_chain;
+        false
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -1203,18 +1162,6 @@ unsafe extern "system" fn present_detour(
     a6: usize,
     a7: u8,
 ) -> i64 {
-    unsafe { present_detour_impl(this, overlay_swap_chain, a3, rect_vec, a5, a6, a7) }
-}
-
-unsafe extern "system" fn present_detour_impl(
-    this: usize,
-    overlay_swap_chain: usize,
-    a3: u32,
-    rect_vec: usize,
-    a5: i32,
-    a6: usize,
-    a7: u8,
-) -> i64 {
     let original = PRESENT_ORIGINAL.load(Ordering::Acquire);
     if original.is_null() {
         return 0;
@@ -1327,6 +1274,13 @@ fn full_present_rect_vec(
     (rect_vec_storage as *const RectVec) as usize
 }
 
+fn evaluate_bool_detour(original: u8, evaluate: impl FnOnce(bool) -> Option<bool>) -> u8 {
+    if state::is_shutting_down() {
+        return original;
+    }
+    bool_to_u8(evaluate(original != 0).unwrap_or(original != 0))
+}
+
 unsafe extern "system" fn direct_flip_detour(
     this: usize,
     a2: usize,
@@ -1337,51 +1291,37 @@ unsafe extern "system" fn direct_flip_detour(
 ) -> u8 {
     let original =
         unsafe { forward_overlay_direct_flip(&DIRECT_FLIP_ORIGINAL, this, a2, a3, a4, a5, a6) };
-    if state::is_shutting_down() {
-        return original;
-    }
-    bool_to_u8(state::evaluate_direct_flip_compatible(this, original != 0).unwrap_or(original != 0))
+    evaluate_bool_detour(original, |original| {
+        state::evaluate_direct_flip_compatible(this, original)
+    })
 }
 
 unsafe extern "system" fn overlays_enabled_detour(this: usize) -> u8 {
     let original = unsafe { forward_bool1(&OVERLAYS_ENABLED_ORIGINAL, this) };
-    if state::is_shutting_down() {
-        return original;
-    }
-    bool_to_u8(state::evaluate_overlays_enabled(this, original != 0).unwrap_or(original != 0))
+    evaluate_bool_detour(original, |original| {
+        state::evaluate_overlays_enabled(this, original)
+    })
 }
 
 unsafe extern "system" fn window_direct_flip_detour(this: usize, a2: usize, a3: u8) -> u8 {
     let original = unsafe { forward_bool3(&WINDOW_DIRECT_FLIP_ORIGINAL, this, a2, a3) };
-    if state::is_shutting_down() {
-        return original;
-    }
-    bool_to_u8(
-        state::evaluate_window_context_direct_flip_compatible(original != 0)
-            .unwrap_or(original != 0),
-    )
+    evaluate_bool_detour(original, |original| {
+        state::evaluate_window_context_direct_flip_compatible(original)
+    })
 }
 
 unsafe extern "system" fn comp_swap_chain_direct_flip_detour(this: usize, a2: usize, a3: u8) -> u8 {
     let original = unsafe { forward_bool3(&COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL, this, a2, a3) };
-    if state::is_shutting_down() {
-        return original;
-    }
-    bool_to_u8(
-        state::evaluate_comp_swap_chain_direct_flip_compatible(original != 0)
-            .unwrap_or(original != 0),
-    )
+    evaluate_bool_detour(original, |original| {
+        state::evaluate_comp_swap_chain_direct_flip_compatible(original)
+    })
 }
 
 unsafe extern "system" fn comp_swap_chain_independent_flip_detour(this: usize) -> u8 {
     let original = unsafe { forward_bool1(&COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL, this) };
-    if state::is_shutting_down() {
-        return original;
-    }
-    bool_to_u8(
-        state::evaluate_comp_swap_chain_independent_flip_compatible(original != 0)
-            .unwrap_or(original != 0),
-    )
+    evaluate_bool_detour(original, |original| {
+        state::evaluate_comp_swap_chain_independent_flip_compatible(original)
+    })
 }
 
 unsafe extern "system" fn comp_visual_promotion_detour(this: usize, a2: usize, a3: usize) -> u8 {
@@ -1390,14 +1330,11 @@ unsafe extern "system" fn comp_visual_promotion_detour(this: usize, a2: usize, a
         return 0;
     }
 
-    let original: ForwardCompVisual = unsafe { std::mem::transmute(original) };
-    let original = unsafe { original(this, a2, a3) };
-    if state::is_shutting_down() {
-        return original;
-    }
-    bool_to_u8(
-        state::evaluate_comp_visual_candidate_for_promotion(original != 0).unwrap_or(original != 0),
-    )
+    let original_fn: ForwardCompVisual = unsafe { std::mem::transmute(original) };
+    let original = unsafe { original_fn(this, a2, a3) };
+    evaluate_bool_detour(original, |original| {
+        state::evaluate_comp_visual_candidate_for_promotion(original)
+    })
 }
 
 const fn bool_to_u8(value: bool) -> u8 {
@@ -1425,8 +1362,8 @@ mod tests {
     };
 
     use super::{
-        MinHookApiAddresses, MinHookCleanupOperation, MinHookOperation, MinHookRuntime,
-        MinHookState, register_plan_with_apis, test_minhook_apis, test_minhook_call_counts,
+        MinHookCleanupOperation, MinHookOperation, MinHookRuntime, MinHookState,
+        register_plan_with_apis, test_minhook_apis, test_minhook_call_counts,
         unregister_registered_hooks, unregister_registered_hooks_with_apis,
     };
 
@@ -1935,11 +1872,9 @@ mod tests {
         let registered = register_plan_with_apis(&plan, apis).expect("registration should succeed");
         let runtime = MinHookRuntime {
             state: MinHookState {
-                module_name: "test-minhook",
-                module_handle: 0,
                 owns_initialization: true,
             },
-            api_addresses: MinHookApiAddresses::from_apis(apis),
+            apis,
         };
 
         let cleanup_failures = unregister_registered_hooks(&runtime, &registered);
@@ -1959,11 +1894,9 @@ mod tests {
         let registered = register_plan_with_apis(&plan, apis).expect("registration should succeed");
         let runtime = MinHookRuntime {
             state: MinHookState {
-                module_name: "test-minhook",
-                module_handle: 0,
                 owns_initialization: true,
             },
-            api_addresses: MinHookApiAddresses::from_apis(apis),
+            apis,
         };
 
         let cleanup_failures = unregister_registered_hooks(&runtime, &registered);
