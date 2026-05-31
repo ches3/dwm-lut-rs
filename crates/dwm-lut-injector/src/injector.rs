@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{
-    ApplyManifestStatus, HookInitializeStatus, HookShutdownStatus, InitializeContext,
-    InjectionStep, InjectorError,
+    ApplyPayloadStatus, InitializeContext, InitializeStatus, InjectionStep, InjectorError,
+    ShutdownStatus,
 };
 use crate::win32::{
     NamedRemoteModule, OwnedHandle, RemoteAllocation, RemoteModule, find_remote_module,
@@ -28,7 +28,7 @@ struct RemoteDllLoadContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisableOutcome {
-    ShutDown(HookShutdownStatus),
+    ShutDown(ShutdownStatus),
     NotInjected,
 }
 
@@ -39,50 +39,83 @@ pub(crate) enum ApplyOutcome {
     Reinitialized,
 }
 
-enum ApplyManifestOutcome {
+enum ApplyPayloadOutcome {
     Reloaded,
     Fallback,
-    Failed(ApplyManifestStatus),
+    Failed(ApplyPayloadStatus),
 }
 
-fn try_remote_apply_manifest(
+struct RemotePayload {
+    _bytes: RemoteAllocation,
+    buffer: RemoteAllocation,
+}
+
+impl RemotePayload {
+    fn address(&self) -> *mut std::ffi::c_void {
+        self.buffer.address()
+    }
+}
+
+fn write_remote_payload(
+    process: &OwnedHandle,
+    payload_bytes: &[u8],
+) -> Result<RemotePayload, InjectorError> {
+    let remote_payload_bytes = RemoteAllocation::write_bytes(
+        process,
+        payload_bytes,
+        windows_sys::Win32::System::Memory::PAGE_READWRITE,
+        InjectionStep::AllocatePayloadBytes,
+        InjectionStep::WritePayloadBytes,
+    )?;
+    let payload_buffer = dwm_lut_payload::DwmLutPayloadBuffer {
+        data: remote_payload_bytes.address().cast(),
+        len: payload_bytes.len(),
+    };
+    let buffer = RemoteAllocation::write_copy(
+        process,
+        &payload_buffer,
+        windows_sys::Win32::System::Memory::PAGE_READWRITE,
+        InjectionStep::AllocatePayloadBuffer,
+        InjectionStep::WritePayloadBuffer,
+    )?;
+    Ok(RemotePayload {
+        _bytes: remote_payload_bytes,
+        buffer,
+    })
+}
+
+fn try_remote_apply_payload(
     process: &OwnedHandle,
     module: &NamedRemoteModule,
-    manifest_path: &Path,
-) -> Result<ApplyManifestOutcome, InjectorError> {
+    payload_bytes: &[u8],
+) -> Result<ApplyPayloadOutcome, InjectorError> {
     let module_path = PathBuf::from(module_export_path(&module.path, &module.name));
-    let remote_apply_manifest_address = match resolve_remote_module_export_address(
+    let remote_apply_payload_address = match resolve_remote_module_export_address(
         process,
         module.module.base_address,
-        "dwm_lut_apply_manifest",
-        InjectionStep::ResolveApplyManifestExport,
+        "dwm_lut_apply_payload",
+        InjectionStep::ResolveApplyPayloadExport,
         &module_path,
     ) {
         Ok(address) => address,
-        Err(InjectorError::ExportNotFound { .. }) => return Ok(ApplyManifestOutcome::Fallback),
+        Err(InjectorError::ExportNotFound { .. }) => return Ok(ApplyPayloadOutcome::Fallback),
         Err(error) => return Err(error),
     };
 
-    let manifest_path_wide = wide_null(manifest_path.as_os_str());
-    let remote_manifest_path = RemoteAllocation::write_utf16(
-        process,
-        &manifest_path_wide,
-        InjectionStep::AllocateManifestPath,
-        InjectionStep::WriteManifestPath,
-    )?;
+    let remote_payload_buffer = write_remote_payload(process, payload_bytes)?;
     let apply_status = run_remote_thread(
         process,
-        remote_apply_manifest_address,
-        remote_manifest_path.address(),
-        InjectionStep::StartApplyManifest,
-        InjectionStep::WaitApplyManifest,
+        remote_apply_payload_address,
+        remote_payload_buffer.address(),
+        InjectionStep::StartApplyPayload,
+        InjectionStep::WaitApplyPayload,
     )?;
 
-    match ApplyManifestStatus::from_code(apply_status) {
-        Some(ApplyManifestStatus::Success) => Ok(ApplyManifestOutcome::Reloaded),
-        Some(status) if status.should_fallback() => Ok(ApplyManifestOutcome::Fallback),
-        Some(status) => Ok(ApplyManifestOutcome::Failed(status)),
-        None => Err(InjectorError::UnknownHookApplyManifestStatus(apply_status)),
+    match ApplyPayloadStatus::from_code(apply_status) {
+        Some(ApplyPayloadStatus::Success) => Ok(ApplyPayloadOutcome::Reloaded),
+        Some(status) if status.should_fallback() => Ok(ApplyPayloadOutcome::Fallback),
+        Some(status) => Ok(ApplyPayloadOutcome::Failed(status)),
+        None => Err(InjectorError::UnknownApplyPayloadStatus(apply_status)),
     }
 }
 
@@ -107,7 +140,7 @@ fn matches_staged_dll_basename(expected: &str, module: &NamedRemoteModule) -> bo
 pub(crate) fn apply_or_initialize(
     pid: u32,
     staged_dll_path: &Path,
-    manifest_path: &Path,
+    payload_bytes: &[u8],
 ) -> Result<ApplyOutcome, InjectorError> {
     let process = open_target_process(pid)?;
     let loaded_hooks = find_remote_modules_by_name(
@@ -120,27 +153,27 @@ pub(crate) fn apply_or_initialize(
         inject_and_initialize(
             pid,
             staged_dll_path,
-            manifest_path,
+            payload_bytes,
             InitializeContext::FreshInstall,
         )?;
         return Ok(ApplyOutcome::Initialized);
     }
 
     if let Some(module) = find_matching_staged_dll(staged_dll_path, &loaded_hooks) {
-        match try_remote_apply_manifest(&process, module, manifest_path)? {
-            ApplyManifestOutcome::Reloaded => return Ok(ApplyOutcome::Reloaded),
-            ApplyManifestOutcome::Fallback => {
+        match try_remote_apply_payload(&process, module, payload_bytes)? {
+            ApplyPayloadOutcome::Reloaded => return Ok(ApplyOutcome::Reloaded),
+            ApplyPayloadOutcome::Fallback => {
                 shutdown_for_reinject(pid)?;
                 inject_and_initialize(
                     pid,
                     staged_dll_path,
-                    manifest_path,
+                    payload_bytes,
                     InitializeContext::AfterReloadFallback,
                 )?;
                 return Ok(ApplyOutcome::Reinitialized);
             }
-            ApplyManifestOutcome::Failed(status) => {
-                return Err(InjectorError::HookApplyManifestFailed(status));
+            ApplyPayloadOutcome::Failed(status) => {
+                return Err(InjectorError::HookApplyPayloadFailed(status));
             }
         }
     }
@@ -149,7 +182,7 @@ pub(crate) fn apply_or_initialize(
     inject_and_initialize(
         pid,
         staged_dll_path,
-        manifest_path,
+        payload_bytes,
         InitializeContext::AfterShutdown,
     )?;
     Ok(ApplyOutcome::Reinitialized)
@@ -174,7 +207,7 @@ pub(crate) fn canonicalize_existing_file(
 pub(crate) fn inject_and_initialize(
     pid: u32,
     dll_path: &Path,
-    manifest_path: &Path,
+    payload_bytes: &[u8],
     context: InitializeContext,
 ) -> Result<(), InjectorError> {
     let process = open_target_process(pid)?;
@@ -209,27 +242,19 @@ pub(crate) fn inject_and_initialize(
         dll_path,
     )?;
 
-    let manifest_path_wide = wide_null(manifest_path.as_os_str());
-    let remote_manifest_path = RemoteAllocation::write_utf16(
-        &process,
-        &manifest_path_wide,
-        InjectionStep::AllocateManifestPath,
-        InjectionStep::WriteManifestPath,
-    )?;
+    let remote_payload_buffer = write_remote_payload(&process, payload_bytes)?;
     let initialize_status = run_remote_thread(
         &process,
         remote_initialize_address,
-        remote_manifest_path.address(),
+        remote_payload_buffer.address(),
         InjectionStep::StartInitialize,
         InjectionStep::WaitInitialize,
     )?;
 
-    match HookInitializeStatus::from_code(initialize_status) {
-        Some(HookInitializeStatus::Success) => Ok(()),
+    match InitializeStatus::from_code(initialize_status) {
+        Some(InitializeStatus::Success) => Ok(()),
         Some(status) => Err(InjectorError::HookInitializeFailed { status, context }),
-        None => Err(InjectorError::UnknownHookInitializeStatus(
-            initialize_status,
-        )),
+        None => Err(InjectorError::UnknownInitializeStatus(initialize_status)),
     }
 }
 
@@ -271,8 +296,8 @@ pub(crate) fn disable_injected_hook(pid: u32) -> Result<DisableOutcome, Injector
             InjectionStep::StartShutdown,
             InjectionStep::WaitShutdown,
         )?;
-        let Some(status) = HookShutdownStatus::from_code(shutdown_status) else {
-            return Err(InjectorError::UnknownHookShutdownStatus(shutdown_status));
+        let Some(status) = ShutdownStatus::from_code(shutdown_status) else {
+            return Err(InjectorError::UnknownShutdownStatus(shutdown_status));
         };
 
         if let Some(outcome) = aggregation.record_status(status)? {
@@ -286,9 +311,9 @@ pub(crate) fn disable_injected_hook(pid: u32) -> Result<DisableOutcome, Injector
 fn shutdown_for_reinject(pid: u32) -> Result<(), InjectorError> {
     match disable_injected_hook(pid)? {
         DisableOutcome::NotInjected => Ok(()),
-        DisableOutcome::ShutDown(HookShutdownStatus::Success)
-        | DisableOutcome::ShutDown(HookShutdownStatus::NotInitialized)
-        | DisableOutcome::ShutDown(HookShutdownStatus::AlreadyShutDown) => Ok(()),
+        DisableOutcome::ShutDown(ShutdownStatus::Success)
+        | DisableOutcome::ShutDown(ShutdownStatus::NotInitialized)
+        | DisableOutcome::ShutDown(ShutdownStatus::AlreadyShutDown) => Ok(()),
         DisableOutcome::ShutDown(status) => Err(InjectorError::HookShutdownFailed(status)),
     }
 }
@@ -332,13 +357,13 @@ enum ShutdownDecision {
     Fail,
 }
 
-fn evaluate_shutdown_status(status: HookShutdownStatus) -> ShutdownDecision {
+fn evaluate_shutdown_status(status: ShutdownStatus) -> ShutdownDecision {
     match status {
-        HookShutdownStatus::Success => ShutdownDecision::Done,
-        HookShutdownStatus::NotInitialized | HookShutdownStatus::AlreadyShutDown => {
+        ShutdownStatus::Success => ShutdownDecision::Done,
+        ShutdownStatus::NotInitialized | ShutdownStatus::AlreadyShutDown => {
             ShutdownDecision::Continue
         }
-        HookShutdownStatus::AlreadyInProgress | HookShutdownStatus::MinHookCleanupFailed => {
+        ShutdownStatus::AlreadyInProgress | ShutdownStatus::MinHookCleanupFailed => {
             ShutdownDecision::Fail
         }
     }
@@ -346,7 +371,7 @@ fn evaluate_shutdown_status(status: HookShutdownStatus) -> ShutdownDecision {
 
 #[derive(Debug, Default)]
 struct ShutdownAggregation {
-    deferred_status: Option<HookShutdownStatus>,
+    deferred_status: Option<ShutdownStatus>,
     export_not_found: Option<InjectorError>,
 }
 
@@ -363,7 +388,7 @@ impl ShutdownAggregation {
 
     fn record_status(
         &mut self,
-        status: HookShutdownStatus,
+        status: ShutdownStatus,
     ) -> Result<Option<DisableOutcome>, InjectorError> {
         match evaluate_shutdown_status(status) {
             ShutdownDecision::Done => Ok(Some(DisableOutcome::ShutDown(status))),
@@ -388,9 +413,9 @@ impl ShutdownAggregation {
 }
 
 fn preferred_deferred_shutdown_status(
-    current: Option<HookShutdownStatus>,
-    candidate: HookShutdownStatus,
-) -> Option<HookShutdownStatus> {
+    current: Option<ShutdownStatus>,
+    candidate: ShutdownStatus,
+) -> Option<ShutdownStatus> {
     let current_rank = current.map(deferred_shutdown_status_rank).unwrap_or(0);
     let candidate_rank = deferred_shutdown_status_rank(candidate);
     if candidate_rank > current_rank {
@@ -400,13 +425,13 @@ fn preferred_deferred_shutdown_status(
     }
 }
 
-fn deferred_shutdown_status_rank(status: HookShutdownStatus) -> u8 {
+fn deferred_shutdown_status_rank(status: ShutdownStatus) -> u8 {
     match status {
-        HookShutdownStatus::AlreadyShutDown => 2,
-        HookShutdownStatus::NotInitialized => 1,
-        HookShutdownStatus::Success
-        | HookShutdownStatus::AlreadyInProgress
-        | HookShutdownStatus::MinHookCleanupFailed => 0,
+        ShutdownStatus::AlreadyShutDown => 2,
+        ShutdownStatus::NotInitialized => 1,
+        ShutdownStatus::Success
+        | ShutdownStatus::AlreadyInProgress
+        | ShutdownStatus::MinHookCleanupFailed => 0,
     }
 }
 
@@ -474,8 +499,8 @@ fn load_remote_module(
 mod tests {
     use std::path::PathBuf;
 
-    use crate::error::HookShutdownStatus;
     use crate::error::InjectorError;
+    use crate::error::ShutdownStatus;
 
     use super::{
         DisableOutcome, ShutdownAggregation, ShutdownDecision, evaluate_shutdown_status,
@@ -520,23 +545,23 @@ mod tests {
     #[test]
     fn shutdown_status_decision_continues_until_success_or_failure() {
         assert_eq!(
-            evaluate_shutdown_status(HookShutdownStatus::NotInitialized),
+            evaluate_shutdown_status(ShutdownStatus::NotInitialized),
             ShutdownDecision::Continue
         );
         assert_eq!(
-            evaluate_shutdown_status(HookShutdownStatus::AlreadyShutDown),
+            evaluate_shutdown_status(ShutdownStatus::AlreadyShutDown),
             ShutdownDecision::Continue
         );
         assert_eq!(
-            evaluate_shutdown_status(HookShutdownStatus::Success),
+            evaluate_shutdown_status(ShutdownStatus::Success),
             ShutdownDecision::Done
         );
         assert_eq!(
-            evaluate_shutdown_status(HookShutdownStatus::AlreadyInProgress),
+            evaluate_shutdown_status(ShutdownStatus::AlreadyInProgress),
             ShutdownDecision::Fail
         );
         assert_eq!(
-            evaluate_shutdown_status(HookShutdownStatus::MinHookCleanupFailed),
+            evaluate_shutdown_status(ShutdownStatus::MinHookCleanupFailed),
             ShutdownDecision::Fail
         );
     }
@@ -552,14 +577,11 @@ mod tests {
             .expect("export mismatch should not stop candidate evaluation");
 
         let outcome = aggregation
-            .record_status(HookShutdownStatus::Success)
+            .record_status(ShutdownStatus::Success)
             .expect("success should be accepted")
             .expect("success should finish aggregation");
 
-        assert_eq!(
-            outcome,
-            DisableOutcome::ShutDown(HookShutdownStatus::Success)
-        );
+        assert_eq!(outcome, DisableOutcome::ShutDown(ShutdownStatus::Success));
     }
 
     #[test]
@@ -594,12 +616,12 @@ mod tests {
     fn shutdown_aggregation_prefers_already_shutdown_over_not_initialized() {
         for statuses in [
             [
-                HookShutdownStatus::NotInitialized,
-                HookShutdownStatus::AlreadyShutDown,
+                ShutdownStatus::NotInitialized,
+                ShutdownStatus::AlreadyShutDown,
             ],
             [
-                HookShutdownStatus::AlreadyShutDown,
-                HookShutdownStatus::NotInitialized,
+                ShutdownStatus::AlreadyShutDown,
+                ShutdownStatus::NotInitialized,
             ],
         ] {
             let mut aggregation = ShutdownAggregation::default();
@@ -614,7 +636,7 @@ mod tests {
 
             assert_eq!(
                 aggregation.finish().expect("benign statuses should finish"),
-                DisableOutcome::ShutDown(HookShutdownStatus::AlreadyShutDown)
+                DisableOutcome::ShutDown(ShutdownStatus::AlreadyShutDown)
             );
         }
     }

@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "crates/dwm-lut-config",
     "crates/dwm-lut-hook",
     "crates/dwm-lut-injector",
+    "crates/dwm-lut-payload",
 ]
 resolver = "2"
 

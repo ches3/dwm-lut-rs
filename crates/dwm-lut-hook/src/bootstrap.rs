@@ -1,18 +1,18 @@
 #[cfg(test)]
 use std::cell::Cell;
-use std::ffi::OsString;
 use std::fmt;
-use std::os::windows::ffi::OsStringExt;
-use std::path::PathBuf;
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use dwm_lut_config::{ConfigError, LutManifest, load_manifest};
+use dwm_lut_payload::{
+    ApplyPayloadStatus, DwmLutPayloadBuffer, HookPayload, InitializeStatus, PayloadError,
+    ShutdownStatus, deserialize_payload_buffer,
+};
 
 use crate::LutBypassRuntime;
 use std::sync::Arc;
 
-use crate::lut_pipeline::{LutPipeline, LutPipelineError};
+use crate::lut_pipeline::LutPipeline;
 use crate::minhook::{
     MinHookCleanupOperation, MinHookError, register_plan, unregister_registered_hooks,
 };
@@ -20,12 +20,12 @@ use crate::profile::{BuildProfile, HookProfile};
 
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
-    ApplyManifestStart, HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime,
+    ApplyPayloadStart, HookConfig, HookRegistrationPlan, HookRegistrationState, HookRuntime,
     HookState, InitializationStage, LoggerState, LutBypassState, LutPipelineState,
-    ManifestLoadState, ReplaceManifestPipelineError, ShutdownStart, SignatureResolutionState,
-    begin_apply_manifest, begin_shutdown, clear_state_after_shutdown, finish_apply_manifest,
+    PayloadLoadState, ReplacePayloadPipelineError, ShutdownStart, SignatureResolutionState,
+    begin_apply_payload, begin_shutdown, clear_state_after_shutdown, finish_apply_payload,
     finish_failed_shutdown, install_state, is_initialized, lock_present_apply,
-    minhook_cleanup_plan, replace_manifest_pipeline,
+    minhook_cleanup_plan, replace_payload_pipeline,
 };
 
 #[cfg(not(test))]
@@ -44,11 +44,11 @@ impl Drop for InitializationGuard {
     }
 }
 
-struct ApplyManifestGuard;
+struct ApplyPayloadGuard;
 
-impl Drop for ApplyManifestGuard {
+impl Drop for ApplyPayloadGuard {
     fn drop(&mut self) {
-        finish_apply_manifest();
+        finish_apply_payload();
     }
 }
 
@@ -69,11 +69,11 @@ fn enter_initialization() -> Result<InitializationGuard, HookError> {
     Ok(InitializationGuard)
 }
 
-fn enter_apply_manifest() -> Result<ApplyManifestGuard, ApplyManifestError> {
-    match begin_apply_manifest() {
-        ApplyManifestStart::Started => Ok(ApplyManifestGuard),
-        ApplyManifestStart::NotInitialized => Err(ApplyManifestError::NotInitialized),
-        ApplyManifestStart::AlreadyInProgress => Err(ApplyManifestError::AlreadyInProgress),
+fn enter_apply_payload() -> Result<ApplyPayloadGuard, ApplyPayloadError> {
+    match begin_apply_payload() {
+        ApplyPayloadStart::Started => Ok(ApplyPayloadGuard),
+        ApplyPayloadStart::NotInitialized => Err(ApplyPayloadError::NotInitialized),
+        ApplyPayloadStart::AlreadyInProgress => Err(ApplyPayloadError::AlreadyInProgress),
     }
 }
 
@@ -87,16 +87,6 @@ fn is_initialization_in_progress() -> bool {
     {
         INITIALIZATION_IN_PROGRESS.with(Cell::get)
     }
-}
-
-#[cfg(test)]
-pub(crate) fn hold_initialization_for_tests() -> Result<impl Drop, HookError> {
-    enter_initialization()
-}
-
-#[cfg(test)]
-pub(crate) fn hold_apply_manifest_for_tests() -> Result<impl Drop, ApplyManifestError> {
-    enter_apply_manifest()
 }
 
 #[cfg(not(test))]
@@ -136,9 +126,7 @@ pub(crate) fn reset_initialization_guard_for_tests() {
 #[derive(Debug)]
 pub enum HookError {
     AlreadyInitialized,
-    InvalidPath,
-    Manifest(ConfigError),
-    LutPipeline(LutPipelineError),
+    Payload(PayloadError),
     MinHook(MinHookError),
     Resolve(HookResolveError),
 }
@@ -147,9 +135,7 @@ impl fmt::Display for HookError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyInitialized => write!(f, "hook is already initialized"),
-            Self::InvalidPath => write!(f, "manifest path must not be empty"),
-            Self::Manifest(error) => write!(f, "{error}"),
-            Self::LutPipeline(error) => write!(f, "{error}"),
+            Self::Payload(error) => write!(f, "{error}"),
             Self::MinHook(error) => write!(f, "{error}"),
             Self::Resolve(error) => write!(f, "{error}"),
         }
@@ -164,15 +150,9 @@ impl From<HookResolveError> for HookError {
     }
 }
 
-impl From<ConfigError> for HookError {
-    fn from(value: ConfigError) -> Self {
-        Self::Manifest(value)
-    }
-}
-
-impl From<LutPipelineError> for HookError {
-    fn from(value: LutPipelineError) -> Self {
-        Self::LutPipeline(value)
+impl From<PayloadError> for HookError {
+    fn from(value: PayloadError) -> Self {
+        Self::Payload(value)
     }
 }
 
@@ -182,103 +162,37 @@ impl From<MinHookError> for HookError {
     }
 }
 
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InitializeStatus {
-    Success = 0,
-    NullManifestPath = 1,
-    InvalidManifestPath = 2,
-    AlreadyInitialized = 3,
-    DwmcoreModuleNotLoaded = 4,
-    DwmcoreImageInvalid = 5,
-    PresentSignatureNotFound = 6,
-    PresentSignatureAmbiguous = 7,
-    DirectFlipSignatureNotFound = 8,
-    DirectFlipSignatureAmbiguous = 9,
-    OverlaysEnabledSignatureNotFound = 10,
-    OverlaysEnabledSignatureAmbiguous = 11,
-    ManifestLoadFailed = 12,
-    ManifestHasNoAssignments = 13,
-    LutPipelinePrepareFailed = 14,
-    WindowDirectFlipSignatureNotFound = 15,
-    WindowDirectFlipSignatureAmbiguous = 16,
-    CompSwapChainDirectFlipSignatureNotFound = 17,
-    CompSwapChainDirectFlipSignatureAmbiguous = 18,
-    CompVisualPromotionSignatureNotFound = 19,
-    CompVisualPromotionSignatureAmbiguous = 20,
-    OverlayTestModeNotFound = 21,
-    OverlayTestModeAmbiguous = 22,
-    CompSwapChainIndependentFlipSignatureNotFound = 23,
-    CompSwapChainIndependentFlipSignatureAmbiguous = 24,
-    MinHookInitializeFailed = 27,
-    MinHookCreateHookFailed = 28,
-    MinHookEnableHookFailed = 29,
-}
-
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShutdownStatus {
-    Success = 0,
-    NotInitialized = 1,
-    AlreadyInProgress = 2,
-    AlreadyShutDown = 3,
-    MinHookCleanupFailed = 4,
-}
-
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ApplyManifestStatus {
-    Success = 0,
-    NullManifestPath = 1,
-    InvalidManifestPath = 2,
-    NotInitialized = 3,
-    AlreadyInProgress = 4,
-    ManifestLoadFailed = 5,
-    ManifestHasNoAssignments = 6,
-    LutPipelinePrepareFailed = 7,
-}
-
 #[derive(Debug)]
-pub enum ApplyManifestError {
+pub enum ApplyPayloadError {
     NotInitialized,
     AlreadyInProgress,
-    InvalidPath,
-    Manifest(ConfigError),
-    LutPipeline(LutPipelineError),
-    State(ReplaceManifestPipelineError),
+    Payload(PayloadError),
+    State(ReplacePayloadPipelineError),
 }
 
-impl fmt::Display for ApplyManifestError {
+impl fmt::Display for ApplyPayloadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotInitialized => write!(f, "hook is not initialized"),
             Self::AlreadyInProgress => write!(f, "hook initialization or shutdown is in progress"),
-            Self::InvalidPath => write!(f, "manifest path must not be empty"),
-            Self::Manifest(error) => write!(f, "{error}"),
-            Self::LutPipeline(error) => write!(f, "{error}"),
-            Self::State(ReplaceManifestPipelineError::NotInitialized) => {
+            Self::Payload(error) => write!(f, "{error}"),
+            Self::State(ReplacePayloadPipelineError::NotInitialized) => {
                 write!(f, "hook is not initialized")
             }
         }
     }
 }
 
-impl std::error::Error for ApplyManifestError {}
+impl std::error::Error for ApplyPayloadError {}
 
-impl From<ConfigError> for ApplyManifestError {
-    fn from(value: ConfigError) -> Self {
-        Self::Manifest(value)
+impl From<PayloadError> for ApplyPayloadError {
+    fn from(value: PayloadError) -> Self {
+        Self::Payload(value)
     }
 }
 
-impl From<LutPipelineError> for ApplyManifestError {
-    fn from(value: LutPipelineError) -> Self {
-        Self::LutPipeline(value)
-    }
-}
-
-impl From<ReplaceManifestPipelineError> for ApplyManifestError {
-    fn from(value: ReplaceManifestPipelineError) -> Self {
+impl From<ReplacePayloadPipelineError> for ApplyPayloadError {
+    fn from(value: ReplacePayloadPipelineError) -> Self {
         Self::State(value)
     }
 }
@@ -290,38 +204,39 @@ pub fn build_profile() -> BuildProfile {
 #[cfg(test)]
 pub(crate) fn initialize_with_resolution(
     config: HookConfig,
+    payload: HookPayload,
     resolution: SignatureResolutionReport,
 ) -> Result<(), HookError> {
     let _guard = enter_initialization()?;
-    let state = prepare_initial_state_with_resolution(config, resolution)?;
+    let state = prepare_initial_state_with_resolution(config, payload, resolution)?;
     install_prepared_state(state)
 }
 
-pub(crate) fn ffi_initialize(manifest_path: *const u16) -> u32 {
-    let manifest_path = match unsafe { wide_path_from_ptr(manifest_path) } {
-        Some(path) => path,
-        None => {
+pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) -> u32 {
+    debug_log!("event=initialize_start profile={:?}", build_profile());
+
+    if payload_buffer.is_null() {
+        return InitializeStatus::NullPayload as u32;
+    }
+
+    let payload = match unsafe { deserialize_payload_buffer(payload_buffer) } {
+        Ok(payload) => payload,
+        Err(error) => {
+            let status = map_payload_error_to_initialize_status(&error);
             debug_log!(
                 "event=initialize_failed status={} error={}",
-                InitializeStatus::NullManifestPath as u32,
-                crate::debug_log::quoted("manifest path pointer is null")
+                status as u32,
+                crate::debug_log::quoted(error.to_string())
             );
-            return InitializeStatus::NullManifestPath as u32;
+            return status as u32;
         }
     };
 
-    debug_log!(
-        "event=initialize_start manifest_path={} profile={:?}",
-        crate::debug_log::quoted(manifest_path.display()),
-        build_profile()
-    );
-
     let config = HookConfig {
-        manifest_path,
         profile: build_profile(),
     };
 
-    match initialize_from_manifest_path(config) {
+    match initialize_from_payload(config, payload) {
         Ok(()) => {
             debug_log!("event=initialize_success");
             InitializeStatus::Success as u32
@@ -419,61 +334,59 @@ pub(crate) fn ffi_shutdown() -> u32 {
     }
 }
 
-pub(crate) fn ffi_apply_manifest(manifest_path: *const u16) -> u32 {
-    let manifest_path = match unsafe { wide_path_from_ptr(manifest_path) } {
-        Some(path) => path,
-        None => {
+pub(crate) unsafe fn ffi_apply_payload(payload_buffer: *const DwmLutPayloadBuffer) -> u32 {
+    debug_log!("event=apply_payload_start");
+
+    if payload_buffer.is_null() {
+        return ApplyPayloadStatus::NullPayload as u32;
+    }
+
+    let payload = match unsafe { deserialize_payload_buffer(payload_buffer) } {
+        Ok(payload) => payload,
+        Err(error) => {
+            let status = map_payload_error_to_apply_status(&error);
             debug_log!(
-                "event=apply_manifest_failed status={} error={}",
-                ApplyManifestStatus::NullManifestPath as u32,
-                crate::debug_log::quoted("manifest path pointer is null")
+                "event=apply_payload_failed status={} error={}",
+                status as u32,
+                crate::debug_log::quoted(error.to_string())
             );
-            return ApplyManifestStatus::NullManifestPath as u32;
+            return status as u32;
         }
     };
 
-    debug_log!(
-        "event=apply_manifest_start manifest_path={}",
-        crate::debug_log::quoted(manifest_path.display())
-    );
-
-    match apply_manifest_from_path(manifest_path) {
+    match apply_payload(payload) {
         Ok(()) => {
-            debug_log!("event=apply_manifest_success");
-            ApplyManifestStatus::Success as u32
+            debug_log!("event=apply_payload_success");
+            ApplyPayloadStatus::Success as u32
         }
-        Err(error) => finish_apply_manifest_error(error),
+        Err(error) => finish_apply_payload_error(error),
     }
 }
 
-fn apply_manifest_from_path(manifest_path: PathBuf) -> Result<(), ApplyManifestError> {
-    if manifest_path.as_os_str().is_empty() {
-        return Err(ApplyManifestError::InvalidPath);
-    }
+fn apply_payload(payload: HookPayload) -> Result<(), ApplyPayloadError> {
     if is_initialization_in_progress() {
-        return Err(ApplyManifestError::AlreadyInProgress);
+        return Err(ApplyPayloadError::AlreadyInProgress);
     }
-    let _guard = enter_apply_manifest()?;
+    let _guard = enter_apply_payload()?;
 
-    let manifest = load_manifest(&manifest_path)?;
     debug_log!(
-        "event=apply_manifest_loaded assignment_count={}",
-        manifest.assignments.len()
+        "event=apply_payload_decoded assignment_count={}",
+        payload.assignments.len()
     );
 
-    let lut_pipeline = LutPipeline::load(&manifest)?;
+    let lut_pipeline = LutPipeline::from_payload(&payload);
     debug_log!(
-        "event=apply_manifest_pipeline_prepared lut_count={}",
+        "event=apply_payload_pipeline_prepared lut_count={}",
         lut_pipeline.summary().lut_count
     );
 
     let renderer_device_count = {
         let _present_guard = lock_present_apply();
-        replace_manifest_pipeline(manifest_path, manifest, lut_pipeline)?;
+        replace_payload_pipeline(payload, lut_pipeline)?;
         crate::d3d11_renderer::shutdown_renderer_resources()
     };
     debug_log!(
-        "event=apply_manifest_renderer_resources_released device_resource_count={}",
+        "event=apply_payload_renderer_resources_released device_resource_count={}",
         renderer_device_count
     );
     crate::desktop_redraw::request_desktop_redraw();
@@ -481,11 +394,11 @@ fn apply_manifest_from_path(manifest_path: PathBuf) -> Result<(), ApplyManifestE
 }
 
 #[cfg(debug_assertions)]
-fn finish_apply_manifest_error(error: ApplyManifestError) -> u32 {
+fn finish_apply_payload_error(error: ApplyPayloadError) -> u32 {
     let error_message = error.to_string();
-    let status = map_apply_manifest_error(&error);
+    let status = map_apply_payload_error(&error);
     debug_log!(
-        "event=apply_manifest_failed status={} error={}",
+        "event=apply_payload_failed status={} error={}",
         status as u32,
         crate::debug_log::quoted(error_message)
     );
@@ -493,23 +406,18 @@ fn finish_apply_manifest_error(error: ApplyManifestError) -> u32 {
 }
 
 #[cfg(not(debug_assertions))]
-fn finish_apply_manifest_error(error: ApplyManifestError) -> u32 {
-    map_apply_manifest_error(&error) as u32
+fn finish_apply_payload_error(error: ApplyPayloadError) -> u32 {
+    map_apply_payload_error(&error) as u32
 }
 
-fn map_apply_manifest_error(error: &ApplyManifestError) -> ApplyManifestStatus {
+fn map_apply_payload_error(error: &ApplyPayloadError) -> ApplyPayloadStatus {
     match error {
-        ApplyManifestError::InvalidPath => ApplyManifestStatus::InvalidManifestPath,
-        ApplyManifestError::NotInitialized
-        | ApplyManifestError::State(ReplaceManifestPipelineError::NotInitialized) => {
-            ApplyManifestStatus::NotInitialized
+        ApplyPayloadError::NotInitialized
+        | ApplyPayloadError::State(ReplacePayloadPipelineError::NotInitialized) => {
+            ApplyPayloadStatus::NotInitialized
         }
-        ApplyManifestError::AlreadyInProgress => ApplyManifestStatus::AlreadyInProgress,
-        ApplyManifestError::Manifest(_) => ApplyManifestStatus::ManifestLoadFailed,
-        ApplyManifestError::LutPipeline(LutPipelineError::NoAssignments) => {
-            ApplyManifestStatus::ManifestHasNoAssignments
-        }
-        ApplyManifestError::LutPipeline(_) => ApplyManifestStatus::LutPipelinePrepareFailed,
+        ApplyPayloadError::AlreadyInProgress => ApplyPayloadStatus::AlreadyInProgress,
+        ApplyPayloadError::Payload(error) => map_payload_error_to_apply_status(error),
     }
 }
 
@@ -530,13 +438,10 @@ fn finish_initialize_error(error: HookError) -> u32 {
     map_hook_error(error) as u32
 }
 
-fn initialize_from_manifest_path(config: HookConfig) -> Result<(), HookError> {
+fn initialize_from_payload(config: HookConfig, payload: HookPayload) -> Result<(), HookError> {
     let _guard = enter_initialization()?;
-    if config.manifest_path.as_os_str().is_empty() {
-        return Err(HookError::InvalidPath);
-    }
 
-    let state = prepare_initial_state_from_manifest_path(config)?;
+    let state = prepare_initial_state_from_payload(config, payload)?;
     install_prepared_state(state)
 }
 
@@ -556,28 +461,27 @@ fn rollback_registered_state_hooks(state: &HookState) {
     );
 }
 
-fn prepare_initial_state_from_manifest_path(config: HookConfig) -> Result<HookState, HookError> {
-    prepare_initial_state_from_manifest_path_with_profile_resolver(config, resolve_profile)
+fn prepare_initial_state_from_payload(
+    config: HookConfig,
+    payload: HookPayload,
+) -> Result<HookState, HookError> {
+    prepare_initial_state_from_payload_with_profile_resolver(config, payload, resolve_profile)
 }
 
-fn prepare_initial_state_from_manifest_path_with_profile_resolver<F>(
+fn prepare_initial_state_from_payload_with_profile_resolver<F>(
     config: HookConfig,
+    payload: HookPayload,
     resolver: F,
 ) -> Result<HookState, HookError>
 where
     F: FnOnce(&HookProfile) -> Result<SignatureResolutionReport, HookResolveError>,
 {
-    if config.manifest_path.as_os_str().is_empty() {
-        return Err(HookError::InvalidPath);
-    }
-
-    let manifest = load_manifest(&config.manifest_path).map_err(HookError::Manifest)?;
     debug_log!(
-        "event=manifest_loaded assignment_count={}",
-        manifest.assignments.len()
+        "event=payload_decoded assignment_count={}",
+        payload.assignments.len()
     );
 
-    let lut_pipeline = LutPipeline::load(&manifest)?;
+    let lut_pipeline = LutPipeline::from_payload(&payload);
     debug_log!(
         "event=lut_pipeline_prepared lut_count={}",
         lut_pipeline.summary().lut_count
@@ -614,25 +518,26 @@ where
         }
     }
 
-    finalize_initial_state(config, manifest, profile, resolution, lut_pipeline)
+    finalize_initial_state(config, payload, profile, resolution, lut_pipeline)
 }
 
 #[cfg(test)]
 pub(crate) fn prepare_initial_state_with_resolution(
     config: HookConfig,
+    payload: HookPayload,
     resolution: SignatureResolutionReport,
 ) -> Result<HookState, HookError> {
-    prepare_initial_state_from_manifest_path_with_profile_resolver(config, |_| Ok(resolution))
+    prepare_initial_state_from_payload_with_profile_resolver(config, payload, |_| Ok(resolution))
 }
 
 fn finalize_initial_state(
     config: HookConfig,
-    manifest: LutManifest,
+    payload: HookPayload,
     profile: HookProfile,
     resolution: SignatureResolutionReport,
     lut_pipeline: LutPipeline,
 ) -> Result<HookState, HookError> {
-    let assignment_count = manifest.assignments.len();
+    let assignment_count = payload.assignments.len();
     let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
     let (minhook, registered_hooks) = register_plan(&registration_plan)?;
     debug_log!(
@@ -645,13 +550,11 @@ fn finalize_initial_state(
         .iter()
         .find(|target| target.target == crate::profile::HookTarget::OverlayTestMode)
         .map(|target| target.address);
-    let lut_bypass = LutBypassRuntime::new(
-        lut_pipeline.summary().lut_count > 0,
-        overlay_test_mode_address,
-    );
+    let lut_bypass =
+        LutBypassRuntime::new(!payload.assignments.is_empty(), overlay_test_mode_address);
     let initialization_trace = vec![
         InitializationStage::LoggerReady,
-        InitializationStage::ManifestLoaded,
+        InitializationStage::PayloadDecoded,
         InitializationStage::LutPipelinePrepared,
         InitializationStage::ProfileSelected,
         InitializationStage::TargetModuleResolved,
@@ -662,15 +565,12 @@ fn finalize_initial_state(
     ];
 
     Ok(HookState {
-        manifest,
+        payload,
         config: config.clone(),
         profile,
         runtime: HookRuntime {
             logger: LoggerState::Ready,
-            manifest_load: ManifestLoadState::Loaded {
-                manifest_path: config.manifest_path,
-                assignment_count,
-            },
+            payload_load: PayloadLoadState::Loaded { assignment_count },
             minhook,
             resolution: SignatureResolutionState::Resolved(resolution),
             lut_pipeline: LutPipelineState::Ready(Arc::new(lut_pipeline)),
@@ -741,14 +641,9 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
 
 fn map_hook_error(error: HookError) -> InitializeStatus {
     match error {
-        HookError::InvalidPath => InitializeStatus::InvalidManifestPath,
         HookError::AlreadyInitialized => InitializeStatus::AlreadyInitialized,
         HookError::Resolve(error) => map_resolve_status(error),
-        HookError::Manifest(_) => InitializeStatus::ManifestLoadFailed,
-        HookError::LutPipeline(LutPipelineError::NoAssignments) => {
-            InitializeStatus::ManifestHasNoAssignments
-        }
-        HookError::LutPipeline(_) => InitializeStatus::LutPipelinePrepareFailed,
+        HookError::Payload(error) => map_payload_error_to_initialize_status(&error),
         HookError::MinHook(error) => match error.operation {
             crate::minhook::MinHookOperation::Initialize => {
                 InitializeStatus::MinHookInitializeFailed
@@ -763,129 +658,22 @@ fn map_hook_error(error: HookError) -> InitializeStatus {
     }
 }
 
-unsafe fn wide_path_from_ptr(ptr: *const u16) -> Option<PathBuf> {
-    if ptr.is_null() {
-        return None;
+fn map_payload_error_to_initialize_status(error: &PayloadError) -> InitializeStatus {
+    match error {
+        PayloadError::EmptyBuffer | PayloadError::TooLarge { .. } => {
+            InitializeStatus::InvalidPayload
+        }
+        PayloadError::NoAssignments => InitializeStatus::PayloadHasNoAssignments,
+        _ => InitializeStatus::PayloadDecodeFailed,
     }
-
-    let mut len = 0usize;
-    while unsafe { *ptr.add(len) } != 0 {
-        len += 1;
-    }
-
-    if len == 0 {
-        return Some(PathBuf::new());
-    }
-
-    let units = unsafe { std::slice::from_raw_parts(ptr, len) };
-    Some(PathBuf::from(OsString::from_wide(units)))
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fs;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use dwm_lut_config::ConfigError;
-
-    use crate::profile::HookTarget;
-    use crate::resolver::{HookResolveError, LoadedModule, SignatureResolutionReport};
-
-    use super::{
-        BuildProfile, HookConfig, HookError, InitializeStatus, map_hook_error,
-        prepare_initial_state_from_manifest_path_with_profile_resolver,
-    };
-
-    fn write_test_manifest(contents: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be valid")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("dwm-lut-bootstrap-{unique}.json"));
-        fs::write(&path, contents).expect("manifest file should be written");
-        path
-    }
-
-    #[test]
-    fn manifest_failures_take_precedence_over_signature_resolution() {
-        let error = prepare_initial_state_from_manifest_path_with_profile_resolver(
-            HookConfig {
-                manifest_path: PathBuf::from(r"C:\missing\manifest.json"),
-                profile: BuildProfile::Windows11_25H2,
-            },
-            |_| {
-                Err(HookResolveError::SignatureNotFound {
-                    target: HookTarget::Present,
-                    capture_key: "present",
-                })
-            },
-        )
-        .expect_err("manifest loading should fail before resolution");
-
-        assert!(matches!(error, HookError::Manifest(ConfigError::Io(_))));
-    }
-
-    #[test]
-    fn empty_manifest_file_reports_no_assignments() {
-        let manifest_path = write_test_manifest(r#"{ "assignments": [] }"#);
-        let error = prepare_initial_state_from_manifest_path_with_profile_resolver(
-            HookConfig {
-                manifest_path: manifest_path.clone(),
-                profile: BuildProfile::Windows11_25H2,
-            },
-            |_| {
-                Ok(SignatureResolutionReport {
-                    module: LoadedModule {
-                        module_name: "dwmcore.dll",
-                        base_address: 0x1800_0000,
-                        size: 0x20_0000,
-                    },
-                    targets: Vec::new(),
-                    skipped_signatures: Vec::new(),
-                })
-            },
-        )
-        .expect_err("empty manifest file should fail in LUT pipeline");
-
-        assert!(matches!(
-            error,
-            HookError::LutPipeline(crate::lut_pipeline::LutPipelineError::NoAssignments)
-        ));
-        let _ = fs::remove_file(manifest_path);
-    }
-
-    #[test]
-    fn manifest_validation_runs_before_signature_resolution() {
-        let manifest_path = write_test_manifest(r#"{ "assignments": [] }"#);
-        let error = prepare_initial_state_from_manifest_path_with_profile_resolver(
-            HookConfig {
-                manifest_path: manifest_path.clone(),
-                profile: BuildProfile::Windows11_25H2,
-            },
-            |_| {
-                Err(HookResolveError::SignatureNotFound {
-                    target: HookTarget::Present,
-                    capture_key: "present",
-                })
-            },
-        )
-        .expect_err("manifest validation should fail before resolution");
-
-        assert!(matches!(
-            error,
-            HookError::LutPipeline(crate::lut_pipeline::LutPipelineError::NoAssignments)
-        ));
-        let _ = fs::remove_file(manifest_path);
-    }
-
-    #[test]
-    fn no_assignments_maps_to_manifest_has_no_assignments_status() {
-        assert_eq!(
-            map_hook_error(HookError::LutPipeline(
-                crate::lut_pipeline::LutPipelineError::NoAssignments,
-            )) as u32,
-            InitializeStatus::ManifestHasNoAssignments as u32
-        );
+fn map_payload_error_to_apply_status(error: &PayloadError) -> ApplyPayloadStatus {
+    match error {
+        PayloadError::EmptyBuffer | PayloadError::TooLarge { .. } => {
+            ApplyPayloadStatus::InvalidPayload
+        }
+        PayloadError::NoAssignments => ApplyPayloadStatus::PayloadHasNoAssignments,
+        _ => ApplyPayloadStatus::PayloadDecodeFailed,
     }
 }

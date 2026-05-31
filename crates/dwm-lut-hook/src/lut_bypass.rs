@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::lut_pipeline::{BackBufferFormat, ClipBox, DirtyRect, LutPipeline, LutRenderPlan};
-use dwm_lut_config::MonitorIdentity;
+use dwm_lut_payload::MonitorIdentity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayTestModeControl {
@@ -207,7 +207,7 @@ impl LutBypassRuntime {
         self.set_overlay_test_mode_control(OverlayTestModeControl::Unmodified);
     }
 
-    pub fn reload_for_new_manifest(&mut self, has_lut_assignments: bool) {
+    pub fn reload_for_new_payload(&mut self, has_lut_assignments: bool) {
         self.contexts.clear();
         self.has_lut_assignments = has_lut_assignments;
         self.restore_overlay_test_mode();
@@ -267,38 +267,13 @@ unsafe fn write_overlay_test_mode(address: usize, mode: i32) {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use dwm_lut_config::{
-        AdapterLuid, ColorMode, LutAssignment, LutManifest, MonitorIdentity, MonitorTarget,
+    use dwm_lut_payload::{
+        AdapterLuid, ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadAssignment,
+        PayloadLut,
     };
 
     use super::{LutBypassRuntime, OverlayTestModeControl};
     use crate::lut_pipeline::{ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, LutPipeline};
-
-    fn write_test_cube() -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be valid")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("dwm-lut-phase6-{unique}.cube"));
-        fs::write(
-            &path,
-            "LUT_3D_SIZE 2\n\
-0.0 0.0 0.0\n\
-1.0 0.0 0.0\n\
-0.0 1.0 0.0\n\
-1.0 1.0 0.0\n\
-0.0 0.0 1.0\n\
-1.0 0.0 1.0\n\
-0.0 1.0 1.0\n\
-1.0 1.0 1.0\n",
-        )
-        .expect("cube file should be written");
-        path
-    }
 
     fn test_identity() -> MonitorIdentity {
         MonitorIdentity {
@@ -310,26 +285,26 @@ mod tests {
         }
     }
 
-    fn pipeline_for_single_sdr_monitor() -> (LutPipeline, PathBuf) {
-        let cube_path = write_test_cube();
-        let mut manifest = LutManifest::empty();
-        manifest.add(LutAssignment {
-            target: MonitorTarget {
-                identity: test_identity(),
-                color_mode: ColorMode::Sdr,
-            },
-            lut_path: cube_path.clone(),
-        });
-
-        (
-            LutPipeline::load(&manifest).expect("pipeline should load"),
-            cube_path,
-        )
+    fn pipeline_for_single_sdr_monitor() -> LutPipeline {
+        LutPipeline::from_payload(&HookPayload {
+            assignments: vec![PayloadAssignment {
+                target: MonitorTarget {
+                    identity: test_identity(),
+                    color_mode: ColorMode::Sdr,
+                },
+                lut: PayloadLut {
+                    size: 2,
+                    domain_min: [0.0, 0.0, 0.0],
+                    domain_max: [1.0, 1.0, 1.0],
+                    values: vec![[0.0, 0.0, 0.0]; 8],
+                },
+            }],
+        })
     }
 
     #[test]
     fn present_activation_blocks_promotion_for_same_context_only() {
-        let (pipeline, cube_path) = pipeline_for_single_sdr_monitor();
+        let pipeline = pipeline_for_single_sdr_monitor();
         let mut runtime = LutBypassRuntime::new(true, None);
 
         let outcome = runtime.update_present(
@@ -373,13 +348,11 @@ mod tests {
         let context = runtime.context(0x1234).expect("context should exist");
         assert_eq!(context.lut_index, Some(0));
         assert_eq!(context.dirty_rect_count, 1);
-
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn present_deactivation_clears_promotion_block_for_that_context() {
-        let (pipeline, cube_path) = pipeline_for_single_sdr_monitor();
+        let pipeline = pipeline_for_single_sdr_monitor();
         let mut runtime = LutBypassRuntime::new(true, None);
 
         let _ = runtime.update_present(
@@ -419,13 +392,11 @@ mod tests {
         assert!(!runtime.comp_visual_candidate_for_promotion(true));
         assert_eq!(runtime.overlay_test_mode(0), 0);
         assert!(runtime.context(0x1234).is_none());
-
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn plan_keeps_bypass_state_even_when_render_misses_a_frame() {
-        let (pipeline, cube_path) = pipeline_for_single_sdr_monitor();
+        let pipeline = pipeline_for_single_sdr_monitor();
         let mut runtime = LutBypassRuntime::new(true, None);
 
         let outcome = runtime.update_present(
@@ -456,13 +427,11 @@ mod tests {
         assert!(!runtime.comp_swap_chain_direct_flip_compatible(true));
         assert!(!runtime.comp_visual_candidate_for_promotion(true));
         assert_eq!(runtime.overlay_test_mode(0), 5);
-
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn active_context_persists_until_explicit_deactivation() {
-        let (pipeline, cube_path) = pipeline_for_single_sdr_monitor();
+        let pipeline = pipeline_for_single_sdr_monitor();
         let mut runtime = LutBypassRuntime::new(true, None);
 
         let _ = runtime.update_present(
@@ -487,13 +456,11 @@ mod tests {
         assert!(runtime.context(0x1234).is_some());
         assert!(!runtime.window_context_direct_flip_compatible(true));
         assert_eq!(runtime.overlay_test_mode(0), 5);
-
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn overlay_test_mode_global_is_patched_only_while_context_is_active() {
-        let (pipeline, cube_path) = pipeline_for_single_sdr_monitor();
+        let pipeline = pipeline_for_single_sdr_monitor();
         let mut overlay_test_mode = 0i32;
         let mut runtime =
             LutBypassRuntime::new(true, Some((&mut overlay_test_mode as *mut i32) as usize));
@@ -529,13 +496,11 @@ mod tests {
         );
 
         assert_eq!(overlay_test_mode, 0);
-
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
-    fn reload_for_new_manifest_clears_active_contexts_and_restores_overlay_test_mode() {
-        let (pipeline, cube_path) = pipeline_for_single_sdr_monitor();
+    fn reload_for_new_payload_clears_active_contexts_and_restores_overlay_test_mode() {
+        let pipeline = pipeline_for_single_sdr_monitor();
         let mut overlay_test_mode = 0i32;
         let mut runtime =
             LutBypassRuntime::new(true, Some((&mut overlay_test_mode as *mut i32) as usize));
@@ -557,12 +522,10 @@ mod tests {
         assert!(runtime.has_active_contexts());
         assert_eq!(overlay_test_mode, 5);
 
-        runtime.reload_for_new_manifest(true);
+        runtime.reload_for_new_payload(true);
 
         assert!(!runtime.has_active_contexts());
         assert_eq!(overlay_test_mode, 0);
         assert_eq!(runtime.overlay_test_mode(0), 0);
-
-        let _ = fs::remove_file(cube_path);
     }
 }

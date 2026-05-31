@@ -57,8 +57,3 @@ pub(crate) fn request_desktop_redraw() {
 pub(crate) fn reset_for_tests() {
     REQUEST_COUNT.with(|count| count.set(0));
 }
-
-#[cfg(test)]
-pub(crate) fn request_count_for_tests() -> usize {
-    REQUEST_COUNT.with(Cell::get)
-}

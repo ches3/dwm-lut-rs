@@ -2,59 +2,27 @@ use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
+pub use dwm_lut_payload::{AdapterLuid, ColorMode, MonitorIdentity, MonitorTarget, PayloadLut};
+use dwm_lut_payload::{
+    HookPayload, PayloadAssignment, PayloadError, validate_lut, validate_payload,
+};
 use serde::{Deserialize, Deserializer};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ColorMode {
-    Sdr,
-    Hdr,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AdapterLuid {
-    pub high_part: i32,
-    pub low_part: u32,
-}
-
-impl FromStr for AdapterLuid {
-    type Err = &'static str;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (high, low) = value
-            .split_once(':')
-            .ok_or("adapter_luid must use high:low hex format")?;
-        if high.len() != 8 || low.len() != 8 {
-            return Err("adapter_luid must use 8-digit high and low hex parts");
-        }
-        let high_part =
-            u32::from_str_radix(high, 16).map_err(|_| "adapter_luid high part must be hex")?;
-        let low_part =
-            u32::from_str_radix(low, 16).map_err(|_| "adapter_luid low part must be hex")?;
-        Ok(Self {
-            high_part: high_part as i32,
-            low_part,
-        })
+fn parse_adapter_luid(value: &str) -> Result<AdapterLuid, &'static str> {
+    let (high, low) = value
+        .split_once(':')
+        .ok_or("adapter_luid must use high:low hex format")?;
+    if high.len() != 8 || low.len() != 8 {
+        return Err("adapter_luid must use 8-digit high and low hex parts");
     }
-}
-
-impl fmt::Display for AdapterLuid {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:08x}:{:08x}", self.high_part as u32, self.low_part)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MonitorIdentity {
-    pub adapter_luid: AdapterLuid,
-    pub target_id: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MonitorTarget {
-    pub identity: MonitorIdentity,
-    pub color_mode: ColorMode,
+    let high_part =
+        u32::from_str_radix(high, 16).map_err(|_| "adapter_luid high part must be hex")?;
+    let low_part = u32::from_str_radix(low, 16).map_err(|_| "adapter_luid low part must be hex")?;
+    Ok(AdapterLuid {
+        high_part: high_part as i32,
+        low_part,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,11 +32,11 @@ pub struct LutAssignment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct LutManifest {
+pub struct LutConfig {
     pub assignments: Vec<LutAssignment>,
 }
 
-impl LutManifest {
+impl LutConfig {
     pub fn empty() -> Self {
         Self::default()
     }
@@ -78,13 +46,7 @@ impl LutManifest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct LutCube {
-    pub size: u32,
-    pub domain_min: [f32; 3],
-    pub domain_max: [f32; 3],
-    pub values: Vec<[f32; 3]>,
-}
+pub type LutCube = PayloadLut;
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -94,6 +56,11 @@ pub enum ConfigError {
         message: String,
     },
     Unsupported(&'static str),
+    InvalidLut {
+        path: PathBuf,
+        source: PayloadError,
+    },
+    InvalidPayload(PayloadError),
 }
 
 impl fmt::Display for ConfigError {
@@ -109,6 +76,10 @@ impl fmt::Display for ConfigError {
                 message,
             } => write!(f, "parse error: {message}"),
             Self::Unsupported(message) => write!(f, "unsupported: {message}"),
+            Self::InvalidLut { path, source } => {
+                write!(f, "invalid LUT {}: {source}", path.display())
+            }
+            Self::InvalidPayload(source) => write!(f, "invalid payload: {source}"),
         }
     }
 }
@@ -139,21 +110,21 @@ impl ConfigError {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManifestDocument {
-    assignments: Vec<ManifestAssignmentDocument>,
+struct ConfigDocument {
+    assignments: Vec<ConfigAssignmentDocument>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManifestAssignmentDocument {
-    monitor: ManifestMonitorDocument,
-    color_mode: ManifestColorMode,
+struct ConfigAssignmentDocument {
+    monitor: ConfigMonitorDocument,
+    color_mode: ConfigColorMode,
     lut_path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManifestMonitorDocument {
+struct ConfigMonitorDocument {
     #[serde(deserialize_with = "deserialize_adapter_luid")]
     adapter_luid: AdapterLuid,
     target_id: u32,
@@ -161,16 +132,16 @@ struct ManifestMonitorDocument {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ManifestColorMode {
+enum ConfigColorMode {
     Sdr,
     Hdr,
 }
 
-impl From<ManifestColorMode> for ColorMode {
-    fn from(value: ManifestColorMode) -> Self {
+impl From<ConfigColorMode> for ColorMode {
+    fn from(value: ConfigColorMode) -> Self {
         match value {
-            ManifestColorMode::Sdr => Self::Sdr,
-            ManifestColorMode::Hdr => Self::Hdr,
+            ConfigColorMode::Sdr => Self::Sdr,
+            ConfigColorMode::Hdr => Self::Hdr,
         }
     }
 }
@@ -180,17 +151,36 @@ where
     D: Deserializer<'de>,
 {
     let value = String::deserialize(deserializer)?;
-    value.parse().map_err(serde::de::Error::custom)
+    parse_adapter_luid(&value).map_err(serde::de::Error::custom)
 }
 
-pub fn load_manifest(path: &Path) -> Result<LutManifest, ConfigError> {
+pub fn load_config(path: &Path) -> Result<LutConfig, ConfigError> {
     let contents = fs::read_to_string(path)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    load_manifest_str(base_dir, &contents)
+    load_config_str(base_dir, &contents)
 }
 
-pub fn load_manifest_str(base_dir: &Path, contents: &str) -> Result<LutManifest, ConfigError> {
-    let document: ManifestDocument = serde_json::from_str(contents).map_err(|error| {
+pub fn load_payload(path: &Path) -> Result<HookPayload, ConfigError> {
+    let config = load_config(path)?;
+    config_to_payload(&config)
+}
+
+pub fn config_to_payload(config: &LutConfig) -> Result<HookPayload, ConfigError> {
+    let mut assignments = Vec::with_capacity(config.assignments.len());
+    for assignment in &config.assignments {
+        assignments.push(PayloadAssignment {
+            target: assignment.target,
+            lut: parse_cube(&assignment.lut_path)?,
+        });
+    }
+
+    let payload = HookPayload { assignments };
+    validate_payload(&payload).map_err(ConfigError::InvalidPayload)?;
+    Ok(payload)
+}
+
+pub fn load_config_str(base_dir: &Path, contents: &str) -> Result<LutConfig, ConfigError> {
+    let document: ConfigDocument = serde_json::from_str(contents).map_err(|error| {
         let line = match error.line() {
             0 => None,
             line => Some(line),
@@ -202,7 +192,7 @@ pub fn load_manifest_str(base_dir: &Path, contents: &str) -> Result<LutManifest,
         }
     })?;
 
-    let mut manifest = LutManifest::empty();
+    let mut config = LutConfig::empty();
     let mut identity_keys = HashSet::new();
     for assignment in document.assignments {
         let identity = MonitorIdentity {
@@ -229,15 +219,20 @@ pub fn load_manifest_str(base_dir: &Path, contents: &str) -> Result<LutManifest,
             )));
         }
 
-        manifest.add(LutAssignment { target, lut_path });
+        config.add(LutAssignment { target, lut_path });
     }
 
-    Ok(manifest)
+    Ok(config)
 }
 
 pub fn parse_cube(path: &Path) -> Result<LutCube, ConfigError> {
     let contents = fs::read_to_string(path)?;
-    parse_cube_str(&contents)
+    let lut = parse_cube_str(&contents)?;
+    validate_lut(&lut).map_err(|source| ConfigError::InvalidLut {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(lut)
 }
 
 pub fn parse_cube_str(contents: &str) -> Result<LutCube, ConfigError> {
@@ -327,14 +322,6 @@ pub fn parse_cube_str(contents: &str) -> Result<LutCube, ConfigError> {
     }
 
     let size = size.ok_or_else(|| ConfigError::parse_message("missing LUT_3D_SIZE directive"))?;
-    let expected_entries = expected_entry_count(size)?;
-
-    if values.len() != expected_entries {
-        return Err(ConfigError::parse_message(format!(
-            "expected {expected_entries} LUT entries for size {size}, found {}",
-            values.len()
-        )));
-    }
 
     Ok(LutCube {
         size,
@@ -400,13 +387,6 @@ fn parse_f32(line_no: usize, directive: &str, value: &str) -> Result<f32, Config
         )
     })?;
 
-    if !parsed.is_finite() {
-        return Err(ConfigError::parse_at(
-            line_no,
-            format!("{directive} must contain only finite values"),
-        ));
-    }
-
     Ok(parsed)
 }
 
@@ -424,7 +404,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AdapterLuid, ColorMode, ConfigError, MonitorIdentity, load_manifest_str, parse_cube_str,
+        AdapterLuid, ColorMode, ConfigError, MonitorIdentity, load_config_str, parse_cube_str,
     };
 
     #[test]
@@ -473,28 +453,6 @@ DOMAIN_MAX 1.0 1.0 1.0
     }
 
     #[test]
-    fn parse_cube_reports_incomplete_entry_count() {
-        let error = parse_cube_str(
-            r#"
-LUT_3D_SIZE 2
-0.0 0.0 0.0
-0.1 0.1 0.1
-"#,
-        )
-        .expect_err("parse should fail");
-
-        match error {
-            ConfigError::Parse {
-                line: None,
-                message,
-            } => {
-                assert!(message.contains("expected 8 LUT entries"));
-            }
-            other => panic!("unexpected error: {other}"),
-        }
-    }
-
-    #[test]
     fn parse_cube_rejects_duplicate_size_directive() {
         let error = parse_cube_str(
             r#"
@@ -510,35 +468,6 @@ LUT_3D_SIZE 3
                 message,
             } => {
                 assert!(message.contains("must appear only once"));
-            }
-            other => panic!("unexpected error: {other}"),
-        }
-    }
-
-    #[test]
-    fn parse_cube_rejects_non_finite_values() {
-        let error = parse_cube_str(
-            r#"
-LUT_3D_SIZE 2
-DOMAIN_MIN NaN 0.0 0.0
-0.0 0.0 0.0
-0.1 0.1 0.1
-0.2 0.2 0.2
-0.3 0.3 0.3
-0.4 0.4 0.4
-0.5 0.5 0.5
-0.6 0.6 0.6
-0.7 0.7 0.7
-"#,
-        )
-        .expect_err("parse should fail");
-
-        match error {
-            ConfigError::Parse {
-                line: Some(3),
-                message,
-            } => {
-                assert!(message.contains("finite values"));
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -567,8 +496,8 @@ DOMAIN_MAX 1.0 1.0 1.0
     }
 
     #[test]
-    fn load_manifest_resolves_relative_lut_paths() {
-        let manifest = load_manifest_str(
+    fn load_config_resolves_relative_lut_paths() {
+        let config = load_config_str(
             Path::new(r"C:\work\profiles"),
             r#"
 {
@@ -585,11 +514,11 @@ DOMAIN_MAX 1.0 1.0 1.0
 }
 "#,
         )
-        .expect("manifest should parse");
+        .expect("config should parse");
 
-        assert_eq!(manifest.assignments.len(), 1);
+        assert_eq!(config.assignments.len(), 1);
         assert_eq!(
-            manifest.assignments[0].target.identity,
+            config.assignments[0].target.identity,
             MonitorIdentity {
                 adapter_luid: AdapterLuid {
                     high_part: 0,
@@ -598,51 +527,16 @@ DOMAIN_MAX 1.0 1.0 1.0
                 target_id: 4357,
             }
         );
-        assert_eq!(manifest.assignments[0].target.color_mode, ColorMode::Sdr);
+        assert_eq!(config.assignments[0].target.color_mode, ColorMode::Sdr);
         assert_eq!(
-            manifest.assignments[0].lut_path,
+            config.assignments[0].lut_path,
             PathBuf::from(r"C:\work\profiles").join("panel.cube")
         );
     }
 
     #[test]
-    fn load_manifest_accepts_runtime_monitor_identity() {
-        let manifest = load_manifest_str(
-            Path::new(r"C:\work\profiles"),
-            r#"
-{
-  "assignments": [
-    {
-      "monitor": {
-        "adapter_luid": "00000000:00014e02",
-        "target_id": 4357
-      },
-      "color_mode": "sdr",
-      "lut_path": "panel.cube"
-    }
-  ]
-}
-"#,
-        )
-        .expect("runtime manifest should parse");
-
-        let target = &manifest.assignments[0].target;
-        assert_eq!(
-            target.identity,
-            MonitorIdentity {
-                adapter_luid: AdapterLuid {
-                    high_part: 0,
-                    low_part: 0x14e02,
-                },
-                target_id: 4357,
-            }
-        );
-        assert_eq!(target.color_mode, ColorMode::Sdr);
-    }
-
-    #[test]
-    fn load_manifest_rejects_duplicate_runtime_monitor_identity_for_same_color_mode() {
-        let error = load_manifest_str(
+    fn load_config_rejects_duplicate_runtime_monitor_identity_for_same_color_mode() {
+        let error = load_config_str(
             Path::new(r"C:\work\profiles"),
             r#"
 {
@@ -679,8 +573,8 @@ DOMAIN_MAX 1.0 1.0 1.0
     }
 
     #[test]
-    fn load_manifest_accepts_same_runtime_monitor_identity_for_sdr_and_hdr() {
-        let manifest = load_manifest_str(
+    fn load_config_accepts_same_runtime_monitor_identity_for_sdr_and_hdr() {
+        let config = load_config_str(
             Path::new(r"C:\work\profiles"),
             r#"
 {
@@ -707,20 +601,20 @@ DOMAIN_MAX 1.0 1.0 1.0
         )
         .expect("SDR and HDR assignments should coexist for one runtime monitor");
 
-        assert_eq!(manifest.assignments.len(), 2);
+        assert_eq!(config.assignments.len(), 2);
         assert_eq!(
-            manifest.assignments[0].target.identity,
-            manifest.assignments[1].target.identity
+            config.assignments[0].target.identity,
+            config.assignments[1].target.identity
         );
         assert_ne!(
-            manifest.assignments[0].target.color_mode,
-            manifest.assignments[1].target.color_mode
+            config.assignments[0].target.color_mode,
+            config.assignments[1].target.color_mode
         );
     }
 
     #[test]
-    fn load_manifest_requires_monitor() {
-        let error = load_manifest_str(
+    fn load_config_requires_monitor() {
+        let error = load_config_str(
             Path::new(r"C:\work\profiles"),
             r#"
 {
@@ -745,7 +639,7 @@ DOMAIN_MAX 1.0 1.0 1.0
     }
 
     #[test]
-    fn load_manifest_rejects_legacy_monitor_fields() {
+    fn load_config_rejects_legacy_monitor_fields() {
         for field in [
             r#""monitor_id": "DISPLAY1","#,
             r#""desktop_left": 0,"#,
@@ -753,7 +647,7 @@ DOMAIN_MAX 1.0 1.0 1.0
             r#""desktop_right": 1920,"#,
             r#""desktop_bottom": 1080,"#,
         ] {
-            let error = load_manifest_str(
+            let error = load_config_str(
                 Path::new(r"C:\work\profiles"),
                 &format!(
                     r#"
@@ -786,8 +680,8 @@ DOMAIN_MAX 1.0 1.0 1.0
     }
 
     #[test]
-    fn load_manifest_requires_assignments_field() {
-        let error = load_manifest_str(Path::new(r"C:\work\profiles"), "{}")
+    fn load_config_requires_assignments_field() {
+        let error = load_config_str(Path::new(r"C:\work\profiles"), "{}")
             .expect_err("missing assignments should fail");
 
         match error {
@@ -800,11 +694,10 @@ DOMAIN_MAX 1.0 1.0 1.0
     }
 
     #[test]
-    fn load_manifest_accepts_empty_assignments_array() {
-        let manifest =
-            load_manifest_str(Path::new(r"C:\work\profiles"), r#"{ "assignments": [] }"#)
-                .expect("empty assignments array should still parse");
+    fn load_config_accepts_empty_assignments_array() {
+        let config = load_config_str(Path::new(r"C:\work\profiles"), r#"{ "assignments": [] }"#)
+            .expect("empty assignments array should still parse");
 
-        assert!(manifest.assignments.is_empty());
+        assert!(config.assignments.is_empty());
     }
 }

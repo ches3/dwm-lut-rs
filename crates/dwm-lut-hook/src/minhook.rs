@@ -14,7 +14,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::profile::{HookProfile, HookTarget};
 use crate::state::HookRegistrationPlan;
 use crate::{ClipBox, DirtyRect, state};
-use dwm_lut_config::{AdapterLuid, MonitorIdentity};
+use dwm_lut_payload::{AdapterLuid, MonitorIdentity};
 
 pub type MhStatus = i32;
 
@@ -126,7 +126,6 @@ fn cleanup_has_remove_hook_failure(failures: &[MinHookCleanupFailure]) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) enum MinHookOperation {
     Initialize,
     CreateHook(HookTarget),
@@ -1408,14 +1407,14 @@ const fn bool_to_u8(value: bool) -> u8 {
 #[cfg(test)]
 mod tests {
     use std::ffi::c_void;
-    use std::fs;
     use std::mem::size_of;
-    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::sync::atomic::Ordering;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use dwm_lut_config::{AdapterLuid, MonitorIdentity};
+    use dwm_lut_payload::{
+        AdapterLuid, ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadAssignment,
+        PayloadLut,
+    };
 
     use crate::profile::HookTarget;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
@@ -1518,52 +1517,6 @@ mod tests {
         );
     }
 
-    fn test_cube_path() -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be valid")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("dwm-lut-minhook-test-{unique}.cube"));
-        fs::write(
-            &path,
-            "LUT_3D_SIZE 2\n\
-0.0 0.0 0.0\n\
-1.0 0.0 0.0\n\
-0.0 1.0 0.0\n\
-1.0 1.0 0.0\n\
-0.0 0.0 1.0\n\
-1.0 0.0 1.0\n\
-0.0 1.0 1.0\n\
-1.0 1.0 1.0\n",
-        )
-        .expect("cube file should be written");
-        path
-    }
-
-    fn write_test_manifest(cube_path: &Path) -> PathBuf {
-        let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
-        write_test_manifest_contents(format!(
-            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\"\n    }}\n  ]\n}}\n"
-        ))
-    }
-
-    fn write_test_manifest_contents(contents: String) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be valid")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("dwm-lut-minhook-test-{unique}.json"));
-        fs::write(&path, contents).expect("manifest file should be written");
-        path
-    }
-
-    fn write_test_manifest_with_sdr_hdr_assignments(cube_path: &Path) -> PathBuf {
-        let cube_path = cube_path.display().to_string().replace('\\', "\\\\");
-        write_test_manifest_contents(format!(
-            "{{\n  \"assignments\": [\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"sdr\",\n      \"lut_path\": \"{cube_path}\"\n    }},\n    {{\n      \"monitor\": {{\n        \"adapter_luid\": \"00000000:00014e02\",\n        \"target_id\": 4357\n      }},\n      \"color_mode\": \"hdr\",\n      \"lut_path\": \"{cube_path}\"\n    }}\n  ]\n}}\n"
-        ))
-    }
-
     fn test_monitor_identity() -> MonitorIdentity {
         MonitorIdentity {
             adapter_luid: AdapterLuid {
@@ -1615,21 +1568,50 @@ mod tests {
         }
     }
 
-    fn initialize_test_state() -> (PathBuf, PathBuf) {
-        state::reset_state_for_tests();
-        let cube_path = test_cube_path();
-        let manifest_path = write_test_manifest(&cube_path);
-        initialize_test_state_from_manifest(manifest_path.clone());
-        (manifest_path, cube_path)
+    fn identity_lut() -> PayloadLut {
+        PayloadLut {
+            size: 2,
+            domain_min: [0.0, 0.0, 0.0],
+            domain_max: [1.0, 1.0, 1.0],
+            values: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+            ],
+        }
     }
 
-    fn initialize_test_state_from_manifest(manifest_path: PathBuf) {
+    fn test_payload(color_modes: &[ColorMode]) -> HookPayload {
+        HookPayload {
+            assignments: color_modes
+                .iter()
+                .map(|color_mode| PayloadAssignment {
+                    target: MonitorTarget {
+                        identity: test_monitor_identity(),
+                        color_mode: *color_mode,
+                    },
+                    lut: identity_lut(),
+                })
+                .collect(),
+        }
+    }
+
+    fn initialize_test_state() {
+        state::reset_state_for_tests();
+        initialize_test_state_from_payload(test_payload(&[ColorMode::Sdr]));
+    }
+
+    fn initialize_test_state_from_payload(payload: HookPayload) {
         let config = HookConfig {
-            manifest_path: manifest_path.clone(),
             profile: BuildProfile::Windows11_25H2,
         };
         let resolution = synthetic_resolution(&HookProfile::for_build(config.profile));
-        crate::bootstrap::initialize_with_resolution(config, resolution)
+        crate::bootstrap::initialize_with_resolution(config, payload, resolution)
             .expect("initialization should succeed with synthetic resolution");
     }
 
@@ -2000,7 +1982,7 @@ mod tests {
     #[test]
     fn context_detours_override_original_return_value_when_context_is_active() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        let (manifest_path, cube_path) = initialize_test_state();
+        initialize_test_state();
         activate_context(0x1234);
         super::DIRECT_FLIP_ORIGINAL.store(
             returns_true_overlay_direct_flip as *mut c_void,
@@ -2018,9 +2000,6 @@ mod tests {
                 .and_then(|runtime| runtime.context(0x1234).cloned())
                 .is_some()
         );
-
-        let _ = fs::remove_file(manifest_path);
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
@@ -2050,7 +2029,7 @@ mod tests {
     #[test]
     fn global_promotion_detours_block_when_lut_assignments_exist() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        let (manifest_path, cube_path) = initialize_test_state();
+        initialize_test_state();
         super::WINDOW_DIRECT_FLIP_ORIGINAL.store(returns_true_3 as *mut c_void, Ordering::Release);
         super::COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL
             .store(returns_true_3 as *mut c_void, Ordering::Release);
@@ -2069,15 +2048,12 @@ mod tests {
             0
         );
         assert_eq!(unsafe { super::comp_visual_promotion_detour(0, 0, 0) }, 0);
-
-        let _ = fs::remove_file(manifest_path);
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn present_input_collection_reads_confirmed_inputs_without_swap_chain_accessor() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        let (manifest_path, cube_path) = initialize_test_state();
+        initialize_test_state();
         let fake = FakePresentObjects::new(
             ClipBox {
                 left: 120,
@@ -2109,15 +2085,12 @@ mod tests {
         assert_eq!(inputs.monitor_identity, Some(test_monitor_identity()));
         assert_eq!(inputs.dirty_rects, fake.dirty_rects);
         assert!(!inputs.hardware_protected);
-
-        let _ = fs::remove_file(manifest_path);
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn present_input_collection_reads_confirmed_inputs_when_hardware_protected() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        let (manifest_path, cube_path) = initialize_test_state();
+        initialize_test_state();
         let fake = FakePresentObjects::new(
             ClipBox {
                 left: 120,
@@ -2149,9 +2122,6 @@ mod tests {
         assert_eq!(inputs.monitor_identity, Some(test_monitor_identity()));
         assert_eq!(inputs.dirty_rects, fake.dirty_rects);
         assert!(inputs.hardware_protected);
-
-        let _ = fs::remove_file(manifest_path);
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
@@ -2268,7 +2238,7 @@ mod tests {
     fn present_detour_keeps_context_active_when_render_succeeds() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_last_original_present_rects();
-        let (manifest_path, cube_path) = initialize_test_state();
+        initialize_test_state();
         let fake = FakePresentObjects::new(
             ClipBox {
                 left: 0,
@@ -2323,9 +2293,6 @@ mod tests {
         assert_eq!(render_call.clip_box.left, 0);
         assert_eq!(render_call.clip_box.top, 0);
         assert_eq!(render_call.dirty_rects, fake.dirty_rects);
-
-        let _ = fs::remove_file(manifest_path);
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
@@ -2333,9 +2300,8 @@ mod tests {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_last_original_present_rects();
         state::reset_state_for_tests();
-        let cube_path = test_cube_path();
-        let manifest_path = write_test_manifest_with_sdr_hdr_assignments(&cube_path);
-        initialize_test_state_from_manifest(manifest_path.clone());
+        state::reset_state_for_tests();
+        initialize_test_state_from_payload(test_payload(&[ColorMode::Sdr, ColorMode::Hdr]));
         let fake = FakePresentObjects::new(
             ClipBox {
                 left: 120,
@@ -2382,15 +2348,13 @@ mod tests {
         assert_eq!(context.lut_index, Some(1));
 
         crate::d3d11_renderer::reset_test_render_present_lut_result();
-        let _ = fs::remove_file(manifest_path);
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn present_detour_expands_original_present_dirty_rect_for_full_redraw() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_last_original_present_rects();
-        let (manifest_path, cube_path) = initialize_test_state();
+        initialize_test_state();
         let fake = FakePresentObjects::new(
             ClipBox {
                 left: 0,
@@ -2437,16 +2401,13 @@ mod tests {
         let render_call = crate::d3d11_renderer::test_render_present_lut_call()
             .expect("renderer should still receive original present inputs");
         assert_eq!(render_call.dirty_rects, fake.dirty_rects);
-
-        let _ = fs::remove_file(manifest_path);
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn present_detour_keeps_context_active_when_render_misses_a_frame() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_last_original_present_rects();
-        let (manifest_path, cube_path) = initialize_test_state();
+        initialize_test_state();
         let fake = FakePresentObjects::new(
             ClipBox {
                 left: 0,
@@ -2484,15 +2445,12 @@ mod tests {
             .expect("present plan should keep the context active across a missed render");
         assert_eq!(context.lut_index, Some(0));
         assert_eq!(context.dirty_rect_count, 1);
-
-        let _ = fs::remove_file(manifest_path);
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn rendered_present_clears_prepared_context_when_renderer_returns_no_lut_index() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        let (manifest_path, cube_path) = initialize_test_state();
+        initialize_test_state();
         let context_address = 0x1234;
         let clip_box = ClipBox {
             left: 0,
@@ -2529,15 +2487,12 @@ mod tests {
                 .and_then(|runtime| runtime.context(context_address).cloned())
                 .is_none()
         );
-
-        let _ = fs::remove_file(manifest_path);
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn present_detour_renders_when_hardware_protected_inputs_are_readable() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        let (manifest_path, cube_path) = initialize_test_state();
+        initialize_test_state();
         let fake = FakePresentObjects::new(
             ClipBox {
                 left: 0,
@@ -2575,15 +2530,12 @@ mod tests {
         assert_eq!(render_call.monitor_identity, Some(test_monitor_identity()));
         assert_eq!(render_call.dirty_rects, fake.dirty_rects);
         crate::d3d11_renderer::reset_test_render_present_lut_result();
-
-        let _ = fs::remove_file(manifest_path);
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn present_detour_clears_context_when_input_acquisition_fails() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        let (manifest_path, cube_path) = initialize_test_state();
+        initialize_test_state();
         activate_context(0x1234);
         super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
 
@@ -2596,8 +2548,5 @@ mod tests {
                 .and_then(|runtime| runtime.context(0x1234).cloned())
                 .is_none()
         );
-
-        let _ = fs::remove_file(manifest_path);
-        let _ = fs::remove_file(cube_path);
     }
 }

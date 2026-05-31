@@ -7,7 +7,7 @@ use crate::error::InjectorError;
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CliOptions {
     pub(crate) dll_path: Option<PathBuf>,
-    pub(crate) manifest_path: PathBuf,
+    pub(crate) config_path: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -55,7 +55,7 @@ fn parse_apply_args(
     mut args: impl Iterator<Item = OsString>,
 ) -> Result<ParseArgsResult, InjectorError> {
     let mut dll_path = None;
-    let mut manifest_path = None;
+    let mut config_path = None;
     while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
             "--dll" => {
@@ -64,11 +64,11 @@ fn parse_apply_args(
                     .ok_or_else(|| InjectorError::Usage(usage_message("--dll requires a value")))?;
                 dll_path = Some(PathBuf::from(value));
             }
-            "--manifest" => {
+            "--config" => {
                 let value = args.next().ok_or_else(|| {
-                    InjectorError::Usage(usage_message("--manifest requires a value"))
+                    InjectorError::Usage(usage_message("--config requires a value"))
                 })?;
-                manifest_path = Some(PathBuf::from(value));
+                config_path = Some(PathBuf::from(value));
             }
             "--help" | "-h" => {
                 return Ok(ParseArgsResult::Help(usage_message("")));
@@ -81,12 +81,12 @@ fn parse_apply_args(
         }
     }
 
-    let manifest_path =
-        manifest_path.ok_or_else(|| InjectorError::Usage(usage_message("missing --manifest")))?;
+    let config_path =
+        config_path.ok_or_else(|| InjectorError::Usage(usage_message("missing --config")))?;
 
     Ok(ParseArgsResult::Run(CliCommand::Apply(CliOptions {
         dll_path,
-        manifest_path,
+        config_path,
     })))
 }
 
@@ -104,7 +104,7 @@ fn parse_disable_args(
 }
 
 fn usage_message(problem: &str) -> String {
-    let usage = "usage: dwm-lut-injector apply [--dll <hook-dll-path>] --manifest <manifest-path>\n       dwm-lut-injector disable";
+    let usage = "usage: dwm-lut-injector apply [--dll <hook-dll-path>] --config <config-path>\n       dwm-lut-injector disable";
     if problem.is_empty() {
         usage.to_string()
     } else {
@@ -133,26 +133,26 @@ mod tests {
     }
 
     #[test]
-    fn requires_manifest_path() {
+    fn requires_config_path() {
         let error = parse_args_from(["dwm-lut-injector", "apply", "--dll", "hook.dll"])
-            .expect_err("missing manifest must be rejected");
+            .expect_err("missing config must be rejected");
 
         match error {
             InjectorError::Usage(message) => {
-                assert!(message.contains("missing --manifest"));
+                assert!(message.contains("missing --config"));
             }
             other => panic!("unexpected error: {other}"),
         }
     }
 
     #[test]
-    fn rejects_manifest_without_command() {
-        let error = parse_args_from(["dwm-lut-injector", "--manifest", "manifest.json"])
-            .expect_err("manifest without command must be rejected");
+    fn rejects_config_without_command() {
+        let error = parse_args_from(["dwm-lut-injector", "--config", "config.json"])
+            .expect_err("config without command must be rejected");
 
         match error {
             InjectorError::Usage(message) => {
-                assert!(message.contains("unknown command: --manifest"));
+                assert!(message.contains("unknown command: --config"));
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -160,20 +160,20 @@ mod tests {
 
     #[test]
     fn accepts_explicit_apply_command() {
-        let parsed = parse_args_from(["dwm-lut-injector", "apply", "--manifest", "manifest.json"])
+        let parsed = parse_args_from(["dwm-lut-injector", "apply", "--config", "config.json"])
             .expect("explicit apply command should parse");
 
         assert_eq!(
             run_options(parsed),
             CliOptions {
                 dll_path: None,
-                manifest_path: PathBuf::from("manifest.json"),
+                config_path: PathBuf::from("config.json"),
             }
         );
     }
 
     #[test]
-    fn accepts_disable_command_without_manifest() {
+    fn accepts_disable_command_without_config() {
         let parsed =
             parse_args_from(["dwm-lut-injector", "disable"]).expect("disable command should parse");
 
@@ -190,8 +190,8 @@ mod tests {
             "apply",
             "--dll",
             "hook.dll",
-            "--manifest",
-            "manifest.json",
+            "--config",
+            "config.json",
         ])
         .expect("valid arguments should parse");
 
@@ -199,7 +199,7 @@ mod tests {
             run_options(parsed),
             CliOptions {
                 dll_path: Some(PathBuf::from("hook.dll")),
-                manifest_path: PathBuf::from("manifest.json"),
+                config_path: PathBuf::from("config.json"),
             }
         );
     }

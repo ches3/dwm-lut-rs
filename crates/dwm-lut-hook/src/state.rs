@@ -1,11 +1,10 @@
 #[cfg(test)]
 use std::cell::RefCell;
-use std::path::PathBuf;
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
-use dwm_lut_config::{LutAssignment, LutManifest, MonitorIdentity};
+use dwm_lut_payload::{HookPayload, MonitorIdentity, PayloadAssignment};
 
 use crate::lut_bypass::{LutBypassRuntime, PresentHookOutcome};
 use crate::lut_pipeline::{BackBufferFormat, LutPipeline, LutPipelineSummary};
@@ -16,7 +15,6 @@ use crate::{ClipBox, DirtyRect};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookConfig {
-    pub manifest_path: PathBuf,
     pub profile: BuildProfile,
 }
 
@@ -26,11 +24,8 @@ pub enum LoggerState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ManifestLoadState {
-    Loaded {
-        manifest_path: PathBuf,
-        assignment_count: usize,
-    },
+pub enum PayloadLoadState {
+    Loaded { assignment_count: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +34,7 @@ pub enum InitializationStage {
     ProfileSelected,
     TargetModuleResolved,
     SignaturesResolved,
-    ManifestLoaded,
+    PayloadDecoded,
     LutPipelinePrepared,
     HookRegistrationEnabled,
     LutBypassStatePrepared,
@@ -105,7 +100,7 @@ pub enum LutBypassState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookRuntime {
     pub logger: LoggerState,
-    pub manifest_load: ManifestLoadState,
+    pub payload_load: PayloadLoadState,
     pub minhook: MinHookRuntime,
     pub resolution: SignatureResolutionState,
     pub lut_pipeline: LutPipelineState,
@@ -116,7 +111,7 @@ pub struct HookRuntime {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookState {
-    pub manifest: LutManifest,
+    pub payload: HookPayload,
     pub config: HookConfig,
     pub profile: HookProfile,
     pub runtime: HookRuntime,
@@ -134,7 +129,7 @@ const LIFECYCLE_IDLE: u8 = 0;
 const LIFECYCLE_RUNNING: u8 = 1;
 const LIFECYCLE_SHUTTING_DOWN: u8 = 2;
 const LIFECYCLE_SHUT_DOWN: u8 = 3;
-const LIFECYCLE_APPLYING_MANIFEST: u8 = 4;
+const LIFECYCLE_APPLYING_PAYLOAD: u8 = 4;
 
 #[cfg(test)]
 thread_local! {
@@ -151,7 +146,7 @@ pub(crate) enum ShutdownStart {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ApplyManifestStart {
+pub(crate) enum ApplyPayloadStart {
     Started,
     NotInitialized,
     AlreadyInProgress,
@@ -202,12 +197,8 @@ pub fn is_initialized() -> bool {
     }
 }
 
-pub fn manifest_path() -> Option<PathBuf> {
-    with_state(|state| state.config.manifest_path.clone())
-}
-
-pub fn manifest_assignments() -> Option<Vec<LutAssignment>> {
-    with_state(|state| state.manifest.assignments.clone())
+pub fn payload_assignments() -> Option<Vec<PayloadAssignment>> {
+    with_state(|state| state.payload.assignments.clone())
 }
 
 pub fn lut_pipeline_selects_monitor(
@@ -291,21 +282,21 @@ pub(crate) fn is_shutting_down() -> bool {
     }
 }
 
-pub(crate) fn begin_apply_manifest() -> ApplyManifestStart {
+pub(crate) fn begin_apply_payload() -> ApplyPayloadStart {
     #[cfg(not(test))]
     {
         match LIFECYCLE.compare_exchange(
             LIFECYCLE_RUNNING,
-            LIFECYCLE_APPLYING_MANIFEST,
+            LIFECYCLE_APPLYING_PAYLOAD,
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => ApplyManifestStart::Started,
-            Err(LIFECYCLE_IDLE) | Err(LIFECYCLE_SHUT_DOWN) => ApplyManifestStart::NotInitialized,
-            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_APPLYING_MANIFEST) => {
-                ApplyManifestStart::AlreadyInProgress
+            Ok(_) => ApplyPayloadStart::Started,
+            Err(LIFECYCLE_IDLE) | Err(LIFECYCLE_SHUT_DOWN) => ApplyPayloadStart::NotInitialized,
+            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_APPLYING_PAYLOAD) => {
+                ApplyPayloadStart::AlreadyInProgress
             }
-            Err(_) => ApplyManifestStart::NotInitialized,
+            Err(_) => ApplyPayloadStart::NotInitialized,
         }
     }
 
@@ -315,24 +306,24 @@ pub(crate) fn begin_apply_manifest() -> ApplyManifestStart {
             let mut lifecycle = lifecycle.borrow_mut();
             match *lifecycle {
                 LIFECYCLE_RUNNING => {
-                    *lifecycle = LIFECYCLE_APPLYING_MANIFEST;
-                    ApplyManifestStart::Started
+                    *lifecycle = LIFECYCLE_APPLYING_PAYLOAD;
+                    ApplyPayloadStart::Started
                 }
-                LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN => ApplyManifestStart::NotInitialized,
-                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_APPLYING_MANIFEST => {
-                    ApplyManifestStart::AlreadyInProgress
+                LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN => ApplyPayloadStart::NotInitialized,
+                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_APPLYING_PAYLOAD => {
+                    ApplyPayloadStart::AlreadyInProgress
                 }
-                _ => ApplyManifestStart::NotInitialized,
+                _ => ApplyPayloadStart::NotInitialized,
             }
         })
     }
 }
 
-pub(crate) fn finish_apply_manifest() {
+pub(crate) fn finish_apply_payload() {
     #[cfg(not(test))]
     {
         let _ = LIFECYCLE.compare_exchange(
-            LIFECYCLE_APPLYING_MANIFEST,
+            LIFECYCLE_APPLYING_PAYLOAD,
             LIFECYCLE_RUNNING,
             Ordering::AcqRel,
             Ordering::Acquire,
@@ -343,7 +334,7 @@ pub(crate) fn finish_apply_manifest() {
     {
         LIFECYCLE.with(|lifecycle| {
             let mut lifecycle = lifecycle.borrow_mut();
-            if *lifecycle == LIFECYCLE_APPLYING_MANIFEST {
+            if *lifecycle == LIFECYCLE_APPLYING_PAYLOAD {
                 *lifecycle = LIFECYCLE_RUNNING;
             }
         });
@@ -379,7 +370,7 @@ pub(crate) fn begin_shutdown() -> ShutdownStart {
         ) {
             Ok(_) => ShutdownStart::Started,
             Err(LIFECYCLE_IDLE) => ShutdownStart::NotInitialized,
-            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_APPLYING_MANIFEST) => {
+            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_APPLYING_PAYLOAD) => {
                 ShutdownStart::AlreadyInProgress
             }
             Err(LIFECYCLE_SHUT_DOWN) => ShutdownStart::AlreadyShutDown,
@@ -397,7 +388,7 @@ pub(crate) fn begin_shutdown() -> ShutdownStart {
                     ShutdownStart::Started
                 }
                 LIFECYCLE_IDLE => ShutdownStart::NotInitialized,
-                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_APPLYING_MANIFEST => {
+                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_APPLYING_PAYLOAD => {
                     ShutdownStart::AlreadyInProgress
                 }
                 LIFECYCLE_SHUT_DOWN => ShutdownStart::AlreadyShutDown,
@@ -612,30 +603,25 @@ pub(crate) fn restore_overlay_test_mode() {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplaceManifestPipelineError {
+pub enum ReplacePayloadPipelineError {
     NotInitialized,
 }
 
-pub fn replace_manifest_pipeline(
-    manifest_path: PathBuf,
-    manifest: LutManifest,
+pub fn replace_payload_pipeline(
+    payload: HookPayload,
     lut_pipeline: LutPipeline,
-) -> Result<(), ReplaceManifestPipelineError> {
-    let assignment_count = manifest.assignments.len();
-    let has_lut_assignments = lut_pipeline.summary().lut_count > 0;
+) -> Result<(), ReplacePayloadPipelineError> {
+    let assignment_count = payload.assignments.len();
+    let has_lut_assignments = !payload.assignments.is_empty();
 
     with_state_mut(|state| {
-        state.manifest = manifest;
-        state.config.manifest_path = manifest_path.clone();
-        state.runtime.manifest_load = ManifestLoadState::Loaded {
-            manifest_path,
-            assignment_count,
-        };
+        state.payload = payload;
+        state.runtime.payload_load = PayloadLoadState::Loaded { assignment_count };
         state.runtime.lut_pipeline = LutPipelineState::Ready(Arc::new(lut_pipeline));
         let LutBypassState::Ready(lut_bypass) = &mut state.runtime.lut_bypass;
-        lut_bypass.reload_for_new_manifest(has_lut_assignments);
+        lut_bypass.reload_for_new_payload(has_lut_assignments);
     })
-    .ok_or(ReplaceManifestPipelineError::NotInitialized)
+    .ok_or(ReplacePayloadPipelineError::NotInitialized)
 }
 
 #[cfg(not(test))]

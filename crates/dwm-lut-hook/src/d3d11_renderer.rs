@@ -2,7 +2,7 @@ use crate::lut_pipeline::{
     BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
     DirtyRect, LutPipeline, ShaderConstantsCBuffer,
 };
-use dwm_lut_config::MonitorIdentity;
+use dwm_lut_payload::MonitorIdentity;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
@@ -439,7 +439,7 @@ mod tests {
         BackBufferFormat, DXGI_FORMAT_R16G16B16A16_FLOAT, LoadedLut, LutMetadata, LutShaderProgram,
         ShaderTexture3D,
     };
-    use dwm_lut_config::{AdapterLuid, ColorMode, LutAssignment, MonitorIdentity, MonitorTarget};
+    use dwm_lut_payload::{AdapterLuid, ColorMode, MonitorIdentity, MonitorTarget};
     use std::cell::RefCell;
 
     fn test_identity() -> MonitorIdentity {
@@ -455,15 +455,9 @@ mod tests {
     fn test_pipeline() -> LutPipeline {
         fn loaded_lut(color_mode: ColorMode) -> LoadedLut {
             LoadedLut {
-                assignment: LutAssignment {
-                    target: MonitorTarget {
-                        identity: test_identity(),
-                        color_mode,
-                    },
-                    lut_path: match color_mode {
-                        ColorMode::Sdr => "identity-sdr.cube".into(),
-                        ColorMode::Hdr => "identity-hdr.cube".into(),
-                    },
+                target: MonitorTarget {
+                    identity: test_identity(),
+                    color_mode,
                 },
                 metadata: LutMetadata {
                     size: 2,
@@ -845,14 +839,11 @@ mod tests {
 
     #[test]
     fn gpu_draw_plan_selects_lut_by_runtime_monitor_identity() {
-        fn loaded_lut(label: &str, identity: MonitorIdentity, color_mode: ColorMode) -> LoadedLut {
+        fn loaded_lut(_label: &str, identity: MonitorIdentity, color_mode: ColorMode) -> LoadedLut {
             LoadedLut {
-                assignment: LutAssignment {
-                    target: MonitorTarget {
-                        identity,
-                        color_mode,
-                    },
-                    lut_path: format!("{label}-{color_mode:?}.cube").into(),
+                target: MonitorTarget {
+                    identity,
+                    color_mode,
                 },
                 metadata: LutMetadata {
                     size: 2,
@@ -972,7 +963,7 @@ mod imp {
         BackBufferFormat, ClipBox, DirtyRect, LutPipeline, ShaderConstantsCBuffer,
     };
     use crate::profile::SwapChainPathHypothesis;
-    use dwm_lut_config::MonitorIdentity;
+    use dwm_lut_payload::MonitorIdentity;
 
     type Hresult = i32;
     type ComPtr = *mut c_void;

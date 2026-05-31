@@ -1,11 +1,12 @@
 mod cli;
+mod config;
 mod error;
 mod injector;
 mod staging;
 mod win32;
 
 use cli::{CliCommand, ParseArgsResult, parse_args};
-use error::{HookShutdownStatus, InjectionStep, InjectorError};
+use error::{InjectionStep, InjectorError, ShutdownStatus};
 use injector::{
     ApplyOutcome, DisableOutcome, apply_or_initialize, canonicalize_existing_file,
     disable_injected_hook,
@@ -38,22 +39,24 @@ fn run_apply(options: cli::CliOptions) -> Result<(), InjectorError> {
         InjectionStep::ResolveLocalHookDll,
         "hook DLL",
     )?;
-    let manifest_path = canonicalize_existing_file(
-        &options.manifest_path,
-        InjectionStep::ResolveManifestPath,
-        "manifest file",
+    let config_path = canonicalize_existing_file(
+        &options.config_path,
+        InjectionStep::ResolveConfigPath,
+        "config file",
     )?;
+    let payload = config::load_payload(&config_path)?;
+    let payload_bytes = dwm_lut_payload::serialize_payload(&payload)?;
     let staged_dll_path = stage_hook_dll(&input_dll_path)?;
     let pid = find_process_id_by_name("dwm.exe")?;
 
     enable_debug_privilege()?;
-    let outcome = apply_or_initialize(pid, &staged_dll_path, &manifest_path)?;
+    let outcome = apply_or_initialize(pid, &staged_dll_path, &payload_bytes)?;
 
     match outcome {
         ApplyOutcome::Reloaded => {
             println!(
-                "reloaded manifest in dwm.exe (pid={pid}) from {}",
-                manifest_path.display()
+                "reloaded payload in dwm.exe (pid={pid}) from {}",
+                config_path.display()
             );
         }
         ApplyOutcome::Initialized => {
@@ -61,7 +64,7 @@ fn run_apply(options: cli::CliOptions) -> Result<(), InjectorError> {
                 "initialized dwm.exe (pid={pid}) with {} staged from {} and {}",
                 staged_dll_path.display(),
                 input_dll_path.display(),
-                manifest_path.display()
+                config_path.display()
             );
         }
         ApplyOutcome::Reinitialized => {
@@ -69,7 +72,7 @@ fn run_apply(options: cli::CliOptions) -> Result<(), InjectorError> {
                 "reinitialized dwm.exe (pid={pid}) with {} staged from {} and {}",
                 staged_dll_path.display(),
                 input_dll_path.display(),
-                manifest_path.display()
+                config_path.display()
             );
         }
     }
@@ -85,17 +88,17 @@ fn run_disable() -> Result<(), InjectorError> {
             println!("disable skipped: hook DLL is not injected into dwm.exe (pid={pid})");
             Ok(())
         }
-        DisableOutcome::ShutDown(HookShutdownStatus::Success) => {
+        DisableOutcome::ShutDown(ShutdownStatus::Success) => {
             println!("disabled dwm.exe hook (pid={pid})");
             Ok(())
         }
-        DisableOutcome::ShutDown(HookShutdownStatus::NotInitialized) => {
+        DisableOutcome::ShutDown(ShutdownStatus::NotInitialized) => {
             println!(
                 "disable skipped: hook DLL is loaded but not initialized in dwm.exe (pid={pid})"
             );
             Ok(())
         }
-        DisableOutcome::ShutDown(HookShutdownStatus::AlreadyShutDown) => {
+        DisableOutcome::ShutDown(ShutdownStatus::AlreadyShutDown) => {
             println!("disable skipped: hook DLL is already shut down in dwm.exe (pid={pid})");
             Ok(())
         }

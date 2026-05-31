@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-dwm-lut-config = { path = "../dwm-lut-config" }
+dwm-lut-payload = { path = "../dwm-lut-payload" }
 minhook-sys = "0.1.1"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
 

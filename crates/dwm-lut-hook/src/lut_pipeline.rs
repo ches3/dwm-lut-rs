@@ -1,9 +1,6 @@
-use std::fmt;
 use std::sync::LazyLock;
 
-use dwm_lut_config::{
-    ColorMode, ConfigError, LutAssignment, LutCube, LutManifest, MonitorIdentity, parse_cube,
-};
+use dwm_lut_payload::{ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadLut};
 
 use crate::blue_noise::{blue_noise_threshold, render_blue_noise_hlsl};
 
@@ -92,7 +89,7 @@ pub struct ShaderTexture3D {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedLut {
-    pub assignment: LutAssignment,
+    pub target: MonitorTarget,
     pub metadata: LutMetadata,
     pub texture: ShaderTexture3D,
 }
@@ -146,54 +143,26 @@ pub struct LutRenderPlan {
     pub shader_constants: ShaderConstants,
 }
 
-#[derive(Debug)]
-pub enum LutPipelineError {
-    NoAssignments,
-    Config(ConfigError),
-}
-
-impl fmt::Display for LutPipelineError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoAssignments => write!(f, "manifest does not contain any LUT assignments"),
-            Self::Config(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl std::error::Error for LutPipelineError {}
-
-impl From<ConfigError> for LutPipelineError {
-    fn from(value: ConfigError) -> Self {
-        Self::Config(value)
-    }
-}
-
 impl LutPipeline {
-    pub fn load(manifest: &LutManifest) -> Result<Self, LutPipelineError> {
-        if manifest.assignments.is_empty() {
-            return Err(LutPipelineError::NoAssignments);
-        }
-
-        let mut luts = Vec::with_capacity(manifest.assignments.len());
-        for assignment in &manifest.assignments {
-            let cube = parse_cube(&assignment.lut_path)?;
-
+    /// Builds a pipeline from a payload that has already passed `validate_payload`.
+    pub fn from_payload(payload: &HookPayload) -> Self {
+        let mut luts = Vec::with_capacity(payload.assignments.len());
+        for assignment in &payload.assignments {
             luts.push(LoadedLut {
-                assignment: assignment.clone(),
+                target: assignment.target,
                 metadata: LutMetadata {
-                    size: cube.size,
-                    domain_min: cube.domain_min,
-                    domain_max: cube.domain_max,
+                    size: assignment.lut.size,
+                    domain_min: assignment.lut.domain_min,
+                    domain_max: assignment.lut.domain_max,
                 },
-                texture: cube_to_texture(&cube),
+                texture: cube_to_texture(&assignment.lut),
             });
         }
 
-        Ok(Self {
+        Self {
             luts,
             shader: LutShaderProgram::embedded(),
-        })
+        }
     }
 
     pub fn summary(&self) -> LutPipelineSummary {
@@ -214,7 +183,7 @@ impl LutPipeline {
         };
 
         self.luts.iter().position(|lut| {
-            let target = &lut.assignment.target;
+            let target = &lut.target;
             target.identity == identity && target.color_mode == color_mode
         })
     }
@@ -244,7 +213,7 @@ impl LutPipeline {
             BackBufferFormat::Bgra8Unorm => ColorMode::Sdr,
             BackBufferFormat::Rgba16Float => ColorMode::Hdr,
         };
-        (lut.assignment.target.color_mode == color_mode)
+        (lut.target.color_mode == color_mode)
             .then(|| self.build_present_plan_for_index(clip_box, format, dirty_rects, lut_index))
             .flatten()
     }
@@ -273,7 +242,7 @@ impl LutPipeline {
     }
 }
 
-pub fn cube_to_texture(cube: &LutCube) -> ShaderTexture3D {
+pub fn cube_to_texture(cube: &PayloadLut) -> ShaderTexture3D {
     let texels = cube
         .values
         .iter()
@@ -288,7 +257,7 @@ pub fn cube_to_texture(cube: &LutCube) -> ShaderTexture3D {
     }
 }
 
-pub fn tetrahedral_interpolation(cube: &LutCube, rgb: [f32; 3]) -> [f32; 3] {
+pub fn tetrahedral_interpolation(cube: &PayloadLut, rgb: [f32; 3]) -> [f32; 3] {
     let normalized = normalize_sample(cube, rgb);
     let scale = (cube.size - 1) as f32;
     let index = [
@@ -378,7 +347,7 @@ fn build_lut_pipeline_shader_source() -> String {
     LUT_PIPELINE_SHADER_TEMPLATE.replace("__BLUE_NOISE_64X64__", &render_blue_noise_hlsl())
 }
 
-fn normalize_sample(cube: &LutCube, rgb: [f32; 3]) -> [f32; 3] {
+fn normalize_sample(cube: &PayloadLut, rgb: [f32; 3]) -> [f32; 3] {
     std::array::from_fn(|index| {
         let min = cube.domain_min[index];
         let max = cube.domain_max[index];
@@ -394,7 +363,7 @@ fn extend_domain(domain: [f32; 3]) -> [f32; 4] {
     [domain[0], domain[1], domain[2], 0.0]
 }
 
-fn sample_cube(cube: &LutCube, red: u32, green: u32, blue: u32) -> [f32; 3] {
+fn sample_cube(cube: &PayloadLut, red: u32, green: u32, blue: u32) -> [f32; 3] {
     let max = cube.size.saturating_sub(1);
     let red = red.min(max) as usize;
     let green = green.min(max) as usize;
@@ -512,15 +481,12 @@ fn pq_to_linear_bt2100(rgb: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::mem::size_of;
-    use std::path::PathBuf;
-    use std::ptr::addr_of;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use dwm_lut_config::{
-        AdapterLuid, ColorMode, LutAssignment, LutCube, LutManifest, MonitorIdentity, MonitorTarget,
+    use dwm_lut_payload::{
+        AdapterLuid, ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadAssignment,
+        PayloadLut,
     };
+    use std::mem::size_of;
+    use std::ptr::addr_of;
 
     use super::{
         BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -528,8 +494,8 @@ mod tests {
         normalize_sample, pq_to_scrgb, scrgb_to_pq, tetrahedral_interpolation,
     };
 
-    fn identity_cube() -> LutCube {
-        LutCube {
+    fn identity_cube() -> PayloadLut {
+        PayloadLut {
             size: 2,
             domain_min: [0.0, 0.0, 0.0],
             domain_max: [1.0, 1.0, 1.0],
@@ -546,28 +512,21 @@ mod tests {
         }
     }
 
-    fn write_test_cube() -> PathBuf {
-        write_test_cube_contents(
-            "LUT_3D_SIZE 2\n\
-0.0 0.0 0.0\n\
-1.0 0.0 0.0\n\
-0.0 1.0 0.0\n\
-1.0 1.0 0.0\n\
-0.0 0.0 1.0\n\
-1.0 0.0 1.0\n\
-0.0 1.0 1.0\n\
-1.0 1.0 1.0\n",
-        )
-    }
-
-    fn write_test_cube_contents(contents: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be valid")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("dwm-lut-pipeline-{unique}.cube"));
-        fs::write(&path, contents).expect("cube file should be written");
-        path
+    fn payload(
+        assignments: impl IntoIterator<Item = (MonitorIdentity, ColorMode, PayloadLut)>,
+    ) -> HookPayload {
+        HookPayload {
+            assignments: assignments
+                .into_iter()
+                .map(|(identity, color_mode, lut)| PayloadAssignment {
+                    target: MonitorTarget {
+                        identity,
+                        color_mode,
+                    },
+                    lut,
+                })
+                .collect(),
+        }
     }
 
     #[test]
@@ -599,7 +558,7 @@ mod tests {
 
     #[test]
     fn normalize_sample_supports_descending_domain_ranges() {
-        let cube = LutCube {
+        let cube = PayloadLut {
             size: 2,
             domain_min: [1.0, 0.0, 0.0],
             domain_max: [0.0, 1.0, 1.0],
@@ -613,7 +572,7 @@ mod tests {
 
     #[test]
     fn normalize_sample_maps_zero_width_domain_axis_to_zero() {
-        let cube = LutCube {
+        let cube = PayloadLut {
             size: 2,
             domain_min: [0.5, 0.0, 0.0],
             domain_max: [0.5, 1.0, 1.0],
@@ -627,7 +586,6 @@ mod tests {
 
     #[test]
     fn present_plan_selects_sdr_lut_by_runtime_identity() {
-        let cube_path = write_test_cube();
         let identity = MonitorIdentity {
             adapter_luid: AdapterLuid {
                 high_part: 0,
@@ -635,16 +593,8 @@ mod tests {
             },
             target_id: 4357,
         };
-        let mut manifest = LutManifest::empty();
-        manifest.add(LutAssignment {
-            target: MonitorTarget {
-                identity,
-                color_mode: ColorMode::Sdr,
-            },
-            lut_path: cube_path.clone(),
-        });
-
-        let runtime = LutPipeline::load(&manifest).expect("runtime should load");
+        let runtime =
+            LutPipeline::from_payload(&payload([(identity, ColorMode::Sdr, identity_cube())]));
         let plan = runtime
             .build_present_plan_for_monitor_identity(
                 identity,
@@ -670,13 +620,10 @@ mod tests {
         assert_eq!(plan.shader_constants.domain_min, [0.0, 0.0, 0.0, 0.0]);
         assert_eq!(plan.shader_constants.domain_max, [1.0, 1.0, 1.0, 0.0]);
         assert_eq!(plan.dirty_rects.len(), 1);
-
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn present_plan_selects_hdr_lut_for_rgba16_float() {
-        let cube_path = write_test_cube();
         let identity = MonitorIdentity {
             adapter_luid: AdapterLuid {
                 high_part: 0,
@@ -684,16 +631,8 @@ mod tests {
             },
             target_id: 4357,
         };
-        let mut manifest = LutManifest::empty();
-        manifest.add(LutAssignment {
-            target: MonitorTarget {
-                identity,
-                color_mode: ColorMode::Hdr,
-            },
-            lut_path: cube_path.clone(),
-        });
-
-        let runtime = LutPipeline::load(&manifest).expect("runtime should load");
+        let runtime =
+            LutPipeline::from_payload(&payload([(identity, ColorMode::Hdr, identity_cube())]));
         let plan = runtime.build_present_plan_for_monitor_identity(
             identity,
             ClipBox {
@@ -709,14 +648,10 @@ mod tests {
         let plan = plan.expect("HDR plan should exist");
         assert_eq!(plan.format, BackBufferFormat::Rgba16Float);
         assert_eq!(plan.shader_constants.hdr, 1);
-
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
     fn present_plan_selects_monitor_by_runtime_identity() {
-        let cube_path_a = write_test_cube();
-        let cube_path_b = write_test_cube();
         let identity_a = MonitorIdentity {
             adapter_luid: AdapterLuid {
                 high_part: 0,
@@ -731,23 +666,10 @@ mod tests {
             },
             target_id: 4357,
         };
-        let mut manifest = LutManifest::empty();
-        manifest.add(LutAssignment {
-            target: MonitorTarget {
-                identity: identity_a,
-                color_mode: ColorMode::Sdr,
-            },
-            lut_path: cube_path_a.clone(),
-        });
-        manifest.add(LutAssignment {
-            target: MonitorTarget {
-                identity: identity_b,
-                color_mode: ColorMode::Sdr,
-            },
-            lut_path: cube_path_b.clone(),
-        });
-
-        let runtime = LutPipeline::load(&manifest).expect("runtime should load");
+        let runtime = LutPipeline::from_payload(&payload([
+            (identity_a, ColorMode::Sdr, identity_cube()),
+            (identity_b, ColorMode::Sdr, identity_cube()),
+        ]));
         assert_eq!(
             runtime
                 .build_present_plan_for_monitor_identity(
@@ -765,9 +687,6 @@ mod tests {
                 .lut_index,
             1
         );
-
-        let _ = fs::remove_file(cube_path_a);
-        let _ = fs::remove_file(cube_path_b);
     }
 
     #[test]
@@ -788,19 +707,6 @@ mod tests {
 
     #[test]
     fn present_plan_preserves_non_default_domain_for_shader_constants() {
-        let cube_path = write_test_cube_contents(
-            "LUT_3D_SIZE 2\n\
-DOMAIN_MIN -1.0 0.0 0.0\n\
-DOMAIN_MAX 1.0 1.0 1.0\n\
-0.0 0.0 0.0\n\
-1.0 0.0 0.0\n\
-0.0 1.0 0.0\n\
-1.0 1.0 0.0\n\
-0.0 0.0 1.0\n\
-1.0 0.0 1.0\n\
-0.0 1.0 1.0\n\
-1.0 1.0 1.0\n",
-        );
         let identity = MonitorIdentity {
             adapter_luid: AdapterLuid {
                 high_part: 0,
@@ -808,16 +714,9 @@ DOMAIN_MAX 1.0 1.0 1.0\n\
             },
             target_id: 4357,
         };
-        let mut manifest = LutManifest::empty();
-        manifest.add(LutAssignment {
-            target: MonitorTarget {
-                identity,
-                color_mode: ColorMode::Sdr,
-            },
-            lut_path: cube_path.clone(),
-        });
-
-        let runtime = LutPipeline::load(&manifest).expect("runtime should load");
+        let mut lut = identity_cube();
+        lut.domain_min = [-1.0, 0.0, 0.0];
+        let runtime = LutPipeline::from_payload(&payload([(identity, ColorMode::Sdr, lut)]));
         let plan = runtime
             .build_present_plan_for_monitor_identity(
                 identity,
@@ -846,8 +745,6 @@ DOMAIN_MAX 1.0 1.0 1.0\n\
         assert!(runtime.shader.source.contains("blue_noise_64x64"));
         assert!(runtime.shader.source.contains("max_value - min_value"));
         assert!(!runtime.shader.source.contains("safe_range"));
-
-        let _ = fs::remove_file(cube_path);
     }
 
     #[test]
