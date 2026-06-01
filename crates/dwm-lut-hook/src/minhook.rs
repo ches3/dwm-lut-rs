@@ -184,7 +184,7 @@ pub(crate) fn register_plan(
     }
     let owns_initialization = status == MH_OK;
 
-    let registered = match register_plan_with_apis(plan, apis) {
+    let registered = match create_plan_hooks_with_apis(plan, apis) {
         Ok(registered) => registered,
         Err(error) => {
             if !error.has_remove_hook_cleanup_failure() && owns_initialization {
@@ -209,10 +209,52 @@ pub(crate) fn register_plan(
     ))
 }
 
+pub(crate) fn enable_registered_hooks(runtime: &MinHookRuntime) -> Result<(), MinHookError> {
+    enable_created_hooks_with_apis(runtime.apis)
+}
+
+#[cfg(test)]
 pub(crate) fn register_plan_with_apis(
     plan: &HookRegistrationPlan,
     apis: MinHookApis,
 ) -> Result<Vec<RegisteredHook>, MinHookError> {
+    let created = create_hooks_for_plan(plan, apis)?;
+    let status = unsafe { (apis.enable_hook)(MH_ALL_HOOKS) };
+    if status != MH_OK {
+        let cleanup_failures = remove_created_hooks(&apis, &created);
+        return Err(MinHookError::with_cleanup_failures(
+            MinHookOperation::EnableHook,
+            Some(status),
+            cleanup_failures,
+        ));
+    }
+
+    Ok(registered_hooks_from_created(created))
+}
+
+pub(crate) fn create_plan_hooks_with_apis(
+    plan: &HookRegistrationPlan,
+    apis: MinHookApis,
+) -> Result<Vec<RegisteredHook>, MinHookError> {
+    create_hooks_for_plan(plan, apis).map(registered_hooks_from_created)
+}
+
+fn enable_created_hooks_with_apis(apis: MinHookApis) -> Result<(), MinHookError> {
+    let status = unsafe { (apis.enable_hook)(MH_ALL_HOOKS) };
+    if status != MH_OK {
+        return Err(MinHookError::new(
+            MinHookOperation::EnableHook,
+            Some(status),
+        ));
+    }
+
+    Ok(())
+}
+
+fn create_hooks_for_plan(
+    plan: &HookRegistrationPlan,
+    apis: MinHookApis,
+) -> Result<Vec<CreatedHook>, MinHookError> {
     let mut created = Vec::with_capacity(plan.targets.len());
 
     for target in &plan.targets {
@@ -235,23 +277,17 @@ pub(crate) fn register_plan_with_apis(
         });
     }
 
-    let status = unsafe { (apis.enable_hook)(MH_ALL_HOOKS) };
-    if status != MH_OK {
-        let cleanup_failures = remove_created_hooks(&apis, &created);
-        return Err(MinHookError::with_cleanup_failures(
-            MinHookOperation::EnableHook,
-            Some(status),
-            cleanup_failures,
-        ));
-    }
+    Ok(created)
+}
 
-    Ok(created
+fn registered_hooks_from_created(created: Vec<CreatedHook>) -> Vec<RegisteredHook> {
+    created
         .into_iter()
         .map(|hook| RegisteredHook {
             target: hook.target,
             target_address: hook.target_address,
         })
-        .collect())
+        .collect()
 }
 
 pub(crate) fn unregister_registered_hooks(
@@ -1363,8 +1399,9 @@ mod tests {
 
     use super::{
         MinHookCleanupOperation, MinHookOperation, MinHookRuntime, MinHookState,
-        register_plan_with_apis, test_minhook_apis, test_minhook_call_counts,
-        unregister_registered_hooks, unregister_registered_hooks_with_apis,
+        enable_registered_hooks, register_plan, register_plan_with_apis, test_minhook_apis,
+        test_minhook_call_counts, unregister_registered_hooks,
+        unregister_registered_hooks_with_apis,
     };
 
     unsafe extern "system" fn returns_true_overlay_direct_flip(
@@ -1686,6 +1723,22 @@ mod tests {
     #[test]
     fn enable_all_hooks_uses_minhook_null_sentinel() {
         assert_eq!(super::MH_ALL_HOOKS, std::ptr::null_mut());
+    }
+
+    #[test]
+    fn register_plan_defers_hook_enablement() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        super::reset_test_minhook_behavior(None, None, None, None);
+        let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
+
+        let (runtime, registered) =
+            register_plan(&plan).expect("register should create hooks without enabling them");
+        assert_eq!(registered.len(), 1);
+        assert_eq!(test_minhook_call_counts().enable_calls, 0);
+
+        enable_registered_hooks(&runtime).expect("hooks should enable after state is ready");
+        assert_eq!(test_minhook_call_counts().enable_calls, 1);
+        super::PRESENT_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
     }
 
     #[test]

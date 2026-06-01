@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use crate::lut_pipeline::LutPipeline;
 use crate::minhook::{
-    MinHookCleanupOperation, MinHookError, register_plan, unregister_registered_hooks,
+    MinHookCleanupOperation, MinHookError, enable_registered_hooks, register_plan,
+    unregister_registered_hooks,
 };
 use crate::profile::{BuildProfile, HookProfile};
 
@@ -232,6 +233,7 @@ pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) 
 
     match initialize_from_payload(build_profile(), payload) {
         Ok(()) => {
+            crate::desktop_redraw::request_desktop_redraw();
             debug_log!("event=initialize_success");
             InitializeStatus::Success as u32
         }
@@ -443,11 +445,22 @@ fn initialize_from_payload(
 }
 
 fn install_prepared_state(state: HookState) -> Result<(), HookError> {
+    let minhook = state.runtime.minhook;
+    let hooks = state.runtime.hooks.clone();
+    let hook_count = hooks.len();
+
     install_state(state).map_err(|state| {
         rollback_registered_state_hooks(&state);
         HookError::AlreadyInitialized
     })?;
-    crate::desktop_redraw::request_desktop_redraw();
+
+    if let Err(error) = enable_registered_hooks(&minhook) {
+        clear_state_after_shutdown();
+        unregister_registered_hooks(&minhook, &hooks);
+        return Err(HookError::MinHook(error));
+    }
+
+    debug_log!("event=hooks_enabled hook_count={hook_count}");
     Ok(())
 }
 
@@ -538,10 +551,7 @@ fn finalize_initial_state(
 ) -> Result<HookState, HookError> {
     let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
     let (minhook, registered_hooks) = register_plan(&registration_plan)?;
-    debug_log!(
-        "event=hooks_registered hook_count={}",
-        registered_hooks.len()
-    );
+    debug_log!("event=hooks_created hook_count={}", registered_hooks.len());
 
     let overlay_test_mode_address = resolution
         .targets

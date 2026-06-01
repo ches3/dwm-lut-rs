@@ -255,7 +255,6 @@ fn clamp_rect(rect: DirtyRect, width: u32, height: u32) -> Option<DirtyRect> {
     })
 }
 
-#[cfg(not(test))]
 fn bounding_rect(rects: &[DirtyRect]) -> Option<DirtyRect> {
     let first = *rects.first()?;
     Some(rects.iter().skip(1).fold(first, |bounds, rect| DirtyRect {
@@ -278,6 +277,15 @@ fn requires_full_redraw(
             resources_recreated || copy_texture_created || previous != current
         }
     }
+}
+
+fn present_dirty_rect_for_full_redraw(
+    needs_full_redraw: bool,
+    previous_state: RenderTargetState,
+    dirty_rects: &[DirtyRect],
+) -> Option<DirtyRect> {
+    (needs_full_redraw && !matches!(previous_state, RenderTargetState::Bootstrapping))
+        .then(|| bounding_rect(dirty_rects).unwrap())
 }
 
 #[cfg(test)]
@@ -686,6 +694,76 @@ mod tests {
                 right: 1920,
                 bottom: 1080,
             }]
+        );
+    }
+
+    #[test]
+    fn bootstrapping_full_redraw_does_not_expand_present_dirty_rect() {
+        let full_frame_rects = vec![DirtyRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        }];
+
+        assert_eq!(
+            present_dirty_rect_for_full_redraw(
+                true,
+                RenderTargetState::Bootstrapping,
+                &full_frame_rects,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn stable_full_redraw_expands_present_dirty_rect() {
+        let sdr = DrawState {
+            format: BackBufferFormat::Bgra8Unorm,
+            lut_index: 0,
+        };
+        let full_frame_rects = vec![DirtyRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        }];
+
+        assert_eq!(
+            present_dirty_rect_for_full_redraw(
+                true,
+                RenderTargetState::Stable(sdr),
+                &full_frame_rects,
+            ),
+            Some(DirtyRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            })
+        );
+    }
+
+    #[test]
+    fn stable_partial_update_does_not_expand_present_dirty_rect() {
+        let sdr = DrawState {
+            format: BackBufferFormat::Bgra8Unorm,
+            lut_index: 0,
+        };
+        let partial_rects = vec![DirtyRect {
+            left: 10,
+            top: 20,
+            right: 64,
+            bottom: 96,
+        }];
+
+        assert_eq!(
+            present_dirty_rect_for_full_redraw(
+                false,
+                RenderTargetState::Stable(sdr),
+                &partial_rects,
+            ),
+            None
         );
     }
 
@@ -1601,8 +1679,11 @@ mod imp {
                     draw_plan.lut_index,
                 );
             }
-            let present_dirty_rect =
-                needs_full_redraw.then(|| super::bounding_rect(&draw_plan.dirty_rects).unwrap());
+            let present_dirty_rect = super::present_dirty_rect_for_full_redraw(
+                needs_full_redraw,
+                previous_state,
+                &draw_plan.dirty_rects,
+            );
 
             let result = unsafe { resources.draw(frame, &draw_plan) };
             if result {
