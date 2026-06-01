@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::cell::RefCell;
 #[cfg(debug_assertions)]
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -7,579 +5,16 @@ use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use std::mem::{align_of, size_of};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
 #[cfg(debug_assertions)]
 use std::sync::{Mutex, OnceLock};
 
-use crate::profile::{HookProfile, HookTarget};
-use crate::state::HookRegistrationPlan;
+use crate::profile::HookProfile;
 use crate::{ClipBox, DirtyRect, state};
 use dwm_lut_payload::{AdapterLuid, MonitorIdentity};
 
-pub type MhStatus = i32;
-
-pub const MH_OK: MhStatus = 0;
-pub const MH_ERROR_ALREADY_INITIALIZED: MhStatus = 1;
-const MH_ALL_HOOKS: *mut c_void = ptr::null_mut();
-
-pub type MhInitializeApi = unsafe extern "system" fn() -> MhStatus;
-pub type MhUninitializeApi = unsafe extern "system" fn() -> MhStatus;
-pub type MhCreateHookApi = unsafe extern "system" fn(
-    target: *mut c_void,
-    detour: *mut c_void,
-    original: *mut *mut c_void,
-) -> MhStatus;
-pub type MhEnableHookApi = unsafe extern "system" fn(target: *mut c_void) -> MhStatus;
-pub type MhDisableHookApi = unsafe extern "system" fn(target: *mut c_void) -> MhStatus;
-pub type MhRemoveHookApi = unsafe extern "system" fn(target: *mut c_void) -> MhStatus;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MinHookState {
-    pub owns_initialization: bool,
-}
-
-#[derive(Clone, Copy)]
-pub struct MinHookRuntime {
-    pub state: MinHookState,
-    apis: MinHookApis,
-}
-
-impl std::fmt::Debug for MinHookRuntime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MinHookRuntime")
-            .field("state", &self.state)
-            .finish_non_exhaustive()
-    }
-}
-
-impl PartialEq for MinHookRuntime {
-    fn eq(&self, other: &Self) -> bool {
-        self.state == other.state && apis_eq(self.apis, other.apis)
-    }
-}
-
-impl Eq for MinHookRuntime {}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MinHookError {
-    pub(crate) operation: MinHookOperation,
-    status: Option<MhStatus>,
-    cleanup_failures: Vec<MinHookCleanupFailure>,
-}
-
-impl std::fmt::Display for MinHookError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match (self.status, self.cleanup_failures.is_empty()) {
-            (Some(status), true) => write!(
-                f,
-                "{:?} failed with MinHook status {status}",
-                self.operation
-            ),
-            (Some(status), false) => write!(
-                f,
-                "{:?} failed with MinHook status {status}; cleanup also failed for {} hook operation(s)",
-                self.operation,
-                self.cleanup_failures.len()
-            ),
-            (None, true) => write!(f, "{:?} failed", self.operation),
-            (None, false) => write!(
-                f,
-                "{:?} failed; cleanup also failed for {} hook operation(s)",
-                self.operation,
-                self.cleanup_failures.len()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for MinHookError {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MinHookCleanupFailure {
-    pub(crate) operation: MinHookCleanupOperation,
-    pub(crate) target: HookTarget,
-    pub(crate) status: MhStatus,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MinHookCleanupOperation {
-    DisableHook,
-    RemoveHook,
-}
-
-impl MinHookError {
-    pub(crate) fn has_remove_hook_cleanup_failure(&self) -> bool {
-        cleanup_has_remove_hook_failure(&self.cleanup_failures)
-    }
-
-    fn new(operation: MinHookOperation, status: Option<MhStatus>) -> Self {
-        Self {
-            operation,
-            status,
-            cleanup_failures: Vec::new(),
-        }
-    }
-
-    fn with_cleanup_failures(
-        operation: MinHookOperation,
-        status: Option<MhStatus>,
-        cleanup_failures: Vec<MinHookCleanupFailure>,
-    ) -> Self {
-        Self {
-            operation,
-            status,
-            cleanup_failures,
-        }
-    }
-}
-
-fn cleanup_has_remove_hook_failure(failures: &[MinHookCleanupFailure]) -> bool {
-    failures
-        .iter()
-        .any(|failure| failure.operation == MinHookCleanupOperation::RemoveHook)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MinHookOperation {
-    Initialize,
-    CreateHook(HookTarget),
-    EnableHook,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct MinHookApis {
-    pub initialize: MhInitializeApi,
-    pub uninitialize: MhUninitializeApi,
-    pub create_hook: MhCreateHookApi,
-    pub enable_hook: MhEnableHookApi,
-    pub disable_hook: MhDisableHookApi,
-    pub remove_hook: MhRemoveHookApi,
-}
-
-fn apis_eq(left: MinHookApis, right: MinHookApis) -> bool {
-    left.initialize as usize == right.initialize as usize
-        && left.uninitialize as usize == right.uninitialize as usize
-        && left.create_hook as usize == right.create_hook as usize
-        && left.enable_hook as usize == right.enable_hook as usize
-        && left.disable_hook as usize == right.disable_hook as usize
-        && left.remove_hook as usize == right.remove_hook as usize
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RegisteredHook {
-    pub target: HookTarget,
-    pub target_address: usize,
-}
-
-pub(crate) fn register_plan(
-    plan: &HookRegistrationPlan,
-) -> Result<(MinHookRuntime, Vec<RegisteredHook>), MinHookError> {
-    let apis = minhook_apis();
-    let status = unsafe { (apis.initialize)() };
-    if status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED {
-        return Err(MinHookError::new(
-            MinHookOperation::Initialize,
-            Some(status),
-        ));
-    }
-    let owns_initialization = status == MH_OK;
-
-    let registered = match create_plan_hooks_with_apis(plan, apis) {
-        Ok(registered) => registered,
-        Err(error) => {
-            if !error.has_remove_hook_cleanup_failure() && owns_initialization {
-                unsafe {
-                    (apis.uninitialize)();
-                }
-            }
-            // A remove failure means at least one hook may still reference
-            // MinHook state. Keep that state initialized for the process
-            // lifetime instead of tearing down data that may still be used.
-            return Err(error);
-        }
-    };
-    Ok((
-        MinHookRuntime {
-            state: MinHookState {
-                owns_initialization,
-            },
-            apis,
-        },
-        registered,
-    ))
-}
-
-pub(crate) fn enable_registered_hooks(runtime: &MinHookRuntime) -> Result<(), MinHookError> {
-    enable_created_hooks_with_apis(runtime.apis)
-}
-
-#[cfg(test)]
-pub(crate) fn register_plan_with_apis(
-    plan: &HookRegistrationPlan,
-    apis: MinHookApis,
-) -> Result<Vec<RegisteredHook>, MinHookError> {
-    let created = create_hooks_for_plan(plan, apis)?;
-    let status = unsafe { (apis.enable_hook)(MH_ALL_HOOKS) };
-    if status != MH_OK {
-        let cleanup_failures = remove_created_hooks(&apis, &created);
-        return Err(MinHookError::with_cleanup_failures(
-            MinHookOperation::EnableHook,
-            Some(status),
-            cleanup_failures,
-        ));
-    }
-
-    Ok(registered_hooks_from_created(created))
-}
-
-pub(crate) fn create_plan_hooks_with_apis(
-    plan: &HookRegistrationPlan,
-    apis: MinHookApis,
-) -> Result<Vec<RegisteredHook>, MinHookError> {
-    create_hooks_for_plan(plan, apis).map(registered_hooks_from_created)
-}
-
-fn enable_created_hooks_with_apis(apis: MinHookApis) -> Result<(), MinHookError> {
-    let status = unsafe { (apis.enable_hook)(MH_ALL_HOOKS) };
-    if status != MH_OK {
-        return Err(MinHookError::new(
-            MinHookOperation::EnableHook,
-            Some(status),
-        ));
-    }
-
-    Ok(())
-}
-
-fn create_hooks_for_plan(
-    plan: &HookRegistrationPlan,
-    apis: MinHookApis,
-) -> Result<Vec<CreatedHook>, MinHookError> {
-    let mut created = Vec::with_capacity(plan.targets.len());
-
-    for target in &plan.targets {
-        let detour = detour_for_target(target.target);
-        let original_slot = original_slot_for_target(target.target);
-        let target_address = target.address as *mut c_void;
-        let status = unsafe { (apis.create_hook)(target_address, detour, original_slot) };
-        if status != MH_OK {
-            let cleanup_failures = remove_created_hooks(&apis, &created);
-            return Err(MinHookError::with_cleanup_failures(
-                MinHookOperation::CreateHook(target.target),
-                Some(status),
-                cleanup_failures,
-            ));
-        }
-
-        created.push(CreatedHook {
-            target: target.target,
-            target_address: target.address,
-        });
-    }
-
-    Ok(created)
-}
-
-fn registered_hooks_from_created(created: Vec<CreatedHook>) -> Vec<RegisteredHook> {
-    created
-        .into_iter()
-        .map(|hook| RegisteredHook {
-            target: hook.target,
-            target_address: hook.target_address,
-        })
-        .collect()
-}
-
-pub(crate) fn unregister_registered_hooks(
-    runtime: &MinHookRuntime,
-    hooks: &[RegisteredHook],
-) -> Vec<MinHookCleanupFailure> {
-    let failures = unregister_registered_hooks_with_apis(hooks, runtime.apis);
-    if !cleanup_has_remove_hook_failure(&failures) && runtime.state.owns_initialization {
-        unsafe {
-            (runtime.apis.uninitialize)();
-        }
-    }
-    failures
-}
-
-pub(crate) fn unregister_registered_hooks_with_apis(
-    hooks: &[RegisteredHook],
-    apis: MinHookApis,
-) -> Vec<MinHookCleanupFailure> {
-    let mut failures = Vec::new();
-    for hook in hooks.iter().rev() {
-        let status = unsafe { (apis.disable_hook)(hook.target_address as *mut c_void) };
-        if status != MH_OK {
-            failures.push(MinHookCleanupFailure {
-                operation: MinHookCleanupOperation::DisableHook,
-                target: hook.target,
-                status,
-            });
-        }
-    }
-
-    for hook in hooks.iter().rev() {
-        let status = unsafe { (apis.remove_hook)(hook.target_address as *mut c_void) };
-        if status != MH_OK {
-            failures.push(MinHookCleanupFailure {
-                operation: MinHookCleanupOperation::RemoveHook,
-                target: hook.target,
-                status,
-            });
-            continue;
-        }
-        original_pointer_for_target(hook.target).store(ptr::null_mut(), Ordering::Release);
-    }
-
-    failures
-}
-
-struct CreatedHook {
-    target: HookTarget,
-    target_address: usize,
-}
-
-fn remove_created_hooks(apis: &MinHookApis, created: &[CreatedHook]) -> Vec<MinHookCleanupFailure> {
-    let mut failures = Vec::new();
-    for hook in created.iter().rev() {
-        let status = unsafe { (apis.remove_hook)(hook.target_address as *mut c_void) };
-        if status != MH_OK {
-            failures.push(MinHookCleanupFailure {
-                operation: MinHookCleanupOperation::RemoveHook,
-                target: hook.target,
-                status,
-            });
-            continue;
-        }
-        original_pointer_for_target(hook.target).store(ptr::null_mut(), Ordering::Release);
-    }
-    failures
-}
-
-fn minhook_apis() -> MinHookApis {
-    #[cfg(not(test))]
-    {
-        MinHookApis {
-            initialize: minhook_sys::MH_Initialize,
-            uninitialize: minhook_sys::MH_Uninitialize,
-            create_hook: minhook_sys::MH_CreateHook,
-            enable_hook: minhook_sys::MH_EnableHook,
-            disable_hook: minhook_sys::MH_DisableHook,
-            remove_hook: minhook_sys::MH_RemoveHook,
-        }
-    }
-
-    #[cfg(test)]
-    {
-        test_minhook_apis()
-    }
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct TestMinHookBehavior {
-    initialize_calls: usize,
-    uninitialize_calls: usize,
-    create_calls: usize,
-    enable_calls: usize,
-    disable_calls: usize,
-    remove_calls: usize,
-    create_fail_on: Option<usize>,
-    enable_fail_on: Option<usize>,
-    disable_fail_on: Option<usize>,
-    remove_fail_on: Option<usize>,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TestMinHookCallCounts {
-    uninitialize_calls: usize,
-    create_calls: usize,
-    enable_calls: usize,
-    disable_calls: usize,
-    remove_calls: usize,
-}
-
-#[cfg(test)]
-thread_local! {
-    static TEST_MINHOOK_BEHAVIOR: RefCell<TestMinHookBehavior> =
-        RefCell::new(TestMinHookBehavior::default());
-}
-
-#[cfg(test)]
-pub(crate) fn reset_test_minhook_behavior(
-    create_fail_on: Option<usize>,
-    enable_fail_on: Option<usize>,
-    disable_fail_on: Option<usize>,
-    remove_fail_on: Option<usize>,
-) {
-    TEST_MINHOOK_BEHAVIOR.with(|behavior| {
-        *behavior.borrow_mut() = TestMinHookBehavior {
-            create_fail_on,
-            enable_fail_on,
-            disable_fail_on,
-            remove_fail_on,
-            ..TestMinHookBehavior::default()
-        };
-    });
-}
-
-#[cfg(test)]
-pub(crate) fn reset_test_original_slots() {
-    PRESENT_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    OVERLAYS_ENABLED_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    WINDOW_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    COMP_VISUAL_PROMOTION_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-}
-
-#[cfg(test)]
-fn set_test_minhook_cleanup_failures(
-    disable_fail_on: Option<usize>,
-    remove_fail_on: Option<usize>,
-) {
-    TEST_MINHOOK_BEHAVIOR.with(|behavior| {
-        let mut behavior = behavior.borrow_mut();
-        behavior.disable_fail_on = disable_fail_on;
-        behavior.remove_fail_on = remove_fail_on;
-    });
-}
-
-#[cfg(test)]
-fn test_minhook_call_counts() -> TestMinHookCallCounts {
-    TEST_MINHOOK_BEHAVIOR.with(|behavior| {
-        let behavior = behavior.borrow();
-        TestMinHookCallCounts {
-            uninitialize_calls: behavior.uninitialize_calls,
-            create_calls: behavior.create_calls,
-            enable_calls: behavior.enable_calls,
-            disable_calls: behavior.disable_calls,
-            remove_calls: behavior.remove_calls,
-        }
-    })
-}
-
-#[cfg(test)]
-fn test_minhook_apis() -> MinHookApis {
-    MinHookApis {
-        initialize: test_initialize,
-        uninitialize: test_uninitialize,
-        create_hook: test_create_hook,
-        enable_hook: test_enable_hook,
-        disable_hook: test_disable_hook,
-        remove_hook: test_remove_hook,
-    }
-}
-
-#[cfg(test)]
-unsafe extern "system" fn test_initialize() -> MhStatus {
-    TEST_MINHOOK_BEHAVIOR.with(|behavior| {
-        behavior.borrow_mut().initialize_calls += 1;
-    });
-    MH_OK
-}
-
-#[cfg(test)]
-unsafe extern "system" fn test_uninitialize() -> MhStatus {
-    TEST_MINHOOK_BEHAVIOR.with(|behavior| {
-        behavior.borrow_mut().uninitialize_calls += 1;
-    });
-    MH_OK
-}
-
-#[cfg(test)]
-unsafe extern "system" fn test_create_hook(
-    target: *mut c_void,
-    _detour: *mut c_void,
-    original: *mut *mut c_void,
-) -> MhStatus {
-    let status = TEST_MINHOOK_BEHAVIOR.with(|behavior| {
-        let mut behavior = behavior.borrow_mut();
-        behavior.create_calls += 1;
-        if behavior.create_fail_on == Some(behavior.create_calls) {
-            -1
-        } else {
-            MH_OK
-        }
-    });
-    if status != MH_OK {
-        return status;
-    }
-    unsafe {
-        *original = target;
-    }
-    MH_OK
-}
-
-#[cfg(test)]
-unsafe extern "system" fn test_enable_hook(_target: *mut c_void) -> MhStatus {
-    let status = TEST_MINHOOK_BEHAVIOR.with(|behavior| {
-        let mut behavior = behavior.borrow_mut();
-        behavior.enable_calls += 1;
-        if behavior.enable_fail_on == Some(behavior.enable_calls) {
-            -2
-        } else {
-            MH_OK
-        }
-    });
-    if status != MH_OK {
-        return status;
-    }
-    MH_OK
-}
-
-#[cfg(test)]
-unsafe extern "system" fn test_disable_hook(_target: *mut c_void) -> MhStatus {
-    let status = TEST_MINHOOK_BEHAVIOR.with(|behavior| {
-        let mut behavior = behavior.borrow_mut();
-        behavior.disable_calls += 1;
-        if behavior.disable_fail_on == Some(behavior.disable_calls) {
-            -3
-        } else {
-            MH_OK
-        }
-    });
-    if status != MH_OK {
-        return status;
-    }
-    MH_OK
-}
-
-#[cfg(test)]
-unsafe extern "system" fn test_remove_hook(_target: *mut c_void) -> MhStatus {
-    let status = TEST_MINHOOK_BEHAVIOR.with(|behavior| {
-        let mut behavior = behavior.borrow_mut();
-        behavior.remove_calls += 1;
-        if behavior.remove_fail_on == Some(behavior.remove_calls) {
-            -4
-        } else {
-            MH_OK
-        }
-    });
-    if status != MH_OK {
-        return status;
-    }
-    MH_OK
-}
+use super::detours;
 
 type PresentOriginal = unsafe extern "system" fn(usize, usize, u32, usize, i32, usize, u8) -> i64;
-type ForwardBool1 = unsafe extern "system" fn(usize) -> u8;
-type ForwardBool3 = unsafe extern "system" fn(usize, usize, u8) -> u8;
-type ForwardOverlayDirectFlip =
-    unsafe extern "system" fn(usize, usize, usize, usize, u32, u8) -> u8;
-type ForwardCompVisual = unsafe extern "system" fn(usize, usize, usize) -> u8;
-
-static PRESENT_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static OVERLAYS_ENABLED_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static WINDOW_DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL: AtomicPtr<c_void> =
-    AtomicPtr::new(ptr::null_mut());
-static COMP_VISUAL_PROMOTION_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 const MAX_DIRTY_RECTS: usize = 4096;
 const OVERLAY_SWAP_CHAIN_ADAPTER_LUID_LOW_OFFSET: usize = 0x34;
@@ -807,86 +242,6 @@ const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
 const PAGE_GUARD: u32 = 0x100;
 const PAGE_PROTECTION_MASK: u32 = 0xff;
-
-fn original_pointer_for_target(target: HookTarget) -> &'static AtomicPtr<c_void> {
-    match target {
-        HookTarget::Present => &PRESENT_ORIGINAL,
-        HookTarget::IsCandidateDirectFlipCompatible => &DIRECT_FLIP_ORIGINAL,
-        HookTarget::OverlaysEnabled => &OVERLAYS_ENABLED_ORIGINAL,
-        HookTarget::WindowContextIsCandidateDirectFlipCompatible => &WINDOW_DIRECT_FLIP_ORIGINAL,
-        HookTarget::CompSwapChainIsCandidateDirectFlipCompatible => {
-            &COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL
-        }
-        HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible => {
-            &COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL
-        }
-        HookTarget::CompVisualIsCandidateForPromotion => &COMP_VISUAL_PROMOTION_ORIGINAL,
-        HookTarget::OverlayTestMode => unreachable!("OverlayTestMode is not a function hook"),
-    }
-}
-
-fn original_slot_for_target(target: HookTarget) -> *mut *mut c_void {
-    original_pointer_for_target(target).as_ptr()
-}
-
-fn detour_for_target(target: HookTarget) -> *mut c_void {
-    match target {
-        HookTarget::Present => present_detour as *mut c_void,
-        HookTarget::IsCandidateDirectFlipCompatible => direct_flip_detour as *mut c_void,
-        HookTarget::OverlaysEnabled => overlays_enabled_detour as *mut c_void,
-        HookTarget::WindowContextIsCandidateDirectFlipCompatible => {
-            window_direct_flip_detour as *mut c_void
-        }
-        HookTarget::CompSwapChainIsCandidateDirectFlipCompatible => {
-            comp_swap_chain_direct_flip_detour as *mut c_void
-        }
-        HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible => {
-            comp_swap_chain_independent_flip_detour as *mut c_void
-        }
-        HookTarget::CompVisualIsCandidateForPromotion => {
-            comp_visual_promotion_detour as *mut c_void
-        }
-        HookTarget::OverlayTestMode => unreachable!("OverlayTestMode is not a function hook"),
-    }
-}
-
-unsafe fn forward_overlay_direct_flip(
-    slot: &AtomicPtr<c_void>,
-    this: usize,
-    a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: u32,
-    a6: u8,
-) -> u8 {
-    let original = slot.load(Ordering::Acquire);
-    if original.is_null() {
-        return 0;
-    }
-
-    let original: ForwardOverlayDirectFlip = unsafe { std::mem::transmute(original) };
-    unsafe { original(this, a2, a3, a4, a5, a6) }
-}
-
-unsafe fn forward_bool3(slot: &AtomicPtr<c_void>, this: usize, a2: usize, a3: u8) -> u8 {
-    let original = slot.load(Ordering::Acquire);
-    if original.is_null() {
-        return 0;
-    }
-
-    let original: ForwardBool3 = unsafe { std::mem::transmute(original) };
-    unsafe { original(this, a2, a3) }
-}
-
-unsafe fn forward_bool1(slot: &AtomicPtr<c_void>, this: usize) -> u8 {
-    let original = slot.load(Ordering::Acquire);
-    if original.is_null() {
-        return 0;
-    }
-
-    let original: ForwardBool1 = unsafe { std::mem::transmute(original) };
-    unsafe { original(this) }
-}
 
 unsafe fn collect_present_inputs(
     this: usize,
@@ -1189,7 +544,7 @@ fn deactivate_present_context(context_address: usize) {
     );
 }
 
-unsafe extern "system" fn present_detour(
+pub(super) unsafe extern "system" fn present_detour(
     this: usize,
     overlay_swap_chain: usize,
     a3: u32,
@@ -1198,7 +553,7 @@ unsafe extern "system" fn present_detour(
     a6: usize,
     a7: u8,
 ) -> i64 {
-    let original = PRESENT_ORIGINAL.load(Ordering::Acquire);
+    let original = detours::present_original();
     if original.is_null() {
         return 0;
     }
@@ -1310,73 +665,6 @@ fn full_present_rect_vec(
     (rect_vec_storage as *const RectVec) as usize
 }
 
-fn evaluate_bool_detour(original: u8, evaluate: impl FnOnce(bool) -> Option<bool>) -> u8 {
-    if state::is_shutting_down() {
-        return original;
-    }
-    bool_to_u8(evaluate(original != 0).unwrap_or(original != 0))
-}
-
-unsafe extern "system" fn direct_flip_detour(
-    this: usize,
-    a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: u32,
-    a6: u8,
-) -> u8 {
-    let original =
-        unsafe { forward_overlay_direct_flip(&DIRECT_FLIP_ORIGINAL, this, a2, a3, a4, a5, a6) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_direct_flip_compatible(this, original)
-    })
-}
-
-unsafe extern "system" fn overlays_enabled_detour(this: usize) -> u8 {
-    let original = unsafe { forward_bool1(&OVERLAYS_ENABLED_ORIGINAL, this) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_overlays_enabled(this, original)
-    })
-}
-
-unsafe extern "system" fn window_direct_flip_detour(this: usize, a2: usize, a3: u8) -> u8 {
-    let original = unsafe { forward_bool3(&WINDOW_DIRECT_FLIP_ORIGINAL, this, a2, a3) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_window_context_direct_flip_compatible(original)
-    })
-}
-
-unsafe extern "system" fn comp_swap_chain_direct_flip_detour(this: usize, a2: usize, a3: u8) -> u8 {
-    let original = unsafe { forward_bool3(&COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL, this, a2, a3) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_comp_swap_chain_direct_flip_compatible(original)
-    })
-}
-
-unsafe extern "system" fn comp_swap_chain_independent_flip_detour(this: usize) -> u8 {
-    let original = unsafe { forward_bool1(&COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL, this) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_comp_swap_chain_independent_flip_compatible(original)
-    })
-}
-
-unsafe extern "system" fn comp_visual_promotion_detour(this: usize, a2: usize, a3: usize) -> u8 {
-    let original = COMP_VISUAL_PROMOTION_ORIGINAL.load(Ordering::Acquire);
-    if original.is_null() {
-        return 0;
-    }
-
-    let original_fn: ForwardCompVisual = unsafe { std::mem::transmute(original) };
-    let original = unsafe { original_fn(this, a2, a3) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_comp_visual_candidate_for_promotion(original)
-    })
-}
-
-const fn bool_to_u8(value: bool) -> u8 {
-    value as u8
-}
-
 #[cfg(test)]
 mod tests {
     use std::ffi::c_void;
@@ -1391,41 +679,11 @@ mod tests {
 
     use crate::profile::HookTarget;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
-    use crate::state::{self, HookRegistrationPlan, HookRegistrationTarget};
+    use crate::state::{self};
     use crate::{
         BackBufferFormat, BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM,
         DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect, HookProfile, SignatureLocator,
     };
-
-    use super::{
-        MinHookCleanupOperation, MinHookOperation, MinHookRuntime, MinHookState,
-        enable_registered_hooks, register_plan, register_plan_with_apis, test_minhook_apis,
-        test_minhook_call_counts, unregister_registered_hooks,
-        unregister_registered_hooks_with_apis,
-    };
-
-    unsafe extern "system" fn returns_true_overlay_direct_flip(
-        _a0: usize,
-        _a1: usize,
-        _a2: usize,
-        _a3: usize,
-        _a4: u32,
-        _a5: u8,
-    ) -> u8 {
-        1
-    }
-
-    unsafe extern "system" fn returns_true_1(_a0: usize) -> u8 {
-        1
-    }
-
-    unsafe extern "system" fn returns_true_3(_a0: usize, _a1: usize, _a2: u8) -> u8 {
-        1
-    }
-
-    unsafe extern "system" fn returns_true_comp_visual(_a0: usize, _a1: usize, _a2: usize) -> u8 {
-        1
-    }
 
     static LAST_ORIGINAL_PRESENT_RECTS: Mutex<Option<Vec<DirtyRect>>> = Mutex::new(None);
 
@@ -1458,38 +716,6 @@ mod tests {
     }
 
     static CONTROLLED_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn plan_with_targets(targets: &[(HookTarget, usize)]) -> HookRegistrationPlan {
-        HookRegistrationPlan {
-            module_name: "dwmcore.dll",
-            module_base_address: 0x1800_0000,
-            module_size: 0x20_0000,
-            targets: targets
-                .iter()
-                .map(|(target, address)| HookRegistrationTarget {
-                    target: *target,
-                    capture_key: "test",
-                    address: *address,
-                })
-                .collect(),
-        }
-    }
-
-    fn reset_controlled_behavior(create_fail_on: Option<usize>, enable_fail_on: Option<usize>) {
-        super::reset_test_original_slots();
-        super::reset_test_minhook_behavior(create_fail_on, enable_fail_on, None, None);
-    }
-
-    fn set_controlled_cleanup_failures(
-        disable_fail_on: Option<usize>,
-        remove_fail_on: Option<usize>,
-    ) {
-        let counts = test_minhook_call_counts();
-        super::set_test_minhook_cleanup_failures(
-            disable_fail_on.map(|call| counts.disable_calls + call),
-            remove_fail_on.map(|call| counts.remove_calls + call),
-        );
-    }
 
     fn test_monitor_identity() -> MonitorIdentity {
         MonitorIdentity {
@@ -1690,348 +916,6 @@ mod tests {
         fn rect_vec_address(&self) -> usize {
             (&self.rect_vec as *const super::RectVec) as usize
         }
-    }
-
-    #[test]
-    fn registration_maps_targets_to_detours_and_original_slots() {
-        let plan = plan_with_targets(&[
-            (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
-        ]);
-
-        super::reset_test_minhook_behavior(None, None, None, None);
-        let registered = register_plan_with_apis(&plan, test_minhook_apis())
-            .expect("registration should succeed");
-
-        assert_eq!(registered.len(), 2);
-        assert_eq!(registered[0].target, HookTarget::Present);
-        assert_eq!(registered[0].target_address, 0x1800_1000);
-        assert_eq!(
-            super::PRESENT_ORIGINAL.load(Ordering::Acquire) as usize,
-            0x1800_1000
-        );
-        assert_eq!(registered[1].target, HookTarget::OverlaysEnabled);
-        assert_eq!(registered[1].target_address, 0x1800_2000);
-        assert_eq!(
-            super::OVERLAYS_ENABLED_ORIGINAL.load(Ordering::Acquire) as usize,
-            0x1800_2000
-        );
-        super::PRESENT_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
-        super::OVERLAYS_ENABLED_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
-    }
-
-    #[test]
-    fn enable_all_hooks_uses_minhook_null_sentinel() {
-        assert_eq!(super::MH_ALL_HOOKS, std::ptr::null_mut());
-    }
-
-    #[test]
-    fn register_plan_defers_hook_enablement() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        super::reset_test_minhook_behavior(None, None, None, None);
-        let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
-
-        let (runtime, registered) =
-            register_plan(&plan).expect("register should create hooks without enabling them");
-        assert_eq!(registered.len(), 1);
-        assert_eq!(test_minhook_call_counts().enable_calls, 0);
-
-        enable_registered_hooks(&runtime).expect("hooks should enable after state is ready");
-        assert_eq!(test_minhook_call_counts().enable_calls, 1);
-        super::PRESENT_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
-    }
-
-    #[test]
-    fn create_failure_removes_previously_created_hooks() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        reset_controlled_behavior(Some(3), None);
-        let plan = plan_with_targets(&[
-            (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
-            (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
-        ]);
-
-        let error = register_plan_with_apis(&plan, test_minhook_apis())
-            .expect_err("third create should fail");
-
-        assert_eq!(
-            error.operation,
-            MinHookOperation::CreateHook(HookTarget::CompVisualIsCandidateForPromotion)
-        );
-        assert!(error.cleanup_failures.is_empty());
-        let calls = test_minhook_call_counts();
-        assert_eq!(calls.create_calls, 3);
-        assert_eq!(calls.enable_calls, 0);
-        assert_eq!(calls.disable_calls, 0);
-        assert_eq!(calls.remove_calls, 2);
-    }
-
-    #[test]
-    fn enable_failure_removes_created_hooks() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        reset_controlled_behavior(None, Some(1));
-        let plan = plan_with_targets(&[
-            (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
-            (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
-        ]);
-
-        let error =
-            register_plan_with_apis(&plan, test_minhook_apis()).expect_err("enable should fail");
-
-        assert_eq!(error.operation, MinHookOperation::EnableHook);
-        assert!(error.cleanup_failures.is_empty());
-        let calls = test_minhook_call_counts();
-        assert_eq!(calls.create_calls, 3);
-        assert_eq!(calls.enable_calls, 1);
-        assert_eq!(calls.disable_calls, 0);
-        assert_eq!(calls.remove_calls, 3);
-    }
-
-    #[test]
-    fn create_failure_reports_cleanup_remove_failure() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        reset_controlled_behavior(Some(3), None);
-        set_controlled_cleanup_failures(None, Some(1));
-        let plan = plan_with_targets(&[
-            (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
-            (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
-        ]);
-
-        let error = register_plan_with_apis(&plan, test_minhook_apis())
-            .expect_err("third create should fail");
-
-        assert_eq!(
-            error.operation,
-            MinHookOperation::CreateHook(HookTarget::CompVisualIsCandidateForPromotion)
-        );
-        assert_eq!(error.cleanup_failures.len(), 1);
-        assert_eq!(
-            error.cleanup_failures[0].operation,
-            MinHookCleanupOperation::RemoveHook
-        );
-        assert_eq!(
-            error.cleanup_failures[0].target,
-            HookTarget::OverlaysEnabled
-        );
-        assert_eq!(error.cleanup_failures[0].status, -4);
-        assert!(super::PRESENT_ORIGINAL.load(Ordering::Acquire).is_null());
-        assert_eq!(
-            super::OVERLAYS_ENABLED_ORIGINAL.load(Ordering::Acquire) as usize,
-            0x1800_2000
-        );
-        super::OVERLAYS_ENABLED_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
-    }
-
-    #[test]
-    fn enable_failure_keeps_original_slot_when_cleanup_remove_fails() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        reset_controlled_behavior(None, Some(1));
-        set_controlled_cleanup_failures(None, Some(1));
-        let plan = plan_with_targets(&[
-            (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
-            (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
-        ]);
-
-        let error =
-            register_plan_with_apis(&plan, test_minhook_apis()).expect_err("enable should fail");
-
-        assert_eq!(error.operation, MinHookOperation::EnableHook);
-        assert_eq!(error.cleanup_failures.len(), 1);
-        assert_eq!(
-            error.cleanup_failures[0].operation,
-            MinHookCleanupOperation::RemoveHook
-        );
-        assert_eq!(
-            error.cleanup_failures[0].target,
-            HookTarget::CompVisualIsCandidateForPromotion
-        );
-        assert_eq!(error.cleanup_failures[0].status, -4);
-        assert!(super::PRESENT_ORIGINAL.load(Ordering::Acquire).is_null());
-        assert!(
-            super::OVERLAYS_ENABLED_ORIGINAL
-                .load(Ordering::Acquire)
-                .is_null()
-        );
-        assert_eq!(
-            super::COMP_VISUAL_PROMOTION_ORIGINAL.load(Ordering::Acquire) as usize,
-            0x1800_3000
-        );
-        super::COMP_VISUAL_PROMOTION_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
-    }
-
-    #[test]
-    fn unregister_disables_and_removes_registered_hooks() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        reset_controlled_behavior(None, None);
-        let plan = plan_with_targets(&[
-            (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
-        ]);
-
-        let registered = register_plan_with_apis(&plan, test_minhook_apis())
-            .expect("registration should succeed");
-        let cleanup_failures =
-            unregister_registered_hooks_with_apis(&registered, test_minhook_apis());
-
-        let calls = test_minhook_call_counts();
-        assert_eq!(calls.create_calls, 2);
-        assert_eq!(calls.enable_calls, 1);
-        assert_eq!(calls.disable_calls, 2);
-        assert_eq!(calls.remove_calls, 2);
-        assert!(cleanup_failures.is_empty());
-        assert!(super::PRESENT_ORIGINAL.load(Ordering::Acquire).is_null());
-        assert!(
-            super::OVERLAYS_ENABLED_ORIGINAL
-                .load(Ordering::Acquire)
-                .is_null()
-        );
-    }
-
-    #[test]
-    fn unregister_keeps_original_slot_when_remove_fails() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        reset_controlled_behavior(None, None);
-        set_controlled_cleanup_failures(None, Some(1));
-        let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
-
-        let registered = register_plan_with_apis(&plan, test_minhook_apis())
-            .expect("registration should succeed");
-        let cleanup_failures =
-            unregister_registered_hooks_with_apis(&registered, test_minhook_apis());
-
-        assert_eq!(cleanup_failures.len(), 1);
-        assert_eq!(
-            cleanup_failures[0].operation,
-            MinHookCleanupOperation::RemoveHook
-        );
-        assert_eq!(cleanup_failures[0].target, HookTarget::Present);
-        assert_eq!(
-            super::PRESENT_ORIGINAL.load(Ordering::Acquire) as usize,
-            0x1800_1000
-        );
-        super::PRESENT_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
-    }
-
-    #[test]
-    fn unregister_keeps_minhook_runtime_when_cleanup_fails() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        reset_controlled_behavior(None, None);
-        set_controlled_cleanup_failures(None, Some(1));
-        let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
-        let apis = test_minhook_apis();
-        let registered = register_plan_with_apis(&plan, apis).expect("registration should succeed");
-        let runtime = MinHookRuntime {
-            state: MinHookState {
-                owns_initialization: true,
-            },
-            apis,
-        };
-
-        let cleanup_failures = unregister_registered_hooks(&runtime, &registered);
-
-        assert_eq!(cleanup_failures.len(), 1);
-        assert_eq!(test_minhook_call_counts().uninitialize_calls, 0);
-        super::PRESENT_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
-    }
-
-    #[test]
-    fn unregister_uninitializes_when_only_disable_cleanup_fails() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        reset_controlled_behavior(None, None);
-        set_controlled_cleanup_failures(Some(1), None);
-        let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
-        let apis = test_minhook_apis();
-        let registered = register_plan_with_apis(&plan, apis).expect("registration should succeed");
-        let runtime = MinHookRuntime {
-            state: MinHookState {
-                owns_initialization: true,
-            },
-            apis,
-        };
-
-        let cleanup_failures = unregister_registered_hooks(&runtime, &registered);
-
-        assert_eq!(cleanup_failures.len(), 1);
-        assert_eq!(
-            cleanup_failures[0].operation,
-            MinHookCleanupOperation::DisableHook
-        );
-        assert_eq!(test_minhook_call_counts().uninitialize_calls, 1);
-        assert!(super::PRESENT_ORIGINAL.load(Ordering::Acquire).is_null());
-    }
-
-    #[test]
-    fn context_detours_override_original_return_value_when_context_is_active() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        initialize_test_state();
-        activate_context(0x1234);
-        super::DIRECT_FLIP_ORIGINAL.store(
-            returns_true_overlay_direct_flip as *mut c_void,
-            Ordering::Release,
-        );
-        super::OVERLAYS_ENABLED_ORIGINAL.store(returns_true_1 as *mut c_void, Ordering::Release);
-
-        assert_eq!(
-            unsafe { super::direct_flip_detour(0x1234, 0, 0, 0, 0, 0) },
-            0
-        );
-        assert_eq!(unsafe { super::overlays_enabled_detour(0x1234) }, 0);
-        assert!(
-            state::lut_bypass_runtime()
-                .and_then(|runtime| runtime.context(0x1234).cloned())
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn global_promotion_detours_forward_original_return_value() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        state::reset_state_for_tests();
-        super::WINDOW_DIRECT_FLIP_ORIGINAL.store(returns_true_3 as *mut c_void, Ordering::Release);
-        super::COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL
-            .store(returns_true_3 as *mut c_void, Ordering::Release);
-        super::COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL
-            .store(returns_true_1 as *mut c_void, Ordering::Release);
-        super::COMP_VISUAL_PROMOTION_ORIGINAL
-            .store(returns_true_comp_visual as *mut c_void, Ordering::Release);
-
-        assert_eq!(unsafe { super::window_direct_flip_detour(0, 0, 0) }, 1);
-        assert_eq!(
-            unsafe { super::comp_swap_chain_direct_flip_detour(0, 0, 0) },
-            1
-        );
-        assert_eq!(
-            unsafe { super::comp_swap_chain_independent_flip_detour(0) },
-            1
-        );
-        assert_eq!(unsafe { super::comp_visual_promotion_detour(0, 0, 0) }, 1);
-    }
-
-    #[test]
-    fn global_promotion_detours_block_when_lut_assignments_exist() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        initialize_test_state();
-        super::WINDOW_DIRECT_FLIP_ORIGINAL.store(returns_true_3 as *mut c_void, Ordering::Release);
-        super::COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL
-            .store(returns_true_3 as *mut c_void, Ordering::Release);
-        super::COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL
-            .store(returns_true_1 as *mut c_void, Ordering::Release);
-        super::COMP_VISUAL_PROMOTION_ORIGINAL
-            .store(returns_true_comp_visual as *mut c_void, Ordering::Release);
-
-        assert_eq!(unsafe { super::window_direct_flip_detour(0, 0, 0) }, 0);
-        assert_eq!(
-            unsafe { super::comp_swap_chain_direct_flip_detour(0, 0, 0) },
-            0
-        );
-        assert_eq!(
-            unsafe { super::comp_swap_chain_independent_flip_detour(0) },
-            0
-        );
-        assert_eq!(unsafe { super::comp_visual_promotion_detour(0, 0, 0) }, 0);
     }
 
     #[test]
@@ -2239,7 +1123,8 @@ mod tests {
             false,
         );
         crate::d3d11_renderer::set_test_render_present_lut_result(true);
-        super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+        super::super::detours::original_pointer_for_target(HookTarget::Present)
+            .store(returns_present_status as *mut c_void, Ordering::Release);
 
         assert_eq!(
             unsafe {
@@ -2305,7 +1190,8 @@ mod tests {
         crate::d3d11_renderer::set_test_render_present_dxgi_format(Some(
             DXGI_FORMAT_R16G16B16A16_FLOAT,
         ));
-        super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+        super::super::detours::original_pointer_for_target(HookTarget::Present)
+            .store(returns_present_status as *mut c_void, Ordering::Release);
 
         assert_eq!(
             unsafe {
@@ -2364,7 +1250,8 @@ mod tests {
             true,
             Some(full_rect),
         );
-        super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+        super::super::detours::original_pointer_for_target(HookTarget::Present)
+            .store(returns_present_status as *mut c_void, Ordering::Release);
 
         assert_eq!(
             unsafe {
@@ -2408,7 +1295,8 @@ mod tests {
             false,
         );
         activate_context(fake.context_address());
-        super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+        super::super::detours::original_pointer_for_target(HookTarget::Present)
+            .store(returns_present_status as *mut c_void, Ordering::Release);
 
         assert_eq!(
             unsafe {
@@ -2488,7 +1376,8 @@ mod tests {
             true,
         );
         activate_context(fake.context_address());
-        super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+        super::super::detours::original_pointer_for_target(HookTarget::Present)
+            .store(returns_present_status as *mut c_void, Ordering::Release);
         crate::d3d11_renderer::set_test_render_present_lut_result(true);
 
         assert_eq!(
@@ -2521,7 +1410,8 @@ mod tests {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         initialize_test_state();
         activate_context(0x1234);
-        super::PRESENT_ORIGINAL.store(returns_present_status as *mut c_void, Ordering::Release);
+        super::super::detours::original_pointer_for_target(HookTarget::Present)
+            .store(returns_present_status as *mut c_void, Ordering::Release);
 
         assert_eq!(
             unsafe { super::present_detour(0x1234, 0, 0, 0, 0, 0, 0) },
