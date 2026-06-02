@@ -565,7 +565,6 @@ pub(crate) fn reset_state_for_tests() {
     LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_IDLE);
     crate::bootstrap::reset_initialization_guard_for_tests();
     crate::d3d11_renderer::reset_test_render_present_lut_result();
-    crate::desktop_redraw::reset_for_tests();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
     crate::minhook::reset_test_original_slots();
 }
