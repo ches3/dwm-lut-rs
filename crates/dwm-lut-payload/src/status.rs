@@ -13,8 +13,6 @@ pub enum InitializeStatus {
     PresentSignatureAmbiguous = 7,
     DirectFlipSignatureNotFound = 8,
     DirectFlipSignatureAmbiguous = 9,
-    OverlaysEnabledSignatureNotFound = 10,
-    OverlaysEnabledSignatureAmbiguous = 11,
     PayloadDecodeFailed = 12,
     PayloadHasNoAssignments = 13,
     WindowDirectFlipSignatureNotFound = 15,
@@ -47,8 +45,6 @@ impl InitializeStatus {
             7 => Self::PresentSignatureAmbiguous,
             8 => Self::DirectFlipSignatureNotFound,
             9 => Self::DirectFlipSignatureAmbiguous,
-            10 => Self::OverlaysEnabledSignatureNotFound,
-            11 => Self::OverlaysEnabledSignatureAmbiguous,
             12 => Self::PayloadDecodeFailed,
             13 => Self::PayloadHasNoAssignments,
             15 => Self::WindowDirectFlipSignatureNotFound,
@@ -91,12 +87,6 @@ impl fmt::Display for InitializeStatus {
                 f,
                 "IsCandidateDirectFlipCompatible signature matched multiple locations"
             ),
-            Self::OverlaysEnabledSignatureNotFound => {
-                write!(f, "OverlaysEnabled signature was not found")
-            }
-            Self::OverlaysEnabledSignatureAmbiguous => {
-                write!(f, "OverlaysEnabled signature matched multiple locations")
-            }
             Self::PayloadDecodeFailed => write!(f, "payload could not be decoded"),
             Self::PayloadHasNoAssignments => {
                 write!(f, "payload does not contain any LUT assignments")

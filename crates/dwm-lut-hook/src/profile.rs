@@ -9,7 +9,6 @@ pub enum BuildProfile {
 pub enum HookTarget {
     Present,
     IsCandidateDirectFlipCompatible,
-    OverlaysEnabled,
     WindowContextIsCandidateDirectFlipCompatible,
     CompSwapChainIsCandidateDirectFlipCompatible,
     CompSwapChainIsCandidateIndependentFlipCompatible,
@@ -22,7 +21,6 @@ impl HookTarget {
         match self {
             Self::Present => "Present",
             Self::IsCandidateDirectFlipCompatible => "IsCandidateDirectFlipCompatible",
-            Self::OverlaysEnabled => "OverlaysEnabled",
             Self::WindowContextIsCandidateDirectFlipCompatible => {
                 "CWindowContext::IsCandidateDirectFlipCompatible"
             }
@@ -44,7 +42,7 @@ impl HookTarget {
     pub const fn is_required_signature(self) -> bool {
         matches!(
             self,
-            Self::Present | Self::IsCandidateDirectFlipCompatible | Self::OverlaysEnabled
+            Self::Present | Self::IsCandidateDirectFlipCompatible | Self::OverlayTestMode
         )
     }
 }
@@ -226,7 +224,7 @@ const COMP_SWAP_CHAIN_DIRECT_FLIP_FOLLOWING_BYTES: &[u8] = &[0x41, 0x8B, 0xF0];
 const NON_OVERLAY_DIRECT_FLIP_FOLLOWING_BYTES_25H2_2026_05: &[u8] =
     &[0x48, 0x8D, 0xB9, 0x98, 0x01, 0x00, 0x00];
 
-const OVERLAYS_ENABLED_AOB: &[AobToken] = &[
+const OVERLAY_TEST_MODE_ANCHOR_AOB: &[AobToken] = &[
     Exact(0x83),
     Exact(0x3D),
     Wildcard,
@@ -366,15 +364,6 @@ fn windows_11_25h2() -> HookProfile {
                 note: "Matches the 25H2 direct-flip compatibility gate while excluding non-overlay prologues that share the same prefix.",
             },
             HookSignature {
-                target: HookTarget::OverlaysEnabled,
-                locator: SignatureLocator::Aob {
-                    module_name: "dwmcore.dll",
-                    capture_key: "overlays_enabled_25h2",
-                    tokens: OVERLAYS_ENABLED_AOB,
-                },
-                note: "Matches the 25H2 overlay enablement check and preserves the nearby RIP-relative global access.",
-            },
-            HookSignature {
                 target: HookTarget::WindowContextIsCandidateDirectFlipCompatible,
                 locator: SignatureLocator::Aob {
                     module_name: "dwmcore.dll",
@@ -406,22 +395,22 @@ fn windows_11_25h2() -> HookProfile {
                 locator: SignatureLocator::FollowingAob {
                     module_name: "dwmcore.dll",
                     capture_key: "comp_swap_chain_independent_flip_compat_25h2",
-                    anchor_tokens: OVERLAYS_ENABLED_AOB,
+                    anchor_tokens: OVERLAY_TEST_MODE_ANCHOR_AOB,
                     tokens: COMP_SWAP_CHAIN_INDEPENDENT_FLIP_AOB,
                     search_range: 500,
                 },
-                note: "Matches the 25H2 CCompSwapChain independent-flip gate located near the OverlaysEnabled global access in dwm_lut_fixed.",
+                note: "Matches the 25H2 CCompSwapChain independent-flip gate located near the OverlayTestMode anchor in dwm_lut_fixed.",
             },
             HookSignature {
                 target: HookTarget::OverlayTestMode,
                 locator: SignatureLocator::RipRelativeGlobalAob {
                     module_name: "dwmcore.dll",
                     capture_key: "overlay_test_mode_25h2",
-                    tokens: OVERLAYS_ENABLED_AOB,
+                    tokens: OVERLAY_TEST_MODE_ANCHOR_AOB,
                     displacement_offset: 2,
                     instruction_size: 7,
                 },
-                note: "Resolves the RIP-relative OverlayTestMode global referenced by the 25H2 OverlaysEnabled check.",
+                note: "Resolves the RIP-relative OverlayTestMode global referenced by the 25H2 OverlayTestMode anchor.",
             },
         ],
         hypotheses: ProfileHypotheses {

@@ -446,15 +446,6 @@ pub(crate) fn prepare_present_lut_context(
     )
 }
 
-pub fn evaluate_overlays_enabled(context_address: usize, original_enabled: bool) -> Option<bool> {
-    with_state_mut(|state| {
-        state
-            .runtime
-            .lut_bypass
-            .overlays_enabled(context_address, original_enabled)
-    })
-}
-
 pub fn evaluate_direct_flip_compatible(
     context_address: usize,
     original_compatible: bool,

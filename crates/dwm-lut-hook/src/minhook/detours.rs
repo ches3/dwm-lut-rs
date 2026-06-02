@@ -15,7 +15,6 @@ type ForwardCompVisual = unsafe extern "system" fn(usize, usize, usize) -> u8;
 
 static PRESENT_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static OVERLAYS_ENABLED_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static WINDOW_DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL: AtomicPtr<c_void> =
@@ -30,7 +29,6 @@ pub(super) fn present_original() -> *mut c_void {
 pub(super) fn reset_test_original_slots() {
     PRESENT_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
     DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    OVERLAYS_ENABLED_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
     WINDOW_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
     COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
     COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
@@ -41,7 +39,6 @@ pub(super) fn original_pointer_for_target(target: HookTarget) -> &'static Atomic
     match target {
         HookTarget::Present => &PRESENT_ORIGINAL,
         HookTarget::IsCandidateDirectFlipCompatible => &DIRECT_FLIP_ORIGINAL,
-        HookTarget::OverlaysEnabled => &OVERLAYS_ENABLED_ORIGINAL,
         HookTarget::WindowContextIsCandidateDirectFlipCompatible => &WINDOW_DIRECT_FLIP_ORIGINAL,
         HookTarget::CompSwapChainIsCandidateDirectFlipCompatible => {
             &COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL
@@ -62,7 +59,6 @@ pub(super) fn detour_for_target(target: HookTarget) -> *mut c_void {
     match target {
         HookTarget::Present => present_detour as *mut c_void,
         HookTarget::IsCandidateDirectFlipCompatible => direct_flip_detour as *mut c_void,
-        HookTarget::OverlaysEnabled => overlays_enabled_detour as *mut c_void,
         HookTarget::WindowContextIsCandidateDirectFlipCompatible => {
             window_direct_flip_detour as *mut c_void
         }
@@ -136,13 +132,6 @@ unsafe extern "system" fn direct_flip_detour(
         unsafe { forward_overlay_direct_flip(&DIRECT_FLIP_ORIGINAL, this, a2, a3, a4, a5, a6) };
     evaluate_bool_detour(original, |original| {
         state::evaluate_direct_flip_compatible(this, original)
-    })
-}
-
-unsafe extern "system" fn overlays_enabled_detour(this: usize) -> u8 {
-    let original = unsafe { forward_bool1(&OVERLAYS_ENABLED_ORIGINAL, this) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_overlays_enabled(this, original)
     })
 }
 
@@ -351,13 +340,11 @@ mod tests {
             returns_true_overlay_direct_flip as *mut c_void,
             Ordering::Release,
         );
-        super::OVERLAYS_ENABLED_ORIGINAL.store(returns_true_1 as *mut c_void, Ordering::Release);
 
         assert_eq!(
             unsafe { super::direct_flip_detour(0x1234, 0, 0, 0, 0, 0) },
             0
         );
-        assert_eq!(unsafe { super::overlays_enabled_detour(0x1234) }, 0);
         assert!(
             state::lut_bypass_runtime()
                 .and_then(|runtime| runtime.context(0x1234).cloned())

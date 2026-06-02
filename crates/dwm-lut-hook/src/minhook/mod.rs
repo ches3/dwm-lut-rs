@@ -607,7 +607,7 @@ mod tests {
     fn registration_maps_targets_to_detours_and_original_slots() {
         let plan = plan_with_targets(&[
             (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
+            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
         ]);
 
         super::reset_test_minhook_behavior(None, None, None, None);
@@ -622,16 +622,19 @@ mod tests {
                 as usize,
             0x1800_1000
         );
-        assert_eq!(registered[1].target, HookTarget::OverlaysEnabled);
+        assert_eq!(
+            registered[1].target,
+            HookTarget::IsCandidateDirectFlipCompatible
+        );
         assert_eq!(registered[1].target_address, 0x1800_2000);
         assert_eq!(
-            detours::original_pointer_for_target(HookTarget::OverlaysEnabled)
+            detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
                 .load(Ordering::Acquire) as usize,
             0x1800_2000
         );
         detours::original_pointer_for_target(HookTarget::Present)
             .store(std::ptr::null_mut(), Ordering::Release);
-        detours::original_pointer_for_target(HookTarget::OverlaysEnabled)
+        detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
             .store(std::ptr::null_mut(), Ordering::Release);
     }
 
@@ -663,7 +666,7 @@ mod tests {
         reset_controlled_behavior(Some(3), None);
         let plan = plan_with_targets(&[
             (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
+            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
             (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
         ]);
 
@@ -688,7 +691,7 @@ mod tests {
         reset_controlled_behavior(None, Some(1));
         let plan = plan_with_targets(&[
             (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
+            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
             (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
         ]);
 
@@ -711,7 +714,7 @@ mod tests {
         set_controlled_cleanup_failures(None, Some(1));
         let plan = plan_with_targets(&[
             (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
+            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
             (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
         ]);
 
@@ -729,7 +732,7 @@ mod tests {
         );
         assert_eq!(
             error.cleanup_failures[0].target,
-            HookTarget::OverlaysEnabled
+            HookTarget::IsCandidateDirectFlipCompatible
         );
         assert_eq!(error.cleanup_failures[0].status, -4);
         assert!(
@@ -738,11 +741,11 @@ mod tests {
                 .is_null()
         );
         assert_eq!(
-            detours::original_pointer_for_target(HookTarget::OverlaysEnabled)
+            detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
                 .load(Ordering::Acquire) as usize,
             0x1800_2000
         );
-        detours::original_pointer_for_target(HookTarget::OverlaysEnabled)
+        detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
             .store(std::ptr::null_mut(), Ordering::Release);
     }
 
@@ -753,7 +756,7 @@ mod tests {
         set_controlled_cleanup_failures(None, Some(1));
         let plan = plan_with_targets(&[
             (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
+            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
             (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
         ]);
 
@@ -777,7 +780,7 @@ mod tests {
                 .is_null()
         );
         assert!(
-            detours::original_pointer_for_target(HookTarget::OverlaysEnabled)
+            detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
                 .load(Ordering::Acquire)
                 .is_null()
         );
@@ -796,7 +799,7 @@ mod tests {
         reset_controlled_behavior(None, None);
         let plan = plan_with_targets(&[
             (HookTarget::Present, 0x1800_1000),
-            (HookTarget::OverlaysEnabled, 0x1800_2000),
+            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
         ]);
 
         let registered = register_plan_with_apis(&plan, test_minhook_apis())
@@ -816,7 +819,7 @@ mod tests {
                 .is_null()
         );
         assert!(
-            detours::original_pointer_for_target(HookTarget::OverlaysEnabled)
+            detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
                 .load(Ordering::Acquire)
                 .is_null()
         );

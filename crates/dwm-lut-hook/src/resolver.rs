@@ -667,7 +667,7 @@ mod tests {
             build: BuildProfile::Windows11_25H2,
             module_name: "dwmcore.dll",
             signatures: vec![crate::profile::HookSignature {
-                target: crate::profile::HookTarget::OverlaysEnabled,
+                target: crate::profile::HookTarget::OverlayTestMode,
                 locator: crate::profile::SignatureLocator::Aob {
                     module_name: "dwmcore.dll",
                     capture_key: "overlay_test",
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(
             error,
             HookResolveError::SignatureAmbiguous {
-                target: crate::profile::HookTarget::OverlaysEnabled,
+                target: crate::profile::HookTarget::OverlayTestMode,
                 capture_key: "overlay_test",
                 matches: 2,
             }

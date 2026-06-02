@@ -147,14 +147,6 @@ impl LutBypassRuntime {
         }
     }
 
-    pub fn overlays_enabled(&mut self, context_address: usize, original_enabled: bool) -> bool {
-        if self.contexts.contains_key(&context_address) {
-            false
-        } else {
-            original_enabled
-        }
-    }
-
     pub fn direct_flip_compatible(
         &mut self,
         context_address: usize,
@@ -332,13 +324,11 @@ mod tests {
             outcome.overlay_test_mode_control,
             OverlayTestModeControl::ForceMode5
         );
-        assert!(!runtime.overlays_enabled(0x1234, true));
         assert!(!runtime.direct_flip_compatible(0x1234, true));
         assert!(!runtime.window_context_direct_flip_compatible(true));
         assert!(!runtime.comp_swap_chain_direct_flip_compatible(true));
         assert!(!runtime.comp_visual_candidate_for_promotion(true));
         assert_eq!(runtime.overlay_test_mode(0), 5);
-        assert!(runtime.overlays_enabled(0x4321, true));
         assert!(runtime.direct_flip_compatible(0x4321, true));
         assert_eq!(
             runtime.overlay_test_mode_control,
@@ -385,7 +375,6 @@ mod tests {
 
         assert!(outcome.plan.is_none());
         assert!(!outcome.promotion_blocked);
-        assert!(runtime.overlays_enabled(0x1234, true));
         assert!(runtime.direct_flip_compatible(0x1234, true));
         assert!(!runtime.window_context_direct_flip_compatible(true));
         assert!(!runtime.comp_swap_chain_direct_flip_compatible(true));
@@ -421,7 +410,6 @@ mod tests {
         assert!(outcome.plan.is_some());
         assert!(outcome.promotion_blocked);
         assert!(runtime.context(0x1234).is_some());
-        assert!(!runtime.overlays_enabled(0x1234, true));
         assert!(!runtime.direct_flip_compatible(0x1234, true));
         assert!(!runtime.window_context_direct_flip_compatible(true));
         assert!(!runtime.comp_swap_chain_direct_flip_compatible(true));

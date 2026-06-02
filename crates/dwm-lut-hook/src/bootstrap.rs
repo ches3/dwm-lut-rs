@@ -590,9 +590,6 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
                 InitializeStatus::DirectFlipSignatureNotFound
             }
-            crate::profile::HookTarget::OverlaysEnabled => {
-                InitializeStatus::OverlaysEnabledSignatureNotFound
-            }
             crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible => {
                 InitializeStatus::WindowDirectFlipSignatureNotFound
             }
@@ -613,9 +610,6 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::Present => InitializeStatus::PresentSignatureAmbiguous,
             crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
                 InitializeStatus::DirectFlipSignatureAmbiguous
-            }
-            crate::profile::HookTarget::OverlaysEnabled => {
-                InitializeStatus::OverlaysEnabledSignatureAmbiguous
             }
             crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible => {
                 InitializeStatus::WindowDirectFlipSignatureAmbiguous

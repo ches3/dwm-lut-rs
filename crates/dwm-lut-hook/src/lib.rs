@@ -36,9 +36,8 @@ pub use state::{
     evaluate_comp_swap_chain_direct_flip_compatible,
     evaluate_comp_swap_chain_independent_flip_compatible,
     evaluate_comp_visual_candidate_for_promotion, evaluate_direct_flip_compatible,
-    evaluate_overlay_test_mode, evaluate_overlays_enabled,
-    evaluate_window_context_direct_flip_compatible, hook_profile, is_initialized,
-    lut_bypass_runtime,
+    evaluate_overlay_test_mode, evaluate_window_context_direct_flip_compatible, hook_profile,
+    is_initialized, lut_bypass_runtime,
 };
 
 use std::ffi::c_void;
@@ -71,18 +70,6 @@ pub unsafe extern "system" fn dwm_lut_replace_assignments(
     payload: *const dwm_lut_payload::DwmLutPayloadBuffer,
 ) -> u32 {
     unsafe { bootstrap::ffi_replace_assignments(payload) }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn dwm_lut_overlays_enabled(
-    context_address: usize,
-    original_enabled: i32,
-) -> i32 {
-    let original_enabled = original_enabled != 0;
-    i32::from(
-        state::evaluate_overlays_enabled(context_address, original_enabled)
-            .unwrap_or(original_enabled),
-    )
 }
 
 #[unsafe(no_mangle)]
