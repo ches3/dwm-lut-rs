@@ -118,7 +118,7 @@ unsafe fn forward_bool1(slot: &AtomicPtr<c_void>, this: usize) -> u8 {
 }
 
 fn evaluate_bool_detour(original: u8, evaluate: impl FnOnce(bool) -> Option<bool>) -> u8 {
-    if state::is_shutting_down() {
+    if !state::is_runtime_active() {
         return original;
     }
     bool_to_u8(evaluate(original != 0).unwrap_or(original != 0))

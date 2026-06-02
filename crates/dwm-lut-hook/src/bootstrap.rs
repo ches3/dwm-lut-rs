@@ -24,7 +24,7 @@ use crate::state::{
     ApplyPayloadStart, HookRegistrationPlan, HookRuntime, HookState, ReplacePayloadPipelineError,
     ShutdownStart, begin_apply_payload, begin_shutdown, clear_state_after_shutdown,
     finish_apply_payload, finish_failed_shutdown, install_state, is_initialized,
-    lock_present_apply, minhook_cleanup_plan, replace_payload_pipeline,
+    lock_present_runtime, minhook_cleanup_plan, replace_payload_pipeline,
 };
 
 #[cfg(not(test))]
@@ -290,8 +290,6 @@ pub(crate) fn ffi_shutdown() -> u32 {
         return ShutdownStatus::Success as u32;
     };
 
-    crate::state::restore_overlay_test_mode();
-
     let cleanup_failures = unregister_registered_hooks(&minhook, &hooks);
     for failure in &cleanup_failures {
         debug_log!(
@@ -302,11 +300,17 @@ pub(crate) fn ffi_shutdown() -> u32 {
         );
     }
 
-    let renderer_device_count = crate::d3d11_renderer::shutdown_renderer_resources();
+    let renderer_device_count = {
+        let _present_guard = lock_present_runtime();
+        let renderer_device_count = crate::d3d11_renderer::shutdown_renderer_resources();
+        crate::state::restore_overlay_test_mode();
+        renderer_device_count
+    };
     debug_log!(
         "event=renderer_resources_released device_resource_count={}",
         renderer_device_count
     );
+    crate::desktop_redraw::request_desktop_redraw();
 
     if cleanup_failures
         .iter()
@@ -377,7 +381,7 @@ fn apply_payload(payload: HookPayload) -> Result<(), ApplyPayloadError> {
     );
 
     let renderer_device_count = {
-        let _present_guard = lock_present_apply();
+        let _present_guard = lock_present_runtime();
         replace_payload_pipeline(payload, lut_pipeline)?;
         crate::d3d11_renderer::shutdown_renderer_resources()
     };

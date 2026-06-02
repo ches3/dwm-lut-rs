@@ -66,7 +66,10 @@ pub struct HookState {
 #[cfg(not(test))]
 static STATE: OnceLock<Mutex<Option<HookState>>> = OnceLock::new();
 
-static PRESENT_APPLY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static PRESENT_RUNTIME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) static PRESENT_RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(not(test))]
 static LIFECYCLE: AtomicU8 = AtomicU8::new(LIFECYCLE_IDLE);
@@ -151,6 +154,26 @@ pub fn lut_bypass_runtime() -> Option<LutBypassRuntime> {
     with_state(|state| state.runtime.lut_bypass.clone())
 }
 
+pub(crate) fn is_runtime_active() -> bool {
+    #[cfg(not(test))]
+    {
+        matches!(
+            LIFECYCLE.load(Ordering::Acquire),
+            LIFECYCLE_RUNNING | LIFECYCLE_APPLYING_PAYLOAD
+        )
+    }
+
+    #[cfg(test)]
+    {
+        LIFECYCLE.with(|lifecycle| {
+            matches!(
+                *lifecycle.borrow(),
+                LIFECYCLE_RUNNING | LIFECYCLE_APPLYING_PAYLOAD
+            )
+        })
+    }
+}
+
 pub(crate) fn evaluate_present_hook(
     context_address: usize,
     monitor_identity: Option<MonitorIdentity>,
@@ -170,26 +193,6 @@ pub(crate) fn evaluate_present_hook(
             dirty_rects,
         )
     })
-}
-
-pub(crate) fn is_shutting_down() -> bool {
-    #[cfg(not(test))]
-    {
-        matches!(
-            LIFECYCLE.load(Ordering::Acquire),
-            LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_SHUT_DOWN
-        )
-    }
-
-    #[cfg(test)]
-    {
-        LIFECYCLE.with(|lifecycle| {
-            matches!(
-                *lifecycle.borrow(),
-                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_SHUT_DOWN
-            )
-        })
-    }
 }
 
 pub(crate) fn begin_apply_payload() -> ApplyPayloadStart {
@@ -251,18 +254,18 @@ pub(crate) fn finish_apply_payload() {
     }
 }
 
-fn present_apply_lock() -> &'static Mutex<()> {
-    PRESENT_APPLY_LOCK.get_or_init(|| Mutex::new(()))
+fn present_runtime_lock() -> &'static Mutex<()> {
+    PRESENT_RUNTIME_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-pub(crate) fn lock_present_apply() -> MutexGuard<'static, ()> {
-    present_apply_lock()
+pub(crate) fn lock_present_runtime() -> MutexGuard<'static, ()> {
+    present_runtime_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-pub(crate) fn try_lock_present_apply() -> Option<MutexGuard<'static, ()>> {
-    match present_apply_lock().try_lock() {
+pub(crate) fn try_lock_present_runtime() -> Option<MutexGuard<'static, ()>> {
+    match present_runtime_lock().try_lock() {
         Ok(guard) => Some(guard),
         Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
         Err(TryLockError::WouldBlock) => None,
@@ -571,12 +574,15 @@ pub(crate) fn reset_state_for_tests() {
 
 #[cfg(test)]
 mod tests {
-    use super::{lock_present_apply, try_lock_present_apply};
+    use super::{PRESENT_RUNTIME_TEST_LOCK, lock_present_runtime, try_lock_present_runtime};
 
     #[test]
-    fn present_apply_lock_is_exclusive() {
-        let _apply_guard = lock_present_apply();
+    fn present_runtime_lock_is_exclusive() {
+        let _test_guard = PRESENT_RUNTIME_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        let _runtime_guard = lock_present_runtime();
 
-        assert!(try_lock_present_apply().is_none());
+        assert!(try_lock_present_runtime().is_none());
     }
 }

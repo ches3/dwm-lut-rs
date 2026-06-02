@@ -557,7 +557,7 @@ pub(super) unsafe extern "system" fn present_detour(
     if original.is_null() {
         return 0;
     }
-    if state::is_shutting_down() {
+    if !state::is_runtime_active() {
         let original: PresentOriginal = unsafe { std::mem::transmute(original) };
         return unsafe { original(this, overlay_swap_chain, a3, rect_vec, a5, a6, a7) };
     }
@@ -584,7 +584,7 @@ pub(super) unsafe extern "system" fn present_detour(
     };
     match unsafe { collect_present_inputs(this, overlay_swap_chain, rect_vec) } {
         Ok(inputs) => {
-            if let Some(_present_guard) = state::try_lock_present_apply() {
+            if let Some(_present_guard) = state::try_lock_present_runtime() {
                 let _ = state::prepare_present_lut_context(
                     this,
                     inputs.monitor_identity,
@@ -679,7 +679,7 @@ mod tests {
 
     use crate::profile::HookTarget;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
-    use crate::state::{self};
+    use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
     use crate::{
         BackBufferFormat, BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM,
         DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect, HookProfile, SignatureLocator,
@@ -714,8 +714,6 @@ mod tests {
         }
         0x55
     }
-
-    static CONTROLLED_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_monitor_identity() -> MonitorIdentity {
         MonitorIdentity {
