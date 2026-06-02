@@ -47,8 +47,8 @@ fn run_apply(options: cli::CliOptions) -> Result<(), InjectorError> {
         InjectionStep::ResolveConfigPath,
         "config file",
     )?;
-    let payload = config::load_payload(&config_path)?;
-    let payload_bytes = dwm_lut_payload::serialize_payload(&payload)?;
+    let loaded = config::load_payload(&config_path, options.profile.as_deref())?;
+    let payload_bytes = dwm_lut_payload::serialize_payload(&loaded.payload)?;
     let staged_dll_path = stage_hook_dll(&input_dll_path)?;
     let pid = find_process_id_by_name("dwm.exe")?;
 
@@ -58,24 +58,27 @@ fn run_apply(options: cli::CliOptions) -> Result<(), InjectorError> {
     match outcome {
         ApplyOutcome::Replaced => {
             println!(
-                "replaced assignments in dwm.exe (pid={pid}) from {}",
-                config_path.display()
+                "replaced assignments in dwm.exe (pid={pid}) from {} (profile={})",
+                config_path.display(),
+                loaded.profile_name,
             );
         }
         ApplyOutcome::Initialized => {
             println!(
-                "initialized dwm.exe (pid={pid}) with {} staged from {} and {}",
+                "initialized dwm.exe (pid={pid}) with {} staged from {} and {} (profile={})",
                 staged_dll_path.display(),
                 input_dll_path.display(),
-                config_path.display()
+                config_path.display(),
+                loaded.profile_name,
             );
         }
         ApplyOutcome::Reinitialized => {
             println!(
-                "reinitialized dwm.exe (pid={pid}) with {} staged from {} and {}",
+                "reinitialized dwm.exe (pid={pid}) with {} staged from {} and {} (profile={})",
                 staged_dll_path.display(),
                 input_dll_path.display(),
-                config_path.display()
+                config_path.display(),
+                loaded.profile_name,
             );
         }
     }

@@ -8,6 +8,7 @@ use crate::error::InjectorError;
 pub(crate) struct CliOptions {
     pub(crate) dll_path: Option<PathBuf>,
     pub(crate) config_path: PathBuf,
+    pub(crate) profile: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -58,6 +59,7 @@ fn parse_apply_args(
 ) -> Result<ParseArgsResult, InjectorError> {
     let mut dll_path = None;
     let mut config_path = None;
+    let mut profile = None;
     while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
             "--dll" => {
@@ -71,6 +73,18 @@ fn parse_apply_args(
                     InjectorError::Usage(usage_message("--config requires a value"))
                 })?;
                 config_path = Some(PathBuf::from(value));
+            }
+            "--profile" => {
+                let value = args.next().ok_or_else(|| {
+                    InjectorError::Usage(usage_message("--profile requires a value"))
+                })?;
+                let value = value.to_string_lossy();
+                if value.trim().is_empty() {
+                    return Err(InjectorError::Usage(usage_message(
+                        "--profile must not be empty",
+                    )));
+                }
+                profile = Some(value.trim().to_owned());
             }
             "--help" | "-h" => {
                 return Ok(ParseArgsResult::Help(usage_message("")));
@@ -89,6 +103,7 @@ fn parse_apply_args(
     Ok(ParseArgsResult::Run(CliCommand::Apply(CliOptions {
         dll_path,
         config_path,
+        profile,
     })))
 }
 
@@ -119,7 +134,7 @@ fn parse_monitors_args(
 }
 
 fn usage_message(problem: &str) -> String {
-    let usage = "usage: dwm-lut-injector apply [--dll <hook-dll-path>] --config <config-path>\n       dwm-lut-injector disable\n       dwm-lut-injector monitors";
+    let usage = "usage: dwm-lut-injector apply [--dll <hook-dll-path>] --config <config-path> [--profile <profile-name>]\n       dwm-lut-injector disable\n       dwm-lut-injector monitors";
     if problem.is_empty() {
         usage.to_string()
     } else {
@@ -183,8 +198,134 @@ mod tests {
             CliOptions {
                 dll_path: None,
                 config_path: PathBuf::from("config.json"),
+                profile: None,
             }
         );
+    }
+
+    #[test]
+    fn accepts_profile_argument() {
+        let parsed = parse_args_from([
+            "dwm-lut-injector",
+            "apply",
+            "--config",
+            "config.json",
+            "--profile",
+            "gaming",
+        ])
+        .expect("profile argument should parse");
+
+        assert_eq!(
+            run_options(parsed),
+            CliOptions {
+                dll_path: None,
+                config_path: PathBuf::from("config.json"),
+                profile: Some("gaming".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_profile_argument_with_mixed_case() {
+        let parsed = parse_args_from([
+            "dwm-lut-injector",
+            "apply",
+            "--config",
+            "config.json",
+            "--profile",
+            "GAMING",
+        ])
+        .expect("mixed-case profile argument should parse");
+
+        assert_eq!(
+            run_options(parsed),
+            CliOptions {
+                dll_path: None,
+                config_path: PathBuf::from("config.json"),
+                profile: Some("GAMING".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_profile_argument_with_surrounding_whitespace() {
+        let parsed = parse_args_from([
+            "dwm-lut-injector",
+            "apply",
+            "--config",
+            "config.json",
+            "--profile",
+            "  gaming  ",
+        ])
+        .expect("profile argument should parse");
+
+        assert_eq!(
+            run_options(parsed),
+            CliOptions {
+                dll_path: None,
+                config_path: PathBuf::from("config.json"),
+                profile: Some("gaming".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_empty_profile_argument() {
+        let error = parse_args_from([
+            "dwm-lut-injector",
+            "apply",
+            "--config",
+            "config.json",
+            "--profile",
+            "",
+        ])
+        .expect_err("empty profile must be rejected");
+
+        match error {
+            InjectorError::Usage(message) => {
+                assert!(message.contains("--profile must not be empty"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn rejects_whitespace_profile_argument() {
+        let error = parse_args_from([
+            "dwm-lut-injector",
+            "apply",
+            "--config",
+            "config.json",
+            "--profile",
+            "   ",
+        ])
+        .expect_err("whitespace profile must be rejected");
+
+        match error {
+            InjectorError::Usage(message) => {
+                assert!(message.contains("--profile must not be empty"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn rejects_profile_without_value() {
+        let error = parse_args_from([
+            "dwm-lut-injector",
+            "apply",
+            "--config",
+            "config.json",
+            "--profile",
+        ])
+        .expect_err("profile without value must be rejected");
+
+        match error {
+            InjectorError::Usage(message) => {
+                assert!(message.contains("--profile requires a value"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]
@@ -239,6 +380,7 @@ mod tests {
             CliOptions {
                 dll_path: Some(PathBuf::from("hook.dll")),
                 config_path: PathBuf::from("config.json"),
+                profile: None,
             }
         );
     }
