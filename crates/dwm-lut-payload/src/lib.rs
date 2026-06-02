@@ -4,7 +4,7 @@ use bincode::{Decode, Encode};
 
 mod status;
 
-pub use status::{ApplyPayloadStatus, InitializeStatus, ShutdownStatus};
+pub use status::{InitializeStatus, ReplaceAssignmentsStatus, ShutdownStatus};
 
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("dwm-lut-rs supports only 64-bit Windows targets");

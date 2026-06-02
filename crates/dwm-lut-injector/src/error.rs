@@ -2,13 +2,13 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-pub(crate) use dwm_lut_payload::{ApplyPayloadStatus, InitializeStatus, ShutdownStatus};
+pub(crate) use dwm_lut_payload::{InitializeStatus, ReplaceAssignmentsStatus, ShutdownStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InitializeContext {
     FreshInstall,
     AfterShutdown,
-    AfterReloadFallback,
+    AfterReplaceFallback,
 }
 
 pub(crate) fn format_hook_initialize_failure(
@@ -20,8 +20,8 @@ pub(crate) fn format_hook_initialize_failure(
         InitializeContext::AfterShutdown => {
             format!("existing hook was shut down, but initialize failed: {status}")
         }
-        InitializeContext::AfterReloadFallback => format!(
-            "payload reload was unavailable, existing hook was shut down, but initialize failed: {status}"
+        InitializeContext::AfterReplaceFallback => format!(
+            "replace assignments was unavailable, existing hook was shut down, but initialize failed: {status}"
         ),
     }
 }
@@ -64,9 +64,9 @@ pub(crate) enum InjectionStep {
     WaitInitialize,
     StartShutdown,
     WaitShutdown,
-    ResolveApplyPayloadExport,
-    StartApplyPayload,
-    WaitApplyPayload,
+    ResolveReplaceAssignmentsExport,
+    StartReplaceAssignments,
+    WaitReplaceAssignments,
 }
 
 impl fmt::Display for InjectionStep {
@@ -108,9 +108,11 @@ impl fmt::Display for InjectionStep {
             Self::WaitInitialize => write!(f, "remote initialize wait"),
             Self::StartShutdown => write!(f, "remote shutdown launch"),
             Self::WaitShutdown => write!(f, "remote shutdown wait"),
-            Self::ResolveApplyPayloadExport => write!(f, "dwm_lut_apply_payload export resolution"),
-            Self::StartApplyPayload => write!(f, "remote apply payload launch"),
-            Self::WaitApplyPayload => write!(f, "remote apply payload wait"),
+            Self::ResolveReplaceAssignmentsExport => {
+                write!(f, "dwm_lut_replace_assignments export resolution")
+            }
+            Self::StartReplaceAssignments => write!(f, "remote replace assignments launch"),
+            Self::WaitReplaceAssignments => write!(f, "remote replace assignments wait"),
         }
     }
 }
@@ -149,8 +151,8 @@ pub(crate) enum InjectorError {
         context: InitializeContext,
     },
     UnknownInitializeStatus(u32),
-    HookApplyPayloadFailed(ApplyPayloadStatus),
-    UnknownApplyPayloadStatus(u32),
+    HookReplaceAssignmentsFailed(ReplaceAssignmentsStatus),
+    UnknownReplaceAssignmentsStatus(u32),
     HookShutdownFailed(ShutdownStatus),
     UnknownShutdownStatus(u32),
     MonitorEnumeration(String),
@@ -206,14 +208,14 @@ impl fmt::Display for InjectorError {
             Self::UnknownInitializeStatus(code) => {
                 write!(f, "hook initialize returned unknown status {code:#x}")
             }
-            Self::HookApplyPayloadFailed(status) => {
+            Self::HookReplaceAssignmentsFailed(status) => {
                 write!(
                     f,
-                    "payload reload failed: {status} (existing hook unchanged)"
+                    "replace assignments failed: {status} (existing hook unchanged)"
                 )
             }
-            Self::UnknownApplyPayloadStatus(code) => {
-                write!(f, "payload reload returned unknown status {code:#x}")
+            Self::UnknownReplaceAssignmentsStatus(code) => {
+                write!(f, "replace assignments returned unknown status {code:#x}")
             }
             Self::HookShutdownFailed(status) => write!(f, "hook shutdown failed: {status}"),
             Self::UnknownShutdownStatus(code) => {

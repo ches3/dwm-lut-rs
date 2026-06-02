@@ -67,10 +67,10 @@ pub extern "system" fn dwm_lut_shutdown() -> u32 {
 /// `payload` must be null or point to a readable payload buffer in the address
 /// space of the current process.
 #[unsafe(no_mangle)]
-pub unsafe extern "system" fn dwm_lut_apply_payload(
+pub unsafe extern "system" fn dwm_lut_replace_assignments(
     payload: *const dwm_lut_payload::DwmLutPayloadBuffer,
 ) -> u32 {
-    unsafe { bootstrap::ffi_apply_payload(payload) }
+    unsafe { bootstrap::ffi_replace_assignments(payload) }
 }
 
 #[unsafe(no_mangle)]

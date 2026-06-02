@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dwm_lut_payload::{
-    ApplyPayloadStatus, DwmLutPayloadBuffer, HookPayload, InitializeStatus, PayloadError,
+    DwmLutPayloadBuffer, HookPayload, InitializeStatus, PayloadError, ReplaceAssignmentsStatus,
     ShutdownStatus, deserialize_payload_buffer,
 };
 
@@ -21,10 +21,10 @@ use crate::profile::{BuildProfile, HookProfile};
 
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
-    ApplyPayloadStart, HookRegistrationPlan, HookRuntime, HookState, ReplacePayloadPipelineError,
-    ShutdownStart, begin_apply_payload, begin_shutdown, clear_state_after_shutdown,
-    finish_apply_payload, finish_failed_shutdown, install_state, is_initialized,
-    lock_present_runtime, minhook_cleanup_plan, replace_payload_pipeline,
+    HookRegistrationPlan, HookRuntime, HookState, ReplaceAssignmentsStart,
+    ReplacePayloadPipelineError, ShutdownStart, begin_replace_assignments, begin_shutdown,
+    clear_state_after_shutdown, finish_failed_shutdown, finish_replace_assignments, install_state,
+    is_initialized, lock_present_runtime, minhook_cleanup_plan, replace_payload_pipeline,
 };
 
 #[cfg(not(test))]
@@ -43,11 +43,11 @@ impl Drop for InitializationGuard {
     }
 }
 
-struct ApplyPayloadGuard;
+struct ReplaceAssignmentsGuard;
 
-impl Drop for ApplyPayloadGuard {
+impl Drop for ReplaceAssignmentsGuard {
     fn drop(&mut self) {
-        finish_apply_payload();
+        finish_replace_assignments();
     }
 }
 
@@ -68,11 +68,13 @@ fn enter_initialization() -> Result<InitializationGuard, HookError> {
     Ok(InitializationGuard)
 }
 
-fn enter_apply_payload() -> Result<ApplyPayloadGuard, ApplyPayloadError> {
-    match begin_apply_payload() {
-        ApplyPayloadStart::Started => Ok(ApplyPayloadGuard),
-        ApplyPayloadStart::NotInitialized => Err(ApplyPayloadError::NotInitialized),
-        ApplyPayloadStart::AlreadyInProgress => Err(ApplyPayloadError::AlreadyInProgress),
+fn enter_replace_assignments() -> Result<ReplaceAssignmentsGuard, ReplaceAssignmentsError> {
+    match begin_replace_assignments() {
+        ReplaceAssignmentsStart::Started => Ok(ReplaceAssignmentsGuard),
+        ReplaceAssignmentsStart::NotInitialized => Err(ReplaceAssignmentsError::NotInitialized),
+        ReplaceAssignmentsStart::AlreadyInProgress => {
+            Err(ReplaceAssignmentsError::AlreadyInProgress)
+        }
     }
 }
 
@@ -162,14 +164,14 @@ impl From<MinHookError> for HookError {
 }
 
 #[derive(Debug)]
-pub enum ApplyPayloadError {
+pub enum ReplaceAssignmentsError {
     NotInitialized,
     AlreadyInProgress,
     Payload(PayloadError),
     State(ReplacePayloadPipelineError),
 }
 
-impl fmt::Display for ApplyPayloadError {
+impl fmt::Display for ReplaceAssignmentsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotInitialized => write!(f, "hook is not initialized"),
@@ -182,15 +184,15 @@ impl fmt::Display for ApplyPayloadError {
     }
 }
 
-impl std::error::Error for ApplyPayloadError {}
+impl std::error::Error for ReplaceAssignmentsError {}
 
-impl From<PayloadError> for ApplyPayloadError {
+impl From<PayloadError> for ReplaceAssignmentsError {
     fn from(value: PayloadError) -> Self {
         Self::Payload(value)
     }
 }
 
-impl From<ReplacePayloadPipelineError> for ApplyPayloadError {
+impl From<ReplacePayloadPipelineError> for ReplaceAssignmentsError {
     fn from(value: ReplacePayloadPipelineError) -> Self {
         Self::State(value)
     }
@@ -334,19 +336,19 @@ pub(crate) fn ffi_shutdown() -> u32 {
     }
 }
 
-pub(crate) unsafe fn ffi_apply_payload(payload_buffer: *const DwmLutPayloadBuffer) -> u32 {
-    debug_log!("event=apply_payload_start");
+pub(crate) unsafe fn ffi_replace_assignments(payload_buffer: *const DwmLutPayloadBuffer) -> u32 {
+    debug_log!("event=replace_assignments_start");
 
     if payload_buffer.is_null() {
-        return ApplyPayloadStatus::NullPayload as u32;
+        return ReplaceAssignmentsStatus::NullPayload as u32;
     }
 
     let payload = match unsafe { deserialize_payload_buffer(payload_buffer) } {
         Ok(payload) => payload,
         Err(error) => {
-            let status = map_payload_error_to_apply_status(&error);
+            let status = map_payload_error_to_replace_assignments_status(&error);
             debug_log!(
-                "event=apply_payload_failed status={} error={}",
+                "event=replace_assignments_failed status={} error={}",
                 status as u32,
                 crate::debug_log::quoted(error.to_string())
             );
@@ -354,29 +356,29 @@ pub(crate) unsafe fn ffi_apply_payload(payload_buffer: *const DwmLutPayloadBuffe
         }
     };
 
-    match apply_payload(payload) {
+    match replace_assignments(payload) {
         Ok(()) => {
-            debug_log!("event=apply_payload_success");
-            ApplyPayloadStatus::Success as u32
+            debug_log!("event=replace_assignments_success");
+            ReplaceAssignmentsStatus::Success as u32
         }
-        Err(error) => finish_apply_payload_error(error),
+        Err(error) => finish_replace_assignments_error(error),
     }
 }
 
-fn apply_payload(payload: HookPayload) -> Result<(), ApplyPayloadError> {
+fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsError> {
     if is_initialization_in_progress() {
-        return Err(ApplyPayloadError::AlreadyInProgress);
+        return Err(ReplaceAssignmentsError::AlreadyInProgress);
     }
-    let _guard = enter_apply_payload()?;
+    let _guard = enter_replace_assignments()?;
 
     debug_log!(
-        "event=apply_payload_decoded assignment_count={}",
+        "event=replace_assignments_decoded assignment_count={}",
         payload.assignments.len()
     );
 
     let lut_pipeline = LutPipeline::from_payload(&payload);
     debug_log!(
-        "event=apply_payload_pipeline_prepared lut_count={}",
+        "event=replace_assignments_pipeline_prepared lut_count={}",
         lut_pipeline.summary().lut_count
     );
 
@@ -386,7 +388,7 @@ fn apply_payload(payload: HookPayload) -> Result<(), ApplyPayloadError> {
         crate::d3d11_renderer::shutdown_renderer_resources()
     };
     debug_log!(
-        "event=apply_payload_renderer_resources_released device_resource_count={}",
+        "event=replace_assignments_renderer_resources_released device_resource_count={}",
         renderer_device_count
     );
     crate::desktop_redraw::request_desktop_redraw();
@@ -394,11 +396,11 @@ fn apply_payload(payload: HookPayload) -> Result<(), ApplyPayloadError> {
 }
 
 #[cfg(debug_assertions)]
-fn finish_apply_payload_error(error: ApplyPayloadError) -> u32 {
+fn finish_replace_assignments_error(error: ReplaceAssignmentsError) -> u32 {
     let error_message = error.to_string();
-    let status = map_apply_payload_error(&error);
+    let status = map_replace_assignments_error(&error);
     debug_log!(
-        "event=apply_payload_failed status={} error={}",
+        "event=replace_assignments_failed status={} error={}",
         status as u32,
         crate::debug_log::quoted(error_message)
     );
@@ -406,18 +408,20 @@ fn finish_apply_payload_error(error: ApplyPayloadError) -> u32 {
 }
 
 #[cfg(not(debug_assertions))]
-fn finish_apply_payload_error(error: ApplyPayloadError) -> u32 {
-    map_apply_payload_error(&error) as u32
+fn finish_replace_assignments_error(error: ReplaceAssignmentsError) -> u32 {
+    map_replace_assignments_error(&error) as u32
 }
 
-fn map_apply_payload_error(error: &ApplyPayloadError) -> ApplyPayloadStatus {
+fn map_replace_assignments_error(error: &ReplaceAssignmentsError) -> ReplaceAssignmentsStatus {
     match error {
-        ApplyPayloadError::NotInitialized
-        | ApplyPayloadError::State(ReplacePayloadPipelineError::NotInitialized) => {
-            ApplyPayloadStatus::NotInitialized
+        ReplaceAssignmentsError::NotInitialized
+        | ReplaceAssignmentsError::State(ReplacePayloadPipelineError::NotInitialized) => {
+            ReplaceAssignmentsStatus::NotInitialized
         }
-        ApplyPayloadError::AlreadyInProgress => ApplyPayloadStatus::AlreadyInProgress,
-        ApplyPayloadError::Payload(error) => map_payload_error_to_apply_status(error),
+        ReplaceAssignmentsError::AlreadyInProgress => ReplaceAssignmentsStatus::AlreadyInProgress,
+        ReplaceAssignmentsError::Payload(error) => {
+            map_payload_error_to_replace_assignments_status(error)
+        }
     }
 }
 
@@ -661,12 +665,14 @@ fn map_payload_error_to_initialize_status(error: &PayloadError) -> InitializeSta
     }
 }
 
-fn map_payload_error_to_apply_status(error: &PayloadError) -> ApplyPayloadStatus {
+fn map_payload_error_to_replace_assignments_status(
+    error: &PayloadError,
+) -> ReplaceAssignmentsStatus {
     match error {
         PayloadError::EmptyBuffer | PayloadError::TooLarge { .. } => {
-            ApplyPayloadStatus::InvalidPayload
+            ReplaceAssignmentsStatus::InvalidPayload
         }
-        PayloadError::NoAssignments => ApplyPayloadStatus::PayloadHasNoAssignments,
-        _ => ApplyPayloadStatus::PayloadDecodeFailed,
+        PayloadError::NoAssignments => ReplaceAssignmentsStatus::PayloadHasNoAssignments,
+        _ => ReplaceAssignmentsStatus::PayloadDecodeFailed,
     }
 }

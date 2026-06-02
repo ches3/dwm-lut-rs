@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{
-    ApplyPayloadStatus, InitializeContext, InitializeStatus, InjectionStep, InjectorError,
+    InitializeContext, InitializeStatus, InjectionStep, InjectorError, ReplaceAssignmentsStatus,
     ShutdownStatus,
 };
 use crate::win32::{
@@ -34,15 +34,15 @@ pub(crate) enum DisableOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApplyOutcome {
-    Reloaded,
+    Replaced,
     Initialized,
     Reinitialized,
 }
 
-enum ApplyPayloadOutcome {
-    Reloaded,
+enum ReplaceAssignmentsOutcome {
+    Replaced,
     Fallback,
-    Failed(ApplyPayloadStatus),
+    Failed(ReplaceAssignmentsStatus),
 }
 
 struct RemotePayload {
@@ -84,38 +84,42 @@ fn write_remote_payload(
     })
 }
 
-fn try_remote_apply_payload(
+fn try_remote_replace_assignments(
     process: &OwnedHandle,
     module: &NamedRemoteModule,
     payload_bytes: &[u8],
-) -> Result<ApplyPayloadOutcome, InjectorError> {
+) -> Result<ReplaceAssignmentsOutcome, InjectorError> {
     let module_path = PathBuf::from(module_export_path(&module.path, &module.name));
-    let remote_apply_payload_address = match resolve_remote_module_export_address(
+    let remote_replace_assignments_address = match resolve_remote_module_export_address(
         process,
         module.module.base_address,
-        "dwm_lut_apply_payload",
-        InjectionStep::ResolveApplyPayloadExport,
+        "dwm_lut_replace_assignments",
+        InjectionStep::ResolveReplaceAssignmentsExport,
         &module_path,
     ) {
         Ok(address) => address,
-        Err(InjectorError::ExportNotFound { .. }) => return Ok(ApplyPayloadOutcome::Fallback),
+        Err(InjectorError::ExportNotFound { .. }) => {
+            return Ok(ReplaceAssignmentsOutcome::Fallback);
+        }
         Err(error) => return Err(error),
     };
 
     let remote_payload_buffer = write_remote_payload(process, payload_bytes)?;
-    let apply_status = run_remote_thread(
+    let replace_assignments_status = run_remote_thread(
         process,
-        remote_apply_payload_address,
+        remote_replace_assignments_address,
         remote_payload_buffer.address(),
-        InjectionStep::StartApplyPayload,
-        InjectionStep::WaitApplyPayload,
+        InjectionStep::StartReplaceAssignments,
+        InjectionStep::WaitReplaceAssignments,
     )?;
 
-    match ApplyPayloadStatus::from_code(apply_status) {
-        Some(ApplyPayloadStatus::Success) => Ok(ApplyPayloadOutcome::Reloaded),
-        Some(status) if status.should_fallback() => Ok(ApplyPayloadOutcome::Fallback),
-        Some(status) => Ok(ApplyPayloadOutcome::Failed(status)),
-        None => Err(InjectorError::UnknownApplyPayloadStatus(apply_status)),
+    match ReplaceAssignmentsStatus::from_code(replace_assignments_status) {
+        Some(ReplaceAssignmentsStatus::Success) => Ok(ReplaceAssignmentsOutcome::Replaced),
+        Some(status) if status.should_fallback() => Ok(ReplaceAssignmentsOutcome::Fallback),
+        Some(status) => Ok(ReplaceAssignmentsOutcome::Failed(status)),
+        None => Err(InjectorError::UnknownReplaceAssignmentsStatus(
+            replace_assignments_status,
+        )),
     }
 }
 
@@ -137,7 +141,7 @@ fn matches_staged_dll_basename(expected: &str, module: &NamedRemoteModule) -> bo
     module_basename(&module.path, &module.name).eq_ignore_ascii_case(expected)
 }
 
-pub(crate) fn apply_or_initialize(
+pub(crate) fn apply_config(
     pid: u32,
     staged_dll_path: &Path,
     payload_bytes: &[u8],
@@ -160,20 +164,20 @@ pub(crate) fn apply_or_initialize(
     }
 
     if let Some(module) = find_matching_staged_dll(staged_dll_path, &loaded_hooks) {
-        match try_remote_apply_payload(&process, module, payload_bytes)? {
-            ApplyPayloadOutcome::Reloaded => return Ok(ApplyOutcome::Reloaded),
-            ApplyPayloadOutcome::Fallback => {
+        match try_remote_replace_assignments(&process, module, payload_bytes)? {
+            ReplaceAssignmentsOutcome::Replaced => return Ok(ApplyOutcome::Replaced),
+            ReplaceAssignmentsOutcome::Fallback => {
                 shutdown_for_reinject(pid)?;
                 inject_and_initialize(
                     pid,
                     staged_dll_path,
                     payload_bytes,
-                    InitializeContext::AfterReloadFallback,
+                    InitializeContext::AfterReplaceFallback,
                 )?;
                 return Ok(ApplyOutcome::Reinitialized);
             }
-            ApplyPayloadOutcome::Failed(status) => {
-                return Err(InjectorError::HookApplyPayloadFailed(status));
+            ReplaceAssignmentsOutcome::Failed(status) => {
+                return Err(InjectorError::HookReplaceAssignmentsFailed(status));
             }
         }
     }

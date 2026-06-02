@@ -11,8 +11,7 @@ mod win32;
 use cli::{CliCommand, ParseArgsResult, parse_args};
 use error::{InjectionStep, InjectorError, ShutdownStatus};
 use injector::{
-    ApplyOutcome, DisableOutcome, apply_or_initialize, canonicalize_existing_file,
-    disable_injected_hook,
+    ApplyOutcome, DisableOutcome, apply_config, canonicalize_existing_file, disable_injected_hook,
 };
 use staging::{default_hook_dll_path, stage_hook_dll};
 use win32::{enable_debug_privilege, find_process_id_by_name};
@@ -54,12 +53,12 @@ fn run_apply(options: cli::CliOptions) -> Result<(), InjectorError> {
     let pid = find_process_id_by_name("dwm.exe")?;
 
     enable_debug_privilege()?;
-    let outcome = apply_or_initialize(pid, &staged_dll_path, &payload_bytes)?;
+    let outcome = apply_config(pid, &staged_dll_path, &payload_bytes)?;
 
     match outcome {
-        ApplyOutcome::Reloaded => {
+        ApplyOutcome::Replaced => {
             println!(
-                "reloaded payload in dwm.exe (pid={pid}) from {}",
+                "replaced assignments in dwm.exe (pid={pid}) from {}",
                 config_path.display()
             );
         }

@@ -78,7 +78,7 @@ const LIFECYCLE_IDLE: u8 = 0;
 const LIFECYCLE_RUNNING: u8 = 1;
 const LIFECYCLE_SHUTTING_DOWN: u8 = 2;
 const LIFECYCLE_SHUT_DOWN: u8 = 3;
-const LIFECYCLE_APPLYING_PAYLOAD: u8 = 4;
+const LIFECYCLE_REPLACING_ASSIGNMENTS: u8 = 4;
 
 #[cfg(test)]
 thread_local! {
@@ -95,7 +95,7 @@ pub(crate) enum ShutdownStart {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ApplyPayloadStart {
+pub(crate) enum ReplaceAssignmentsStart {
     Started,
     NotInitialized,
     AlreadyInProgress,
@@ -159,7 +159,7 @@ pub(crate) fn is_runtime_active() -> bool {
     {
         matches!(
             LIFECYCLE.load(Ordering::Acquire),
-            LIFECYCLE_RUNNING | LIFECYCLE_APPLYING_PAYLOAD
+            LIFECYCLE_RUNNING | LIFECYCLE_REPLACING_ASSIGNMENTS
         )
     }
 
@@ -168,7 +168,7 @@ pub(crate) fn is_runtime_active() -> bool {
         LIFECYCLE.with(|lifecycle| {
             matches!(
                 *lifecycle.borrow(),
-                LIFECYCLE_RUNNING | LIFECYCLE_APPLYING_PAYLOAD
+                LIFECYCLE_RUNNING | LIFECYCLE_REPLACING_ASSIGNMENTS
             )
         })
     }
@@ -195,21 +195,23 @@ pub(crate) fn evaluate_present_hook(
     })
 }
 
-pub(crate) fn begin_apply_payload() -> ApplyPayloadStart {
+pub(crate) fn begin_replace_assignments() -> ReplaceAssignmentsStart {
     #[cfg(not(test))]
     {
         match LIFECYCLE.compare_exchange(
             LIFECYCLE_RUNNING,
-            LIFECYCLE_APPLYING_PAYLOAD,
+            LIFECYCLE_REPLACING_ASSIGNMENTS,
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => ApplyPayloadStart::Started,
-            Err(LIFECYCLE_IDLE) | Err(LIFECYCLE_SHUT_DOWN) => ApplyPayloadStart::NotInitialized,
-            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_APPLYING_PAYLOAD) => {
-                ApplyPayloadStart::AlreadyInProgress
+            Ok(_) => ReplaceAssignmentsStart::Started,
+            Err(LIFECYCLE_IDLE) | Err(LIFECYCLE_SHUT_DOWN) => {
+                ReplaceAssignmentsStart::NotInitialized
             }
-            Err(_) => ApplyPayloadStart::NotInitialized,
+            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_REPLACING_ASSIGNMENTS) => {
+                ReplaceAssignmentsStart::AlreadyInProgress
+            }
+            Err(_) => ReplaceAssignmentsStart::NotInitialized,
         }
     }
 
@@ -219,24 +221,24 @@ pub(crate) fn begin_apply_payload() -> ApplyPayloadStart {
             let mut lifecycle = lifecycle.borrow_mut();
             match *lifecycle {
                 LIFECYCLE_RUNNING => {
-                    *lifecycle = LIFECYCLE_APPLYING_PAYLOAD;
-                    ApplyPayloadStart::Started
+                    *lifecycle = LIFECYCLE_REPLACING_ASSIGNMENTS;
+                    ReplaceAssignmentsStart::Started
                 }
-                LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN => ApplyPayloadStart::NotInitialized,
-                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_APPLYING_PAYLOAD => {
-                    ApplyPayloadStart::AlreadyInProgress
+                LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN => ReplaceAssignmentsStart::NotInitialized,
+                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_REPLACING_ASSIGNMENTS => {
+                    ReplaceAssignmentsStart::AlreadyInProgress
                 }
-                _ => ApplyPayloadStart::NotInitialized,
+                _ => ReplaceAssignmentsStart::NotInitialized,
             }
         })
     }
 }
 
-pub(crate) fn finish_apply_payload() {
+pub(crate) fn finish_replace_assignments() {
     #[cfg(not(test))]
     {
         let _ = LIFECYCLE.compare_exchange(
-            LIFECYCLE_APPLYING_PAYLOAD,
+            LIFECYCLE_REPLACING_ASSIGNMENTS,
             LIFECYCLE_RUNNING,
             Ordering::AcqRel,
             Ordering::Acquire,
@@ -247,7 +249,7 @@ pub(crate) fn finish_apply_payload() {
     {
         LIFECYCLE.with(|lifecycle| {
             let mut lifecycle = lifecycle.borrow_mut();
-            if *lifecycle == LIFECYCLE_APPLYING_PAYLOAD {
+            if *lifecycle == LIFECYCLE_REPLACING_ASSIGNMENTS {
                 *lifecycle = LIFECYCLE_RUNNING;
             }
         });
@@ -283,7 +285,7 @@ pub(crate) fn begin_shutdown() -> ShutdownStart {
         ) {
             Ok(_) => ShutdownStart::Started,
             Err(LIFECYCLE_IDLE) => ShutdownStart::NotInitialized,
-            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_APPLYING_PAYLOAD) => {
+            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_REPLACING_ASSIGNMENTS) => {
                 ShutdownStart::AlreadyInProgress
             }
             Err(LIFECYCLE_SHUT_DOWN) => ShutdownStart::AlreadyShutDown,
@@ -301,7 +303,7 @@ pub(crate) fn begin_shutdown() -> ShutdownStart {
                     ShutdownStart::Started
                 }
                 LIFECYCLE_IDLE => ShutdownStart::NotInitialized,
-                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_APPLYING_PAYLOAD => {
+                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_REPLACING_ASSIGNMENTS => {
                     ShutdownStart::AlreadyInProgress
                 }
                 LIFECYCLE_SHUT_DOWN => ShutdownStart::AlreadyShutDown,

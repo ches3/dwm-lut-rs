@@ -148,7 +148,7 @@ impl fmt::Display for InitializeStatus {
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApplyPayloadStatus {
+pub enum ReplaceAssignmentsStatus {
     Success = 0,
     NullPayload = 1,
     InvalidPayload = 2,
@@ -158,7 +158,7 @@ pub enum ApplyPayloadStatus {
     PayloadHasNoAssignments = 6,
 }
 
-impl ApplyPayloadStatus {
+impl ReplaceAssignmentsStatus {
     pub fn from_code(code: u32) -> Option<Self> {
         Some(match code {
             0 => Self::Success,
@@ -177,7 +177,7 @@ impl ApplyPayloadStatus {
     }
 }
 
-impl fmt::Display for ApplyPayloadStatus {
+impl fmt::Display for ReplaceAssignmentsStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Success => write!(f, "success"),
