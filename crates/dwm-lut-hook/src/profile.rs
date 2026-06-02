@@ -53,19 +53,16 @@ pub enum AobToken {
     Wildcard,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How a hook signature is located inside a PE module image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureLocator {
+    /// Match a function entry point in the module image; resolved address is the match offset.
     Aob {
         module_name: &'static str,
         capture_key: &'static str,
         tokens: &'static [AobToken],
     },
-    AobExcludingFollowingBytes {
-        module_name: &'static str,
-        capture_key: &'static str,
-        tokens: &'static [AobToken],
-        excluded_following: &'static [&'static [u8]],
-    },
+    /// Match an instruction with a RIP-relative displacement and resolve the referenced global.
     RipRelativeGlobalAob {
         module_name: &'static str,
         capture_key: &'static str,
@@ -73,13 +70,24 @@ pub enum SignatureLocator {
         displacement_offset: usize,
         instruction_size: usize,
     },
-    FollowingAob {
-        module_name: &'static str,
-        capture_key: &'static str,
-        anchor_tokens: &'static [AobToken],
-        tokens: &'static [AobToken],
-        search_range: usize,
-    },
+}
+
+impl SignatureLocator {
+    pub const fn module_name(self) -> &'static str {
+        match self {
+            Self::Aob { module_name, .. } | Self::RipRelativeGlobalAob { module_name, .. } => {
+                module_name
+            }
+        }
+    }
+
+    pub const fn capture_key(self) -> &'static str {
+        match self {
+            Self::Aob { capture_key, .. } | Self::RipRelativeGlobalAob { capture_key, .. } => {
+                capture_key
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +198,7 @@ const PRESENT_AOB: &[AobToken] = &[
     Exact(0xD9),
 ];
 
-const DIRECT_FLIP_AOB: &[AobToken] = &[
+const OVERLAY_DIRECT_FLIP_AOB: &[AobToken] = &[
     Exact(0x48),
     Exact(0x8B),
     Exact(0xC4),
@@ -218,11 +226,10 @@ const DIRECT_FLIP_AOB: &[AobToken] = &[
     Exact(0x20),
     Exact(0x33),
     Exact(0xDB),
+    Exact(0x4D),
+    Exact(0x8B),
+    Exact(0xF1),
 ];
-
-const COMP_SWAP_CHAIN_DIRECT_FLIP_FOLLOWING_BYTES: &[u8] = &[0x41, 0x8B, 0xF0];
-const NON_OVERLAY_DIRECT_FLIP_FOLLOWING_BYTES_25H2_2026_05: &[u8] =
-    &[0x48, 0x8D, 0xB9, 0x98, 0x01, 0x00, 0x00];
 
 const OVERLAY_TEST_MODE_ANCHOR_AOB: &[AobToken] = &[
     Exact(0x83),
@@ -302,9 +309,56 @@ const COMP_SWAP_CHAIN_DIRECT_FLIP_AOB: &[AobToken] = &[
     Exact(0x20),
     Exact(0x33),
     Exact(0xDB),
-    Exact(0x41),
+    Exact(0x48),
+    Exact(0x8D),
+    Exact(0xB9),
+    Exact(0x98),
+    Exact(0x01),
+    Exact(0x00),
+    Exact(0x00),
+];
+
+const COMP_SWAP_CHAIN_INDEPENDENT_FLIP_AOB: &[AobToken] = &[
+    Exact(0x40),
+    Exact(0x53),
+    Exact(0x48),
+    Exact(0x83),
+    Exact(0xEC),
+    Exact(0x40),
+    Exact(0x48),
     Exact(0x8B),
-    Exact(0xF0),
+    Exact(0x05),
+    Wildcard,
+    Wildcard,
+    Wildcard,
+    Wildcard,
+    Exact(0x48),
+    Exact(0x33),
+    Exact(0xC4),
+    Exact(0x48),
+    Exact(0x89),
+    Exact(0x44),
+    Exact(0x24),
+    Exact(0x30),
+    Exact(0x83),
+    Exact(0xB9),
+    Exact(0xB8),
+    Exact(0x00),
+    Exact(0x00),
+    Exact(0x00),
+    Exact(0x00),
+    Exact(0x48),
+    Exact(0x8B),
+    Exact(0xD9),
+    Exact(0x75),
+    Exact(0x49),
+    Exact(0xF6),
+    Exact(0x81),
+    Exact(0x1C),
+    Exact(0x02),
+    Exact(0x00),
+    Exact(0x00),
+    Exact(0x20),
 ];
 
 const COMP_VISUAL_PROMOTION_AOB: &[AobToken] = &[
@@ -325,16 +379,18 @@ const COMP_VISUAL_PROMOTION_AOB: &[AobToken] = &[
     Exact(0x20),
     Exact(0x48),
     Exact(0x8B),
-    Exact(0x01),
+    Exact(0x41),
+    Exact(0x58),
     Exact(0x41),
     Exact(0x8B),
-    Exact(0xD1),
+    Exact(0xF0),
     Exact(0x48),
     Exact(0x8B),
-    Exact(0xF1),
+    Exact(0xFA),
+    Exact(0x48),
+    Exact(0x8B),
+    Exact(0xD9),
 ];
-
-const COMP_SWAP_CHAIN_INDEPENDENT_FLIP_AOB: &[AobToken] = &[Exact(0x48), Exact(0x8D), Exact(0x05)];
 
 fn windows_11_25h2() -> HookProfile {
     HookProfile {
@@ -352,16 +408,12 @@ fn windows_11_25h2() -> HookProfile {
             },
             HookSignature {
                 target: HookTarget::IsCandidateDirectFlipCompatible,
-                locator: SignatureLocator::AobExcludingFollowingBytes {
+                locator: SignatureLocator::Aob {
                     module_name: "dwmcore.dll",
                     capture_key: "direct_flip_compat_25h2",
-                    tokens: DIRECT_FLIP_AOB,
-                    excluded_following: &[
-                        COMP_SWAP_CHAIN_DIRECT_FLIP_FOLLOWING_BYTES,
-                        NON_OVERLAY_DIRECT_FLIP_FOLLOWING_BYTES_25H2_2026_05,
-                    ],
+                    tokens: OVERLAY_DIRECT_FLIP_AOB,
                 },
-                note: "Matches the 25H2 direct-flip compatibility gate while excluding non-overlay prologues that share the same prefix.",
+                note: "Matches the 25H2 COverlayContext direct-flip gate via the overlay-specific prologue suffix on current dwmcore builds.",
             },
             HookSignature {
                 target: HookTarget::WindowContextIsCandidateDirectFlipCompatible,
@@ -379,7 +431,7 @@ fn windows_11_25h2() -> HookProfile {
                     capture_key: "comp_swap_chain_direct_flip_compat_25h2",
                     tokens: COMP_SWAP_CHAIN_DIRECT_FLIP_AOB,
                 },
-                note: "Matches the 25H2 CCompSwapChain direct-flip gate used by dwm_lut_fixed to suppress promotion after DWM refactors.",
+                note: "Matches the 25H2 CCompSwapChain direct-flip gate on current dwmcore builds (lea rdi,[rcx+198h] suffix).",
             },
             HookSignature {
                 target: HookTarget::CompVisualIsCandidateForPromotion,
@@ -388,18 +440,16 @@ fn windows_11_25h2() -> HookProfile {
                     capture_key: "comp_visual_promotion_25h2",
                     tokens: COMP_VISUAL_PROMOTION_AOB,
                 },
-                note: "Matches the 25H2 CCompVisual promotion gate used by dwm_lut_fixed.",
+                note: "Matches the 25H2 CCompVisual promotion gate on current dwmcore builds.",
             },
             HookSignature {
                 target: HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible,
-                locator: SignatureLocator::FollowingAob {
+                locator: SignatureLocator::Aob {
                     module_name: "dwmcore.dll",
                     capture_key: "comp_swap_chain_independent_flip_compat_25h2",
-                    anchor_tokens: OVERLAY_TEST_MODE_ANCHOR_AOB,
                     tokens: COMP_SWAP_CHAIN_INDEPENDENT_FLIP_AOB,
-                    search_range: 500,
                 },
-                note: "Matches the 25H2 CCompSwapChain independent-flip gate located near the OverlayTestMode anchor in dwm_lut_fixed.",
+                note: "Matches the 25H2 CCompSwapChain independent-flip gate (bool(this)) called from the comp-swap-chain promotion path on current dwmcore builds.",
             },
             HookSignature {
                 target: HookTarget::OverlayTestMode,

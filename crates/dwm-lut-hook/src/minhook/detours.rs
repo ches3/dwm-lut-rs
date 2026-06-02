@@ -187,9 +187,7 @@ mod tests {
     use crate::profile::HookTarget;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state::{self};
-    use crate::{
-        BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookProfile, SignatureLocator,
-    };
+    use crate::{BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookProfile};
 
     unsafe extern "system" fn returns_true_overlay_direct_flip(
         _a0: usize,
@@ -272,14 +270,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, signature)| {
-                    let capture_key = match &signature.locator {
-                        SignatureLocator::Aob { capture_key, .. } => *capture_key,
-                        SignatureLocator::AobExcludingFollowingBytes { capture_key, .. } => {
-                            *capture_key
-                        }
-                        SignatureLocator::RipRelativeGlobalAob { capture_key, .. } => *capture_key,
-                        SignatureLocator::FollowingAob { capture_key, .. } => *capture_key,
-                    };
+                    let capture_key = signature.locator.capture_key();
 
                     ResolvedTarget {
                         target: signature.target,

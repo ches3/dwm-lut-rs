@@ -162,127 +162,69 @@ fn resolve_signature(
     image: &[u8],
     signature: &HookSignature,
 ) -> Result<ResolvedTarget, HookResolveError> {
+    debug_assert_eq!(module.module_name, signature.locator.module_name());
+
+    let capture_key = signature.locator.capture_key();
     match signature.locator {
-        SignatureLocator::Aob {
-            module_name,
+        SignatureLocator::Aob { tokens, .. } => resolve_unique_match(
+            module,
+            signature.target,
             capture_key,
-            tokens,
-        } => {
-            debug_assert_eq!(module.module_name, module_name);
-
-            let matches = find_signature_offsets(image, tokens);
-            match matches.as_slice() {
-                [] => Err(HookResolveError::SignatureNotFound {
-                    target: signature.target,
-                    capture_key,
-                }),
-                [offset] => Ok(ResolvedTarget {
-                    target: signature.target,
-                    capture_key,
-                    address: module.base_address + offset,
-                }),
-                many => Err(HookResolveError::SignatureAmbiguous {
-                    target: signature.target,
-                    capture_key,
-                    matches: many.len(),
-                }),
-            }
-        }
-        SignatureLocator::AobExcludingFollowingBytes {
-            module_name,
-            capture_key,
-            tokens,
-            excluded_following,
-        } => {
-            debug_assert_eq!(module.module_name, module_name);
-
-            let matches =
-                find_signature_offsets_excluding_following(image, tokens, excluded_following);
-            match matches.as_slice() {
-                [] => Err(HookResolveError::SignatureNotFound {
-                    target: signature.target,
-                    capture_key,
-                }),
-                [offset] => Ok(ResolvedTarget {
-                    target: signature.target,
-                    capture_key,
-                    address: module.base_address + offset,
-                }),
-                many => Err(HookResolveError::SignatureAmbiguous {
-                    target: signature.target,
-                    capture_key,
-                    matches: many.len(),
-                }),
-            }
-        }
+            find_signature_offsets(image, tokens),
+        ),
         SignatureLocator::RipRelativeGlobalAob {
-            module_name,
-            capture_key,
             tokens,
             displacement_offset,
             instruction_size,
-        } => {
-            debug_assert_eq!(module.module_name, module_name);
-
-            let matches = find_signature_offsets(image, tokens);
-            match matches.as_slice() {
-                [] => Err(HookResolveError::SignatureNotFound {
-                    target: signature.target,
-                    capture_key,
-                }),
-                [offset] => {
-                    let displacement =
-                        read_i32_from_image(image, *offset + displacement_offset)? as isize;
-                    let base = module.base_address + offset + instruction_size;
-                    let address = (base as isize + displacement) as usize;
-
-                    Ok(ResolvedTarget {
-                        target: signature.target,
-                        capture_key,
-                        address,
-                    })
-                }
-                many => Err(HookResolveError::SignatureAmbiguous {
-                    target: signature.target,
-                    capture_key,
-                    matches: many.len(),
-                }),
-            }
-        }
-        SignatureLocator::FollowingAob {
-            module_name,
-            capture_key,
-            anchor_tokens,
-            tokens,
-            search_range,
-        } => {
-            debug_assert_eq!(module.module_name, module_name);
-
-            let matches = find_following_signature_offsets(
-                image,
-                anchor_tokens,
-                tokens,
-                search_range,
-                signature.target,
+            ..
+        } => match find_signature_offsets(image, tokens).as_slice() {
+            [] => Err(HookResolveError::SignatureNotFound {
+                target: signature.target,
                 capture_key,
-            )?;
-            match matches.as_slice() {
-                [] => Err(HookResolveError::SignatureNotFound {
+            }),
+            [offset] => {
+                let displacement =
+                    read_i32_from_image(image, *offset + displacement_offset, module.module_name)?
+                        as isize;
+                let base = module.base_address + offset + instruction_size;
+                let address = (base as isize + displacement) as usize;
+
+                Ok(ResolvedTarget {
                     target: signature.target,
                     capture_key,
-                }),
-                [offset] => Ok(ResolvedTarget {
-                    target: signature.target,
-                    capture_key,
-                    address: module.base_address + offset,
-                }),
-                many => Err(HookResolveError::SignatureAmbiguous {
-                    target: signature.target,
-                    capture_key,
-                    matches: many.len(),
-                }),
+                    address,
+                })
             }
-        }
+            many => Err(HookResolveError::SignatureAmbiguous {
+                target: signature.target,
+                capture_key,
+                matches: many.len(),
+            }),
+        },
+    }
+}
+
+fn resolve_unique_match(
+    module: LoadedModule,
+    target: HookTarget,
+    capture_key: &'static str,
+    matches: Vec<usize>,
+) -> Result<ResolvedTarget, HookResolveError> {
+    match matches.as_slice() {
+        [] => Err(HookResolveError::SignatureNotFound {
+            target,
+            capture_key,
+        }),
+        [offset] => Ok(ResolvedTarget {
+            target,
+            capture_key,
+            address: module.base_address + offset,
+        }),
+        many => Err(HookResolveError::SignatureAmbiguous {
+            target,
+            capture_key,
+            matches: many.len(),
+        }),
     }
 }
 
@@ -362,8 +304,9 @@ fn find_signature_offsets(image: &[u8], tokens: &[AobToken]) -> Vec<usize> {
     }
 
     let mut matches = Vec::new();
+    let scan_limit = image.len() - tokens.len();
 
-    for offset in 0..=image.len() - tokens.len() {
+    for offset in 0..=scan_limit {
         if tokens
             .iter()
             .zip(&image[offset..offset + tokens.len()])
@@ -376,61 +319,15 @@ fn find_signature_offsets(image: &[u8], tokens: &[AobToken]) -> Vec<usize> {
     matches
 }
 
-fn find_signature_offsets_excluding_following(
+fn read_i32_from_image(
     image: &[u8],
-    tokens: &[AobToken],
-    excluded_following: &[&[u8]],
-) -> Vec<usize> {
-    find_signature_offsets(image, tokens)
-        .into_iter()
-        .filter(|offset| {
-            let following = &image[*offset + tokens.len()..];
-            !excluded_following
-                .iter()
-                .any(|excluded| following.starts_with(excluded))
-        })
-        .collect()
-}
-
-fn find_following_signature_offsets(
-    image: &[u8],
-    anchor_tokens: &[AobToken],
-    tokens: &[AobToken],
-    search_range: usize,
-    target: HookTarget,
-    capture_key: &'static str,
-) -> Result<Vec<usize>, HookResolveError> {
-    let anchor_matches = find_signature_offsets(image, anchor_tokens);
-    let [anchor_offset] = anchor_matches.as_slice() else {
-        return if anchor_matches.is_empty() {
-            Err(HookResolveError::SignatureNotFound {
-                target,
-                capture_key,
-            })
-        } else {
-            Err(HookResolveError::SignatureAmbiguous {
-                target,
-                capture_key,
-                matches: anchor_matches.len(),
-            })
-        };
-    };
-
-    let search_start = anchor_offset + anchor_tokens.len();
-    let search_end = image.len().min(search_start + search_range);
-    Ok(
-        find_signature_offsets(&image[search_start..search_end], tokens)
-            .into_iter()
-            .map(|offset| search_start + offset)
-            .collect(),
-    )
-}
-
-fn read_i32_from_image(image: &[u8], offset: usize) -> Result<i32, HookResolveError> {
+    offset: usize,
+    module_name: &'static str,
+) -> Result<i32, HookResolveError> {
     let bytes = image
         .get(offset..offset + 4)
         .ok_or(HookResolveError::InvalidModuleImage {
-            module_name: "dwmcore.dll",
+            module_name,
             detail: "RIP-relative displacement was out of image bounds",
         })?;
     Ok(i32::from_le_bytes(
@@ -456,95 +353,32 @@ unsafe fn read_u32(base: *const u8, offset: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        HookResolveError, LoadedModule, find_following_signature_offsets, find_signature_offsets,
-        find_signature_offsets_excluding_following, resolve_profile_from_image,
+        HookResolveError, LoadedModule, find_signature_offsets, resolve_profile_from_image,
     };
     use crate::profile::{AobToken, BuildProfile, HookProfile};
 
     #[test]
     fn aob_scan_honors_wildcards() {
-        let image = [0x90, 0x40, 0x55, 0xAA, 0x57, 0x90];
         let tokens = [
             AobToken::Exact(0x40),
             AobToken::Exact(0x55),
             AobToken::Wildcard,
             AobToken::Exact(0x57),
         ];
+        let image = [0x90, 0x40, 0x55, 0xAA, 0x57, 0x90];
 
         assert_eq!(find_signature_offsets(&image, &tokens), vec![1]);
     }
 
     #[test]
-    fn aob_scan_can_exclude_shared_function_prefixes() {
-        let tokens = [
-            AobToken::Exact(0x48),
-            AobToken::Exact(0x8B),
-            AobToken::Exact(0xC4),
-        ];
-        let image = [
-            0x48, 0x8B, 0xC4, 0x90, 0x90, 0x48, 0x8B, 0xC4, 0x41, 0x8B, 0xF0, 0x48, 0x8B, 0xC4,
-            0x48, 0x8D, 0xB9, 0x98, 0x01, 0x00, 0x00,
-        ];
-
-        assert_eq!(
-            find_signature_offsets_excluding_following(
-                &image,
-                &tokens,
-                &[
-                    &[0x41, 0x8B, 0xF0],
-                    &[0x48, 0x8D, 0xB9, 0x98, 0x01, 0x00, 0x00]
-                ]
-            ),
-            vec![0]
-        );
-    }
-
-    #[test]
-    fn following_aob_scan_searches_after_unique_anchor() {
-        let image = [
-            0x90, 0x83, 0x3D, 0x00, 0x00, 0x00, 0x00, 0x05, 0x74, 0x09, 0x90, 0x48, 0x8D, 0x05,
-            0x90,
-        ];
-        let anchor = [
-            AobToken::Exact(0x83),
-            AobToken::Exact(0x3D),
-            AobToken::Wildcard,
-            AobToken::Wildcard,
-            AobToken::Wildcard,
-            AobToken::Wildcard,
-            AobToken::Exact(0x05),
-            AobToken::Exact(0x74),
-            AobToken::Exact(0x09),
-        ];
-        let tokens = [
-            AobToken::Exact(0x48),
-            AobToken::Exact(0x8D),
-            AobToken::Exact(0x05),
-        ];
-
-        assert_eq!(
-            find_following_signature_offsets(
-                &image,
-                &anchor,
-                &tokens,
-                8,
-                crate::profile::HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible,
-                "independent_flip_test"
-            )
-            .expect("following signature should resolve"),
-            vec![11]
-        );
-    }
-
-    #[test]
     fn resolve_profile_reports_missing_signature_by_target() {
         let profile = HookProfile::for_build(BuildProfile::Windows11_25H2);
+        let image = [0u8; 16];
         let module = LoadedModule {
             module_name: "dwmcore.dll",
             base_address: 0x1000_0000,
-            size: 128,
+            size: image.len(),
         };
-        let image = [0u8; 128];
 
         let error = resolve_profile_from_image(&profile, module, &image)
             .expect_err("resolution should fail when no signatures match");

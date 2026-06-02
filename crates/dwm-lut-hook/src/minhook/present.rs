@@ -682,7 +682,7 @@ mod tests {
     use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
     use crate::{
         BackBufferFormat, BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM,
-        DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect, HookProfile, SignatureLocator,
+        DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect, HookProfile,
     };
 
     static LAST_ORIGINAL_PRESENT_RECTS: Mutex<Option<Vec<DirtyRect>>> = Mutex::new(None);
@@ -742,14 +742,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, signature)| {
-                    let capture_key = match &signature.locator {
-                        SignatureLocator::Aob { capture_key, .. } => *capture_key,
-                        SignatureLocator::AobExcludingFollowingBytes { capture_key, .. } => {
-                            *capture_key
-                        }
-                        SignatureLocator::RipRelativeGlobalAob { capture_key, .. } => *capture_key,
-                        SignatureLocator::FollowingAob { capture_key, .. } => *capture_key,
-                    };
+                    let capture_key = signature.locator.capture_key();
 
                     ResolvedTarget {
                         target: signature.target,
