@@ -134,7 +134,7 @@ fn parse_monitors_args(
 }
 
 fn usage_message(problem: &str) -> String {
-    let usage = "usage: dwm-lut-injector apply [--dll <hook-dll-path>] --config <config-path> [--profile <profile-name>]\n       dwm-lut-injector disable\n       dwm-lut-injector monitors";
+    let usage = "usage: dwm-lut apply [--dll <hook-dll-path>] --config <config-path> [--profile <profile-name>]\n       dwm-lut disable\n       dwm-lut monitors";
     if problem.is_empty() {
         usage.to_string()
     } else {
@@ -152,11 +152,11 @@ mod tests {
 
     #[test]
     fn reports_help_without_treating_it_as_invalid_usage() {
-        let parsed = parse_args_from(["dwm-lut-injector", "--help"]).expect("help should parse");
+        let parsed = parse_args_from(["dwm-lut", "--help"]).expect("help should parse");
 
         match parsed {
             ParseArgsResult::Help(message) => {
-                assert!(message.starts_with("usage: dwm-lut-injector"));
+                assert!(message.starts_with("usage: dwm-lut"));
             }
             ParseArgsResult::Run(_) => panic!("help must not continue to normal execution"),
         }
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn requires_config_path() {
-        let error = parse_args_from(["dwm-lut-injector", "apply", "--dll", "hook.dll"])
+        let error = parse_args_from(["dwm-lut", "apply", "--dll", "hook.dll"])
             .expect_err("missing config must be rejected");
 
         match error {
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn rejects_config_without_command() {
-        let error = parse_args_from(["dwm-lut-injector", "--config", "config.json"])
+        let error = parse_args_from(["dwm-lut", "--config", "config.json"])
             .expect_err("config without command must be rejected");
 
         match error {
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn accepts_explicit_apply_command() {
-        let parsed = parse_args_from(["dwm-lut-injector", "apply", "--config", "config.json"])
+        let parsed = parse_args_from(["dwm-lut", "apply", "--config", "config.json"])
             .expect("explicit apply command should parse");
 
         assert_eq!(
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn accepts_profile_argument() {
         let parsed = parse_args_from([
-            "dwm-lut-injector",
+            "dwm-lut",
             "apply",
             "--config",
             "config.json",
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn accepts_profile_argument_with_mixed_case() {
         let parsed = parse_args_from([
-            "dwm-lut-injector",
+            "dwm-lut",
             "apply",
             "--config",
             "config.json",
@@ -250,7 +250,7 @@ mod tests {
     #[test]
     fn accepts_profile_argument_with_surrounding_whitespace() {
         let parsed = parse_args_from([
-            "dwm-lut-injector",
+            "dwm-lut",
             "apply",
             "--config",
             "config.json",
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn rejects_empty_profile_argument() {
         let error = parse_args_from([
-            "dwm-lut-injector",
+            "dwm-lut",
             "apply",
             "--config",
             "config.json",
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn rejects_whitespace_profile_argument() {
         let error = parse_args_from([
-            "dwm-lut-injector",
+            "dwm-lut",
             "apply",
             "--config",
             "config.json",
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn rejects_profile_without_value() {
         let error = parse_args_from([
-            "dwm-lut-injector",
+            "dwm-lut",
             "apply",
             "--config",
             "config.json",
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn accepts_disable_command_without_config() {
         let parsed =
-            parse_args_from(["dwm-lut-injector", "disable"]).expect("disable command should parse");
+            parse_args_from(["dwm-lut", "disable"]).expect("disable command should parse");
 
         match parsed {
             ParseArgsResult::Run(CliCommand::Disable) => {}
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn accepts_monitors_command_without_config() {
-        let parsed = parse_args_from(["dwm-lut-injector", "monitors"])
+        let parsed = parse_args_from(["dwm-lut", "monitors"])
             .expect("monitors command should parse");
 
         match parsed {
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn rejects_monitors_arguments() {
-        let error = parse_args_from(["dwm-lut-injector", "monitors", "--config", "config.json"])
+        let error = parse_args_from(["dwm-lut", "monitors", "--config", "config.json"])
             .expect_err("monitors must reject arguments");
 
         match error {
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn accepts_explicit_dll_argument() {
         let parsed = parse_args_from([
-            "dwm-lut-injector",
+            "dwm-lut",
             "apply",
             "--dll",
             "hook.dll",

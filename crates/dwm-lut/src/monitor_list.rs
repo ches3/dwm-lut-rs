@@ -1,5 +1,5 @@
+use crate::backend::{DesktopPosition, DesktopResolution, MonitorListing, list_monitor_listings};
 use crate::error::InjectorError;
-use crate::monitor::{DesktopPosition, DesktopResolution, MonitorListing, list_monitor_listings};
 
 const UNKNOWN_NAME: &str = "(unknown)";
 

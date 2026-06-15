@@ -32,7 +32,7 @@ pub(crate) fn default_hook_dll_path() -> Result<PathBuf, InjectorError> {
         step: InjectionStep::ResolveDefaultHookDll,
         source: io::Error::new(
             io::ErrorKind::InvalidInput,
-            "injector executable path has no parent directory",
+            "host executable path has no parent directory",
         ),
     })?;
 

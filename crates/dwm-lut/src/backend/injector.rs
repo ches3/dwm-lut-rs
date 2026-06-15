@@ -1,13 +1,13 @@
 use std::path::{Path, PathBuf};
 
-use crate::error::{
-    InitializeContext, InitializeStatus, InjectionStep, InjectorError, ReplaceAssignmentsStatus,
-    ShutdownStatus,
-};
-use crate::win32::{
+use super::win32::{
     NamedRemoteModule, OwnedHandle, RemoteAllocation, RemoteModule, find_remote_module,
     find_remote_modules_by_name, open_target_process, resolve_remote_export_address,
     resolve_remote_module_export_address, run_remote_thread, wide_null,
+};
+use crate::error::{
+    InitializeContext, InitializeStatus, InjectionStep, InjectorError, ReplaceAssignmentsStatus,
+    ShutdownStatus,
 };
 
 const REMOTE_LOAD_LIBRARY_X64_STUB: [u8; 60] = [
@@ -506,12 +506,12 @@ mod tests {
     use crate::error::InjectorError;
     use crate::error::ShutdownStatus;
 
+    use super::super::win32::NamedRemoteModule;
     use super::{
         DisableOutcome, ShutdownAggregation, ShutdownDecision, evaluate_shutdown_status,
         find_matching_staged_dll, is_staged_hook_module_name, matches_staged_dll_basename,
         module_basename, staged_dll_basename,
     };
-    use crate::win32::NamedRemoteModule;
 
     #[test]
     fn staged_hook_module_match_is_limited_to_content_addressed_hook_dlls() {
@@ -649,7 +649,7 @@ mod tests {
         NamedRemoteModule {
             path: path.to_string(),
             name: name.to_string(),
-            module: crate::win32::RemoteModule {
+            module: super::super::win32::RemoteModule {
                 base_address: 0x1000,
             },
         }

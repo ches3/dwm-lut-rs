@@ -7,8 +7,8 @@ pub use dwm_lut_payload::{ColorMode, MonitorIdentity, MonitorTarget};
 use dwm_lut_payload::{HookPayload, PayloadAssignment, PayloadError, validate_payload};
 use serde::Deserialize;
 
+use crate::backend::monitor::resolve_monitor_identity;
 use crate::lut::parse_lut;
-use crate::monitor::resolve_monitor_identity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LutAssignment {
@@ -1120,10 +1120,8 @@ mod tests {
     fn load_config_selects_named_profile_case_insensitively_from_file() {
         use std::fs;
 
-        let dir = std::env::temp_dir().join(format!(
-            "dwm-lut-injector-test-{}-profile-case",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("dwm-lut-test-{}-profile-case", std::process::id()));
         fs::create_dir_all(&dir).expect("temp dir should be created");
         let path = dir.join("config.json");
         fs::write(
@@ -1149,8 +1147,7 @@ mod tests {
     fn load_config_reads_named_profile_from_file() {
         use std::fs;
 
-        let dir =
-            std::env::temp_dir().join(format!("dwm-lut-injector-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dwm-lut-test-{}", std::process::id()));
         fs::create_dir_all(&dir).expect("temp dir should be created");
         let path = dir.join("config.json");
         fs::write(

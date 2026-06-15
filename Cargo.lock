@@ -83,23 +83,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "dwm-lut-hook"
-version = "0.1.0"
-dependencies = [
- "cc",
- "dwm-lut-payload",
- "minhook-sys",
- "windows-sys",
-]
-
-[[package]]
-name = "dwm-lut-injector"
+name = "dwm-lut"
 version = "0.1.0"
 dependencies = [
  "dwm-lut-payload",
  "serde",
  "serde_json",
  "sha2",
+ "windows-sys",
+]
+
+[[package]]
+name = "dwm-lut-hook"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "dwm-lut-payload",
+ "minhook-sys",
  "windows-sys",
 ]
 
