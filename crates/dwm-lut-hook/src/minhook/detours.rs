@@ -3,6 +3,8 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::profile::HookTarget;
+#[cfg(debug_assertions)]
+use crate::route_trace::{FlipGateKind, record_comp_direct_flip_call_summary, record_flip_gate};
 use crate::state;
 
 use super::present::present_detour;
@@ -113,11 +115,19 @@ unsafe fn forward_bool1(slot: &AtomicPtr<c_void>, this: usize) -> u8 {
     unsafe { original(this) }
 }
 
-fn evaluate_bool_detour(original: u8, evaluate: impl FnOnce(bool) -> Option<bool>) -> u8 {
+fn evaluate_bool_detour(
+    #[cfg(debug_assertions)] kind: FlipGateKind,
+    original: u8,
+    evaluate: impl FnOnce(bool) -> Option<bool>,
+) -> u8 {
     if !state::is_runtime_active() {
         return original;
     }
-    bool_to_u8(evaluate(original != 0).unwrap_or(original != 0))
+    let original_bool = original != 0;
+    let result_bool = evaluate(original_bool).unwrap_or(original_bool);
+    #[cfg(debug_assertions)]
+    record_flip_gate(kind, original_bool, result_bool);
+    bool_to_u8(result_bool)
 }
 
 unsafe extern "system" fn direct_flip_detour(
@@ -130,30 +140,45 @@ unsafe extern "system" fn direct_flip_detour(
 ) -> u8 {
     let original =
         unsafe { forward_overlay_direct_flip(&DIRECT_FLIP_ORIGINAL, this, a2, a3, a4, a5, a6) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_direct_flip_compatible(this, original)
-    })
+    evaluate_bool_detour(
+        #[cfg(debug_assertions)]
+        FlipGateKind::OverlayContextDirectFlip,
+        original,
+        |original| state::evaluate_direct_flip_compatible(this, original),
+    )
 }
 
 unsafe extern "system" fn window_direct_flip_detour(this: usize, a2: usize, a3: u8) -> u8 {
     let original = unsafe { forward_bool3(&WINDOW_DIRECT_FLIP_ORIGINAL, this, a2, a3) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_window_context_direct_flip_compatible(original)
-    })
+    evaluate_bool_detour(
+        #[cfg(debug_assertions)]
+        FlipGateKind::WindowContextDirectFlip,
+        original,
+        state::evaluate_window_context_direct_flip_compatible,
+    )
 }
 
 unsafe extern "system" fn comp_swap_chain_direct_flip_detour(this: usize, a2: usize, a3: u8) -> u8 {
     let original = unsafe { forward_bool3(&COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL, this, a2, a3) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_comp_swap_chain_direct_flip_compatible(original)
-    })
+    let result = evaluate_bool_detour(
+        #[cfg(debug_assertions)]
+        FlipGateKind::CompSwapChainDirectFlip,
+        original,
+        state::evaluate_comp_swap_chain_direct_flip_compatible,
+    );
+    #[cfg(debug_assertions)]
+    record_comp_direct_flip_call_summary(this, a2, a3, original != 0, result != 0);
+    result
 }
 
 unsafe extern "system" fn comp_swap_chain_independent_flip_detour(this: usize) -> u8 {
     let original = unsafe { forward_bool1(&COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL, this) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_comp_swap_chain_independent_flip_compatible(original)
-    })
+    evaluate_bool_detour(
+        #[cfg(debug_assertions)]
+        FlipGateKind::CompSwapChainIndependentFlip,
+        original,
+        state::evaluate_comp_swap_chain_independent_flip_compatible,
+    )
 }
 
 unsafe extern "system" fn comp_visual_promotion_detour(this: usize, a2: usize, a3: usize) -> u8 {
@@ -164,9 +189,12 @@ unsafe extern "system" fn comp_visual_promotion_detour(this: usize, a2: usize, a
 
     let original_fn: ForwardCompVisual = unsafe { std::mem::transmute(original) };
     let original = unsafe { original_fn(this, a2, a3) };
-    evaluate_bool_detour(original, |original| {
-        state::evaluate_comp_visual_candidate_for_promotion(original)
-    })
+    evaluate_bool_detour(
+        #[cfg(debug_assertions)]
+        FlipGateKind::CompVisualPromotion,
+        original,
+        state::evaluate_comp_visual_candidate_for_promotion,
+    )
 }
 
 const fn bool_to_u8(value: bool) -> u8 {
@@ -176,7 +204,6 @@ const fn bool_to_u8(value: bool) -> u8 {
 #[cfg(test)]
 mod tests {
     use std::ffi::c_void;
-    use std::sync::Mutex;
     use std::sync::atomic::Ordering;
 
     use dwm_lut_payload::{
@@ -186,7 +213,7 @@ mod tests {
 
     use crate::profile::HookTarget;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
-    use crate::state::{self};
+    use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
     use crate::{BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookProfile};
 
     unsafe extern "system" fn returns_true_overlay_direct_flip(
@@ -211,8 +238,6 @@ mod tests {
     unsafe extern "system" fn returns_true_comp_visual(_a0: usize, _a1: usize, _a2: usize) -> u8 {
         1
     }
-
-    static CONTROLLED_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_monitor_identity() -> MonitorIdentity {
         MonitorIdentity {

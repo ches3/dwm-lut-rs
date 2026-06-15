@@ -10,6 +10,8 @@ static TEST_RENDER_PRESENT_DIRTY_RECT: OnceLock<Mutex<Option<DirtyRect>>> = Once
 
 static TEST_RENDER_PRESENT_DXGI_FORMAT: OnceLock<Mutex<Option<u32>>> = OnceLock::new();
 
+static TEST_RENDER_PRESENT_SIZE: OnceLock<Mutex<Option<(u32, u32)>>> = OnceLock::new();
+
 static TEST_RENDER_CONTEXT_ACTIVE: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,6 +19,7 @@ pub(crate) struct TestRenderPresentLutCall {
     pub overlay_swap_chain: usize,
     pub swap_chain_path: crate::profile::SwapChainPathHypothesis,
     pub monitor_identity: Option<MonitorIdentity>,
+    pub hardware_protected: bool,
     pub clip_box: ClipBox,
     pub dirty_rects: Vec<DirtyRect>,
 }
@@ -28,6 +31,7 @@ pub(crate) fn set_test_render_present_lut_result(result: bool) {
     TEST_RENDER_PRESENT_LUT_RESULT.store(result, Ordering::Release);
     set_test_render_present_dirty_rect(None);
     set_test_render_present_dxgi_format(None);
+    set_test_render_present_size(None);
 }
 
 pub(crate) fn set_test_render_present_lut_result_with_present_rect(
@@ -37,6 +41,7 @@ pub(crate) fn set_test_render_present_lut_result_with_present_rect(
     TEST_RENDER_PRESENT_LUT_RESULT.store(result, Ordering::Release);
     set_test_render_present_dirty_rect(rect);
     set_test_render_present_dxgi_format(None);
+    set_test_render_present_size(None);
 }
 
 fn set_test_render_present_dirty_rect(rect: Option<DirtyRect>) {
@@ -53,6 +58,13 @@ pub(crate) fn set_test_render_present_dxgi_format(format: Option<u32>) {
     }
 }
 
+pub(crate) fn set_test_render_present_size(size: Option<(u32, u32)>) {
+    let result = TEST_RENDER_PRESENT_SIZE.get_or_init(|| Mutex::new(None));
+    if let Ok(mut result) = result.lock() {
+        *result = size;
+    }
+}
+
 pub(crate) fn reset_test_render_present_lut_result() {
     set_test_render_present_lut_result(false);
     let calls = TEST_RENDER_PRESENT_LUT_CALL.get_or_init(|| Mutex::new(None));
@@ -61,6 +73,7 @@ pub(crate) fn reset_test_render_present_lut_result() {
     }
     set_test_render_present_dirty_rect(None);
     set_test_render_present_dxgi_format(None);
+    set_test_render_present_size(None);
     let context_active = TEST_RENDER_CONTEXT_ACTIVE.get_or_init(|| Mutex::new(None));
     if let Ok(mut context_active) = context_active.lock() {
         *context_active = None;
@@ -87,6 +100,7 @@ pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
     swap_chain_path: crate::profile::SwapChainPathHypothesis,
     monitor_identity: Option<MonitorIdentity>,
+    hardware_protected: bool,
     clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,
@@ -97,6 +111,7 @@ pub(crate) unsafe fn render_present_lut(
             overlay_swap_chain,
             swap_chain_path,
             monitor_identity,
+            hardware_protected,
             clip_box,
             dirty_rects: dirty_rects.to_vec(),
         });
@@ -117,9 +132,18 @@ pub(crate) unsafe fn render_present_lut(
         .lock()
         .ok()
         .and_then(|format| *format);
+    let (width, height) = TEST_RENDER_PRESENT_SIZE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|size| *size)
+        .map(|(width, height)| (Some(width), Some(height)))
+        .unwrap_or((None, None));
     RenderPresentLutResult {
         lut_applied: TEST_RENDER_PRESENT_LUT_RESULT.load(Ordering::Acquire),
         dxgi_format,
+        width,
+        height,
         lut_index: dxgi_format
             .or(Some(DXGI_FORMAT_B8G8R8A8_UNORM))
             .and_then(|format| {

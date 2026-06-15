@@ -67,6 +67,8 @@ impl DrawPlanSkipReason {
 pub(crate) struct RenderPresentLutResult {
     pub lut_applied: bool,
     pub dxgi_format: Option<u32>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
     pub lut_index: Option<usize>,
     pub present_dirty_rect: Option<DirtyRect>,
 }
@@ -77,6 +79,8 @@ impl RenderPresentLutResult {
         Self {
             lut_applied: false,
             dxgi_format: Some(dxgi_format_for_copy_texture(format)),
+            width: None,
+            height: None,
             lut_index: Some(lut_index),
             present_dirty_rect: None,
         }
@@ -135,7 +139,7 @@ fn prepare_gpu_draw_plan(
     else {
         return Err(DrawPlanSkipReason::MissingAssignment);
     };
-    let dirty_rects = draw_rects_for_frame(&plan.dirty_rects, width, height, false);
+    let dirty_rects = draw_rects_for_frame(&plan.dirty_rects, width, height);
     if dirty_rects.is_empty() {
         return Err(DrawPlanSkipReason::EmptyDirtyRects);
     }
@@ -154,14 +158,9 @@ const fn dxgi_format_for_copy_texture(format: BackBufferFormat) -> u32 {
     }
 }
 
-fn draw_rects_for_frame(
-    dirty_rects: &[DirtyRect],
-    width: u32,
-    height: u32,
-    force_full_frame: bool,
-) -> Vec<DirtyRect> {
+fn draw_rects_for_frame(dirty_rects: &[DirtyRect], width: u32, height: u32) -> Vec<DirtyRect> {
     let full_rect;
-    let rects = if force_full_frame || dirty_rects.is_empty() {
+    let rects = if dirty_rects.is_empty() {
         full_rect = [DirtyRect {
             left: 0,
             top: 0,
@@ -177,6 +176,11 @@ fn draw_rects_for_frame(
         .iter()
         .filter_map(|rect| clamp_rect(*rect, width, height))
         .collect()
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn draw_rects_for_full_frame(width: u32, height: u32) -> Vec<DirtyRect> {
+    draw_rects_for_frame(&[], width, height)
 }
 
 fn with_restored_state<State, Capture, Draw, Restore>(
@@ -531,31 +535,6 @@ mod tests {
     }
 
     #[test]
-    fn draw_rects_can_force_full_frame_despite_dirty_rects() {
-        let rects = draw_rects_for_frame(
-            &[DirtyRect {
-                left: 10,
-                top: 20,
-                right: 30,
-                bottom: 40,
-            }],
-            1920,
-            1080,
-            true,
-        );
-
-        assert_eq!(
-            rects,
-            vec![DirtyRect {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            }]
-        );
-    }
-
-    #[test]
     fn bootstrapping_full_redraw_does_not_expand_present_dirty_rect() {
         let full_frame_rects = vec![DirtyRect {
             left: 0,
@@ -800,7 +779,7 @@ mod tests {
                 high_part: 0,
                 low_part: 0x14e02,
             },
-            target_id: 4355,
+            target_id: 11,
         };
         let right = MonitorIdentity {
             adapter_luid: AdapterLuid {

@@ -16,8 +16,6 @@ use dwm_lut_payload::MonitorIdentity;
 
 #[cfg(debug_assertions)]
 const DIAGNOSTIC_SAMPLE_INTERVAL: u64 = 600;
-#[cfg(debug_assertions)]
-const BACK_BUFFER_STAGE_SUCCESS: u32 = 9;
 
 static RENDERER: OnceLock<Mutex<D3D11Renderer>> = OnceLock::new();
 
@@ -28,16 +26,6 @@ struct FrameDiagnosticKey {
     target_id: Option<u32>,
     width: u32,
     height: u32,
-}
-
-#[cfg(debug_assertions)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BackBufferHelperDiagnosticKey {
-    stage: u32,
-    hresult: Hresult,
-    container: usize,
-    resource: usize,
-    texture: usize,
 }
 
 #[cfg(debug_assertions)]
@@ -79,11 +67,17 @@ struct D3D11Renderer {
     devices: BTreeMap<super::ResourceKey, DeviceResources>,
     #[cfg(debug_assertions)]
     frame_diagnostics: PerOverlayDiagnosticLogLimiter<FrameDiagnosticKey>,
-    #[cfg(debug_assertions)]
-    back_buffer_helper_diagnostics: PerOverlayDiagnosticLogLimiter<BackBufferHelperDiagnosticKey>,
 }
 
 unsafe impl Send for D3D11Renderer {}
+
+#[derive(Clone, Copy)]
+struct PresentRenderContext {
+    overlay_swap_chain: usize,
+    swap_chain_path: SwapChainPathHypothesis,
+    monitor_identity: Option<MonitorIdentity>,
+    hardware_protected: bool,
+}
 
 #[derive(Clone, Copy)]
 struct RenderFrame {
@@ -101,26 +95,25 @@ impl D3D11Renderer {
             devices: BTreeMap::new(),
             #[cfg(debug_assertions)]
             frame_diagnostics: PerOverlayDiagnosticLogLimiter::default(),
-            #[cfg(debug_assertions)]
-            back_buffer_helper_diagnostics: PerOverlayDiagnosticLogLimiter::default(),
         }
     }
 
     unsafe fn render_present_lut(
         &mut self,
-        overlay_swap_chain: usize,
-        swap_chain_path: SwapChainPathHypothesis,
-        monitor_identity: Option<MonitorIdentity>,
+        present_context: PresentRenderContext,
         clip_box: ClipBox,
         dirty_rects: &[DirtyRect],
         pipeline: &LutPipeline,
     ) -> super::RenderPresentLutResult {
         let Some(back_buffer) = (unsafe {
-            self.overlay_swap_chain_to_back_buffer(overlay_swap_chain, swap_chain_path)
+            self.overlay_swap_chain_to_back_buffer(
+                present_context.overlay_swap_chain,
+                present_context.swap_chain_path,
+            )
         }) else {
             debug_log!(
                 "event=back_buffer_get_failed overlay_swap_chain=0x{:x}",
-                overlay_swap_chain
+                present_context.overlay_swap_chain
             );
             return super::RenderPresentLutResult::default();
         };
@@ -132,7 +125,7 @@ impl D3D11Renderer {
         if device.is_null() {
             debug_log!(
                 "event=renderer_early_return reason=device_null overlay_swap_chain=0x{:x} back_buffer=0x{:x}",
-                overlay_swap_chain,
+                present_context.overlay_swap_chain,
                 back_buffer as usize
             );
             unsafe { release(back_buffer) };
@@ -146,7 +139,7 @@ impl D3D11Renderer {
         if context.is_null() {
             debug_log!(
                 "event=renderer_early_return reason=context_null overlay_swap_chain=0x{:x} back_buffer=0x{:x} device=0x{:x}",
-                overlay_swap_chain,
+                present_context.overlay_swap_chain,
                 back_buffer as usize,
                 device as usize
             );
@@ -174,19 +167,25 @@ impl D3D11Renderer {
             d3d11_texture2d_get_desc(back_buffer, &mut desc);
         }
         #[cfg(debug_assertions)]
-        let frame_adapter_luid = monitor_identity
+        let frame_adapter_luid = present_context
+            .monitor_identity
             .map(|identity| identity.adapter_luid.to_string())
             .unwrap_or_else(|| "unknown".to_owned());
         #[cfg(debug_assertions)]
-        let frame_target_id = monitor_identity.map(|identity| identity.target_id);
+        let frame_target_id = present_context
+            .monitor_identity
+            .map(|identity| identity.target_id);
         #[cfg(debug_assertions)]
-        let should_log_success_frame =
-            self.should_log_success_frame(overlay_swap_chain, desc, frame_target_id);
+        let should_log_success_frame = self.should_log_success_frame(
+            present_context.overlay_swap_chain,
+            desc,
+            frame_target_id,
+        );
         #[cfg(debug_assertions)]
         if should_log_success_frame {
             debug_log!(
                 "event=back_buffer_desc overlay_swap_chain=0x{:x} back_buffer=0x{:x} dxgi_format={} width={} height={} target_id={:?}",
-                overlay_swap_chain,
+                present_context.overlay_swap_chain,
                 back_buffer as usize,
                 desc.format,
                 desc.width,
@@ -197,7 +196,7 @@ impl D3D11Renderer {
 
         let draw_plan = match super::prepare_gpu_draw_plan(
             pipeline,
-            monitor_identity,
+            present_context.monitor_identity,
             clip_box,
             desc.format,
             desc.width,
@@ -210,7 +209,7 @@ impl D3D11Renderer {
                 debug_log!(
                     "event=lut_draw_skip reason={} overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} dirty_rect_count={}",
                     _reason.as_str(),
-                    overlay_swap_chain,
+                    present_context.overlay_swap_chain,
                     back_buffer as usize,
                     frame_adapter_luid,
                     frame_target_id,
@@ -233,7 +232,7 @@ impl D3D11Renderer {
         if should_log_success_frame {
             debug_log!(
                 "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} lut_index={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?}",
-                overlay_swap_chain,
+                present_context.overlay_swap_chain,
                 back_buffer as usize,
                 frame_adapter_luid,
                 frame_target_id,
@@ -248,6 +247,10 @@ impl D3D11Renderer {
                 draw_plan.dirty_rects.first()
             );
         }
+        #[cfg(debug_assertions)]
+        let draw_rect_count = draw_plan.dirty_rects.len();
+        #[cfg(debug_assertions)]
+        let first_draw_rect = draw_plan.dirty_rects.first().copied();
 
         let frame = RenderFrame {
             device,
@@ -256,9 +259,39 @@ impl D3D11Renderer {
             width: desc.width,
             height: desc.height,
         };
-        let result =
-            unsafe { self.render_with_device(overlay_swap_chain, frame, pipeline, draw_plan) };
-
+        let result = unsafe {
+            self.render_with_device(
+                present_context.overlay_swap_chain,
+                present_context.monitor_identity,
+                present_context.hardware_protected,
+                frame,
+                pipeline,
+                draw_plan,
+            )
+        };
+        #[cfg(debug_assertions)]
+        if should_log_success_frame {
+            debug_log!(
+                "event=renderer_present_result overlay_swap_chain=0x{:x} monitor_identity={} target_id={:?} back_buffer=0x{:x} device=0x{:x} context=0x{:x} dxgi_format={:?} width={} height={} lut_index={:?} lut_applied={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?} present_dirty_rect={:?}",
+                present_context.overlay_swap_chain,
+                crate::debug_log::quoted(format_monitor_identity(present_context.monitor_identity)),
+                present_context
+                    .monitor_identity
+                    .map(|identity| identity.target_id),
+                back_buffer as usize,
+                device as usize,
+                context as usize,
+                result.dxgi_format,
+                desc.width,
+                desc.height,
+                result.lut_index,
+                result.lut_applied,
+                dirty_rects.len(),
+                draw_rect_count,
+                first_draw_rect,
+                result.present_dirty_rect
+            );
+        }
         unsafe {
             release(back_buffer);
             release(context);
@@ -285,47 +318,6 @@ impl D3D11Renderer {
         )
     }
 
-    #[cfg(debug_assertions)]
-    unsafe fn overlay_swap_chain_to_back_buffer(
-        &mut self,
-        overlay_swap_chain: usize,
-        swap_chain_path: SwapChainPathHypothesis,
-    ) -> Option<ComPtr> {
-        let mut diagnostic = BackBuffer25H2Diagnostic::new();
-        let texture = unsafe {
-            dwm_lut_get_back_buffer_25h2_diagnostic(
-                overlay_swap_chain as ComPtr,
-                swap_chain_path.container_vtable_index,
-                swap_chain_path.resource_vtable_index,
-                &mut diagnostic,
-            )
-        };
-        let diagnostic_key = BackBufferHelperDiagnosticKey {
-            stage: diagnostic.stage,
-            hresult: diagnostic.hresult,
-            container: diagnostic.container as usize,
-            resource: diagnostic.resource as usize,
-            texture: diagnostic.texture as usize,
-        };
-        if diagnostic.stage != BACK_BUFFER_STAGE_SUCCESS
-            || self
-                .back_buffer_helper_diagnostics
-                .should_log(overlay_swap_chain, diagnostic_key)
-        {
-            debug_log!(
-                "event=back_buffer_helper_result overlay_swap_chain=0x{:x} stage={} hresult={} container=0x{:x} resource=0x{:x} texture=0x{:x}",
-                overlay_swap_chain,
-                diagnostic.stage,
-                diagnostic.hresult,
-                diagnostic.container as usize,
-                diagnostic.resource as usize,
-                diagnostic.texture as usize
-            );
-        }
-        (!texture.is_null()).then_some(texture)
-    }
-
-    #[cfg(not(debug_assertions))]
     unsafe fn overlay_swap_chain_to_back_buffer(
         &mut self,
         overlay_swap_chain: usize,
@@ -344,6 +336,10 @@ impl D3D11Renderer {
     unsafe fn render_with_device(
         &mut self,
         overlay_swap_chain: usize,
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))] monitor_identity: Option<
+            MonitorIdentity,
+        >,
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))] hardware_protected: bool,
         frame: RenderFrame,
         pipeline: &LutPipeline,
         mut draw_plan: super::GpuDrawPlan,
@@ -453,12 +449,7 @@ impl D3D11Renderer {
                 previous_state,
                 draw_plan.dirty_rects.len()
             );
-            draw_plan.dirty_rects = super::draw_rects_for_frame(
-                &draw_plan.dirty_rects,
-                frame.width,
-                frame.height,
-                true,
-            );
+            draw_plan.dirty_rects = super::draw_rects_for_full_frame(frame.width, frame.height);
         }
         if draw_plan.dirty_rects.is_empty() {
             debug_log!(
@@ -475,6 +466,19 @@ impl D3D11Renderer {
         );
 
         let result = unsafe { resources.draw(frame, &draw_plan) };
+        #[cfg(debug_assertions)]
+        crate::route_trace::record_protected_lut_resource_candidate(
+            overlay_swap_chain,
+            monitor_identity,
+            hardware_protected,
+            frame.back_buffer as usize,
+            frame.device as usize,
+            frame.context as usize,
+            Some(super::dxgi_format_for_copy_texture(draw_plan.format)),
+            Some(frame.width),
+            Some(frame.height),
+            result,
+        );
         if result {
             resources.draw_states.insert(
                 render_target_key,
@@ -484,6 +488,8 @@ impl D3D11Renderer {
         super::RenderPresentLutResult {
             lut_applied: result,
             dxgi_format: Some(super::dxgi_format_for_copy_texture(draw_plan.format)),
+            width: Some(frame.width),
+            height: Some(frame.height),
             lut_index: Some(draw_plan.lut_index),
             present_dirty_rect: result.then_some(present_dirty_rect).flatten(),
         }
@@ -503,7 +509,6 @@ impl D3D11Renderer {
         #[cfg(debug_assertions)]
         {
             self.frame_diagnostics = PerOverlayDiagnosticLogLimiter::default();
-            self.back_buffer_helper_diagnostics = PerOverlayDiagnosticLogLimiter::default();
         }
         device_count
     }
@@ -744,6 +749,13 @@ impl DeviceResources {
     }
 }
 
+#[cfg(debug_assertions)]
+fn format_monitor_identity(identity: Option<MonitorIdentity>) -> String {
+    identity
+        .map(|identity| format!("{}:{}", identity.adapter_luid, identity.target_id))
+        .unwrap_or_else(|| "none".to_owned())
+}
+
 impl Drop for DeviceResources {
     fn drop(&mut self) {
         unsafe {
@@ -767,6 +779,7 @@ pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
     swap_chain_path: SwapChainPathHypothesis,
     monitor_identity: Option<MonitorIdentity>,
+    hardware_protected: bool,
     clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,
@@ -777,9 +790,12 @@ pub(crate) unsafe fn render_present_lut(
     };
     unsafe {
         renderer.render_present_lut(
-            overlay_swap_chain,
-            swap_chain_path,
-            monitor_identity,
+            PresentRenderContext {
+                overlay_swap_chain,
+                swap_chain_path,
+                monitor_identity,
+                hardware_protected,
+            },
             clip_box,
             dirty_rects,
             pipeline,

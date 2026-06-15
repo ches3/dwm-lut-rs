@@ -293,15 +293,19 @@ pub(crate) fn ffi_shutdown() -> u32 {
     };
 
     let cleanup_failures = unregister_registered_hooks(&minhook, &hooks);
-    for failure in &cleanup_failures {
-        debug_log!(
-            "event=minhook_cleanup_failed operation={:?} target={} status={}",
-            failure.operation,
-            crate::debug_log::quoted(failure.target.label()),
-            failure.status
-        );
+    #[cfg(debug_assertions)]
+    {
+        for failure in &cleanup_failures {
+            debug_log!(
+                "event=minhook_cleanup_failed operation={:?} target={} status={}",
+                failure.operation,
+                crate::debug_log::quoted(failure.target.label()),
+                failure.status
+            );
+        }
     }
 
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let renderer_device_count = {
         let _present_guard = lock_present_runtime();
         let renderer_device_count = crate::d3d11_renderer::shutdown_renderer_resources();
@@ -382,6 +386,7 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
         lut_pipeline.summary().lut_count
     );
 
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let renderer_device_count = {
         let _present_guard = lock_present_runtime();
         replace_payload_pipeline(payload, lut_pipeline)?;
@@ -455,6 +460,7 @@ fn initialize_from_payload(
 fn install_prepared_state(state: HookState) -> Result<(), HookError> {
     let minhook = state.runtime.minhook;
     let hooks = state.runtime.hooks.clone();
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let hook_count = hooks.len();
 
     install_state(state).map_err(|state| {

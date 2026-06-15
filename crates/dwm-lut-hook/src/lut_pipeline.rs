@@ -657,7 +657,7 @@ mod tests {
                 high_part: 0,
                 low_part: 0x14e02,
             },
-            target_id: 4355,
+            target_id: 11,
         };
         let identity_b = MonitorIdentity {
             adapter_luid: AdapterLuid {

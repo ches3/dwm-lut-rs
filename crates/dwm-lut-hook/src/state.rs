@@ -405,6 +405,7 @@ pub(crate) fn evaluate_rendered_present_hook(
 pub(crate) fn render_present_lut(
     overlay_swap_chain: usize,
     monitor_identity: Option<MonitorIdentity>,
+    hardware_protected: bool,
     clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
 ) -> crate::d3d11_renderer::RenderPresentLutResult {
@@ -422,6 +423,7 @@ pub(crate) fn render_present_lut(
             overlay_swap_chain,
             swap_chain_path,
             monitor_identity,
+            hardware_protected,
             clip_box,
             dirty_rects,
             &lut_pipeline,

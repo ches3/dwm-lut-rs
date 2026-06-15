@@ -9,6 +9,7 @@ use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
 use crate::profile::HookProfile;
+use crate::route_trace;
 use crate::{ClipBox, DirtyRect, state};
 use dwm_lut_payload::{AdapterLuid, MonitorIdentity};
 
@@ -56,19 +57,14 @@ struct PresentDetourLogKey {
 }
 
 #[cfg(debug_assertions)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PresentInputLogKey {
-    overlay_swap_chain: usize,
-    adapter_luid_low: Option<u32>,
-    adapter_luid_high: Option<i32>,
-    target_id: Option<u32>,
+#[derive(Clone, Copy, Debug)]
+struct PresentOriginalCallDetail {
+    hardware_protected: bool,
+    monitor_identity: Option<MonitorIdentity>,
     dirty_rect_count: usize,
-}
-
-#[cfg(debug_assertions)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PresentHardwareProtectedLogKey {
-    overlay_swap_chain: usize,
+    first_dirty_rect: Option<DirtyRect>,
+    render_result: crate::d3d11_renderer::RenderPresentLutResult,
+    present_dirty_rect_source: &'static str,
 }
 
 #[cfg(debug_assertions)]
@@ -88,9 +84,13 @@ impl<K> Default for DiagnosticLogLimiter<K> {
 #[cfg(debug_assertions)]
 impl<K: Ord> DiagnosticLogLimiter<K> {
     fn should_log(&mut self, key: K) -> bool {
+        self.should_log_interval(key, PRESENT_DIAGNOSTIC_SAMPLE_INTERVAL)
+    }
+
+    fn should_log_interval(&mut self, key: K, interval: u64) -> bool {
         let count = self.counts.entry(key).or_insert(0);
         *count = count.saturating_add(1);
-        *count == 1 || (*count).is_multiple_of(PRESENT_DIAGNOSTIC_SAMPLE_INTERVAL)
+        *count == 1 || *count <= 8 || (*count).is_multiple_of(interval)
     }
 }
 
@@ -111,22 +111,32 @@ static PRESENT_DETOUR_LOG_LIMITER: OnceLock<Mutex<DiagnosticLogLimiter<PresentDe
     OnceLock::new();
 
 #[cfg(debug_assertions)]
-static PRESENT_INPUT_LOG_LIMITER: OnceLock<Mutex<DiagnosticLogLimiter<PresentInputLogKey>>> =
+static HW_PRESENT_DETOUR_LOG_LIMITER: OnceLock<Mutex<DiagnosticLogLimiter<PresentDetourLogKey>>> =
     OnceLock::new();
 
 #[cfg(debug_assertions)]
-static PRESENT_INPUT_HARDWARE_PROTECTED_LOG_LIMITER: OnceLock<
-    Mutex<DiagnosticLogLimiter<PresentHardwareProtectedLogKey>>,
-> = OnceLock::new();
+const HW_PRESENT_DETOUR_LOG_INTERVAL: u64 = 32;
 
 #[cfg(debug_assertions)]
-static PRESENT_HARDWARE_PROTECTED_RENDER_RESULT_LOG_LIMITER: OnceLock<
-    Mutex<DiagnosticLogLimiter<PresentHardwareProtectedLogKey>>,
-> = OnceLock::new();
+fn should_log_hw_present_detour_enter(overlay_swap_chain: usize) -> bool {
+    HW_PRESENT_DETOUR_LOG_LIMITER
+        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
+        .lock()
+        .map(|mut limiter| {
+            limiter.should_log_interval(
+                PresentDetourLogKey { overlay_swap_chain },
+                HW_PRESENT_DETOUR_LOG_INTERVAL,
+            )
+        })
+        .unwrap_or(true)
+}
 
-fn should_log_present_detour_enter(overlay_swap_chain: usize) -> bool {
+fn should_log_present_detour_enter(overlay_swap_chain: usize, hardware_protected: bool) -> bool {
     #[cfg(debug_assertions)]
     {
+        if hardware_protected {
+            return should_log_hw_present_detour_enter(overlay_swap_chain);
+        }
         should_log_diagnostic(
             &PRESENT_DETOUR_LOG_LIMITER,
             PresentDetourLogKey { overlay_swap_chain },
@@ -134,71 +144,9 @@ fn should_log_present_detour_enter(overlay_swap_chain: usize) -> bool {
     }
     #[cfg(not(debug_assertions))]
     {
-        let _ = overlay_swap_chain;
+        let _ = (overlay_swap_chain, hardware_protected);
         false
     }
-}
-
-fn should_log_present_input_collected(
-    overlay_swap_chain: usize,
-    monitor_identity: Option<MonitorIdentity>,
-    dirty_rect_count: usize,
-) -> bool {
-    #[cfg(debug_assertions)]
-    {
-        should_log_diagnostic(
-            &PRESENT_INPUT_LOG_LIMITER,
-            PresentInputLogKey {
-                overlay_swap_chain,
-                adapter_luid_low: monitor_identity.map(|identity| identity.adapter_luid.low_part),
-                adapter_luid_high: monitor_identity.map(|identity| identity.adapter_luid.high_part),
-                target_id: monitor_identity.map(|identity| identity.target_id),
-                dirty_rect_count,
-            },
-        )
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = (overlay_swap_chain, monitor_identity, dirty_rect_count);
-        false
-    }
-}
-
-fn should_log_present_input_hardware_protected(overlay_swap_chain: usize) -> bool {
-    #[cfg(debug_assertions)]
-    {
-        should_log_diagnostic(
-            &PRESENT_INPUT_HARDWARE_PROTECTED_LOG_LIMITER,
-            PresentHardwareProtectedLogKey { overlay_swap_chain },
-        )
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = overlay_swap_chain;
-        false
-    }
-}
-
-fn should_log_present_hardware_protected_render_result(overlay_swap_chain: usize) -> bool {
-    #[cfg(debug_assertions)]
-    {
-        should_log_diagnostic(
-            &PRESENT_HARDWARE_PROTECTED_RENDER_RESULT_LOG_LIMITER,
-            PresentHardwareProtectedLogKey { overlay_swap_chain },
-        )
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = overlay_swap_chain;
-        false
-    }
-}
-
-#[cfg(debug_assertions)]
-fn format_monitor_identity(identity: Option<MonitorIdentity>) -> String {
-    identity
-        .map(|identity| format!("{}:{}", identity.adapter_luid, identity.target_id))
-        .unwrap_or_else(|| "none".to_owned())
 }
 
 #[repr(C)]
@@ -270,14 +218,6 @@ unsafe fn collect_present_inputs_with_profile(
             hypotheses.hardware_protected.offset,
         )?)? != 0
     };
-    if hardware_protected && should_log_present_input_hardware_protected(overlay_swap_chain) {
-        debug_log!(
-            "event=present_input_hardware_protected this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x} hardware_protected_raw=1",
-            this,
-            overlay_swap_chain,
-            rect_vec
-        );
-    }
     let clip_box = unsafe {
         read_clip_box(
             this,
@@ -287,17 +227,6 @@ unsafe fn collect_present_inputs_with_profile(
     };
     let monitor_identity = unsafe { read_monitor_identity(overlay_swap_chain) };
     let dirty_rects = unsafe { read_dirty_rects(rect_vec)? };
-    if should_log_present_input_collected(overlay_swap_chain, monitor_identity, dirty_rects.len()) {
-        debug_log!(
-            "event=present_input_collected this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x} hardware_protected_raw={} monitor_identity={} dirty_rect_count={}",
-            this,
-            overlay_swap_chain,
-            rect_vec,
-            u8::from(hardware_protected),
-            crate::debug_log::quoted(format_monitor_identity(monitor_identity)),
-            dirty_rects.len()
-        );
-    }
     Ok(PresentInputsWithoutFormat {
         monitor_identity,
         clip_box,
@@ -561,14 +490,6 @@ pub(super) unsafe extern "system" fn present_detour(
         let original: PresentOriginal = unsafe { std::mem::transmute(original) };
         return unsafe { original(this, overlay_swap_chain, a3, rect_vec, a5, a6, a7) };
     }
-    if should_log_present_detour_enter(overlay_swap_chain) {
-        debug_log!(
-            "event=present_detour_enter this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x}",
-            this,
-            overlay_swap_chain,
-            rect_vec
-        );
-    }
 
     let mut original_rect_vec = rect_vec;
     let mut present_rect_storage = [DirtyRect {
@@ -582,8 +503,26 @@ pub(super) unsafe extern "system" fn present_detour(
         end: ptr::null(),
         capacity_end: ptr::null(),
     };
+    #[cfg(debug_assertions)]
+    let mut protected_resource_result_detail = None;
+    #[cfg(debug_assertions)]
+    let mut last_present_context = None;
     match unsafe { collect_present_inputs(this, overlay_swap_chain, rect_vec) } {
         Ok(inputs) => {
+            if should_log_present_detour_enter(overlay_swap_chain, inputs.hardware_protected) {
+                debug_log!(
+                    "event=present_detour_enter this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x}",
+                    this,
+                    overlay_swap_chain,
+                    rect_vec
+                );
+            }
+            route_trace::record_present_enter(overlay_swap_chain, inputs.hardware_protected);
+            #[cfg(debug_assertions)]
+            {
+                last_present_context =
+                    Some((inputs.hardware_protected, inputs.monitor_identity, None));
+            }
             if let Some(_present_guard) = state::try_lock_present_runtime() {
                 let _ = state::prepare_present_lut_context(
                     this,
@@ -595,29 +534,58 @@ pub(super) unsafe extern "system" fn present_detour(
                 let render_result = state::render_present_lut(
                     overlay_swap_chain,
                     inputs.monitor_identity,
+                    inputs.hardware_protected,
                     inputs.clip_box,
                     &inputs.dirty_rects,
                 );
-                if inputs.hardware_protected
-                    && should_log_present_hardware_protected_render_result(overlay_swap_chain)
+                #[cfg(debug_assertions)]
                 {
-                    debug_log!(
-                        "event=present_hardware_protected_render_result this=0x{:x} overlay_swap_chain=0x{:x} lut_applied={} dxgi_format={:?} lut_index={:?} present_dirty_rect={:?}",
-                        this,
-                        overlay_swap_chain,
-                        render_result.lut_applied,
-                        render_result.dxgi_format,
-                        render_result.lut_index,
-                        render_result.present_dirty_rect
-                    );
+                    last_present_context = Some((
+                        inputs.hardware_protected,
+                        inputs.monitor_identity,
+                        Some(render_result.lut_applied),
+                    ));
+                    if inputs.hardware_protected {
+                        protected_resource_result_detail = Some(PresentOriginalCallDetail {
+                            hardware_protected: inputs.hardware_protected,
+                            monitor_identity: inputs.monitor_identity,
+                            dirty_rect_count: inputs.dirty_rects.len(),
+                            first_dirty_rect: inputs.dirty_rects.first().copied(),
+                            render_result,
+                            present_dirty_rect_source: "original",
+                        });
+                    }
                 }
-                if let Some(rect) = render_result.present_dirty_rect {
+                route_trace::record_present_lut_result(
+                    inputs.hardware_protected,
+                    render_result.lut_applied,
+                );
+                let present_dirty_rect_source = if let Some(rect) = render_result.present_dirty_rect
+                {
                     original_rect_vec = full_present_rect_vec(
                         rect,
                         &mut present_rect_storage,
                         &mut present_rect_vec_storage,
                     );
+                    "expanded"
+                } else {
+                    "original"
+                };
+                #[cfg(debug_assertions)]
+                {
+                    if inputs.hardware_protected {
+                        protected_resource_result_detail = Some(PresentOriginalCallDetail {
+                            hardware_protected: inputs.hardware_protected,
+                            monitor_identity: inputs.monitor_identity,
+                            dirty_rect_count: inputs.dirty_rects.len(),
+                            first_dirty_rect: inputs.dirty_rects.first().copied(),
+                            render_result,
+                            present_dirty_rect_source,
+                        });
+                    }
                 }
+                #[cfg(not(debug_assertions))]
+                let _ = present_dirty_rect_source;
                 let _ = state::evaluate_rendered_present_hook(
                     this,
                     inputs.clip_box,
@@ -627,6 +595,8 @@ pub(super) unsafe extern "system" fn present_detour(
                     &inputs.dirty_rects,
                     render_result,
                 );
+            } else {
+                route_trace::record_present_lock_miss(overlay_swap_chain);
             }
         }
         Err(error) => {
@@ -644,6 +614,35 @@ pub(super) unsafe extern "system" fn present_detour(
             let _ = error;
             deactivate_present_context(this);
         }
+    }
+
+    #[cfg(debug_assertions)]
+    if let Some((hardware_protected, monitor_identity, lut_applied)) = last_present_context {
+        let last_present_sequence = route_trace::record_last_present_context(
+            overlay_swap_chain,
+            monitor_identity,
+            hardware_protected,
+            lut_applied,
+            None,
+        );
+        let original: PresentOriginal = unsafe { std::mem::transmute(original) };
+        let original_result =
+            unsafe { original(this, overlay_swap_chain, a3, original_rect_vec, a5, a6, a7) };
+        route_trace::record_last_present_original_result(last_present_sequence, original_result);
+        if let Some(detail) = protected_resource_result_detail {
+            route_trace::record_protected_present_resource_result_summary(
+                overlay_swap_chain,
+                detail.monitor_identity,
+                detail.hardware_protected,
+                original_result,
+                detail.render_result,
+                detail.dirty_rect_count,
+                detail.first_dirty_rect,
+                detail.present_dirty_rect_source == "expanded",
+                detail.render_result.present_dirty_rect,
+            );
+        }
+        return original_result;
     }
 
     let original: PresentOriginal = unsafe { std::mem::transmute(original) };
@@ -716,12 +715,16 @@ mod tests {
     }
 
     fn test_monitor_identity() -> MonitorIdentity {
+        test_monitor_identity_for_target(4357)
+    }
+
+    fn test_monitor_identity_for_target(target_id: u32) -> MonitorIdentity {
         MonitorIdentity {
             adapter_luid: AdapterLuid {
                 high_part: 0,
                 low_part: 0x14e02,
             },
-            target_id: 4357,
+            target_id,
         }
     }
 
@@ -1392,6 +1395,7 @@ mod tests {
             fake.overlay_swap_chain_address()
         );
         assert_eq!(render_call.monitor_identity, Some(test_monitor_identity()));
+        assert!(render_call.hardware_protected);
         assert_eq!(render_call.dirty_rects, fake.dirty_rects);
         crate::d3d11_renderer::reset_test_render_present_lut_result();
     }

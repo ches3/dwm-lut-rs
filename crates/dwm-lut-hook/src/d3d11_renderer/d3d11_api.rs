@@ -115,39 +115,7 @@ pub(super) struct Viewport {
     pub(super) max_depth: f32,
 }
 
-#[cfg(debug_assertions)]
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub(super) struct BackBuffer25H2Diagnostic {
-    pub(super) stage: u32,
-    pub(super) hresult: Hresult,
-    pub(super) container: ComPtr,
-    pub(super) resource: ComPtr,
-    pub(super) texture: ComPtr,
-}
-
-#[cfg(debug_assertions)]
-impl BackBuffer25H2Diagnostic {
-    pub(super) const fn new() -> Self {
-        Self {
-            stage: 0,
-            hresult: 0,
-            container: ptr::null_mut(),
-            resource: ptr::null_mut(),
-            texture: ptr::null_mut(),
-        }
-    }
-}
-
 unsafe extern "system" {
-    #[cfg(debug_assertions)]
-    pub(super) fn dwm_lut_get_back_buffer_25h2_diagnostic(
-        overlay_swap_chain: *mut c_void,
-        container_vtable_index: usize,
-        resource_vtable_index: usize,
-        diagnostic: *mut BackBuffer25H2Diagnostic,
-    ) -> ComPtr;
-    #[cfg(not(debug_assertions))]
     pub(super) fn dwm_lut_get_back_buffer_25h2(
         overlay_swap_chain: *mut c_void,
         container_vtable_index: usize,

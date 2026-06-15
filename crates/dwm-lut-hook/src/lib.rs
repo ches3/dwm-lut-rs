@@ -9,6 +9,7 @@ mod lut_pipeline;
 mod minhook;
 mod profile;
 mod resolver;
+mod route_trace;
 mod state;
 
 pub use bootstrap::{HookError, build_profile};
