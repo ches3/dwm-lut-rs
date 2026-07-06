@@ -122,6 +122,17 @@ pub(crate) enum InjectorError {
     Usage(String),
     Config(crate::config::ConfigError),
     Payload(dwm_lut_payload::PayloadError),
+    ControlPipe {
+        operation: &'static str,
+        source: io::Error,
+    },
+    ControlTimeout {
+        operation: &'static str,
+    },
+    ControlProtocol(String),
+    PrimaryUnavailable,
+    PrimaryBusy,
+    PrimaryAlreadyRunning,
     DebugPrivilegeUnavailable,
     MissingFile {
         kind: &'static str,
@@ -176,6 +187,23 @@ impl fmt::Display for InjectorError {
             Self::Usage(message) => write!(f, "{message}"),
             Self::Config(error) => write!(f, "config load failed: {error}"),
             Self::Payload(error) => write!(f, "payload build failed: {error}"),
+            Self::ControlPipe { operation, source } => {
+                write!(f, "control pipe {operation} failed: {source}")
+            }
+            Self::ControlTimeout { operation } => write!(f, "control pipe {operation} timed out"),
+            Self::ControlProtocol(message) => write!(f, "control protocol failed: {message}"),
+            Self::PrimaryUnavailable => write!(
+                f,
+                "dwm-lut primary instance is not running; start it with elevated `dwm-lut run`"
+            ),
+            Self::PrimaryBusy => write!(
+                f,
+                "dwm-lut primary instance is busy; retry after the current command finishes"
+            ),
+            Self::PrimaryAlreadyRunning => write!(
+                f,
+                "dwm-lut primary instance is already running in this session"
+            ),
             Self::DebugPrivilegeUnavailable => {
                 write!(
                     f,
@@ -227,3 +255,16 @@ impl fmt::Display for InjectorError {
 }
 
 impl std::error::Error for InjectorError {}
+
+#[cfg(test)]
+mod tests {
+    use super::InjectorError;
+
+    #[test]
+    fn primary_busy_message_does_not_claim_primary_is_stopped() {
+        let message = InjectorError::PrimaryBusy.to_string();
+
+        assert!(message.contains("busy"));
+        assert!(!message.contains("not running"));
+    }
+}

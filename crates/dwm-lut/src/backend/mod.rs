@@ -33,6 +33,10 @@ pub(crate) struct DisableReport {
     pub(crate) pid: u32,
 }
 
+pub(crate) fn ensure_primary_privileges() -> Result<(), InjectorError> {
+    win32::enable_debug_privilege()
+}
+
 pub(crate) fn apply(request: ApplyRequest) -> Result<ApplyReport, InjectorError> {
     let input_dll_path = request
         .dll_path
