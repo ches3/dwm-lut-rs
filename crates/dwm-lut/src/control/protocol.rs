@@ -5,11 +5,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::InjectorError;
 
 pub(crate) const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
-pub(crate) const BUILD_MISMATCH_STATUS: &str = "build_mismatch";
+pub(crate) const CONTROL_PROTOCOL_VERSION: u32 = 1;
+pub(crate) const PROTOCOL_MISMATCH_STATUS: &str = "protocol_mismatch";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ControlRequest {
-    pub(crate) build_hash: String,
+    pub(crate) protocol_version: u32,
     #[serde(flatten)]
     pub(crate) command: ControlCommand,
 }
@@ -27,48 +28,38 @@ pub(crate) enum ControlCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ControlResponse {
-    pub(crate) build_hash: String,
+    pub(crate) protocol_version: u32,
     pub(crate) ok: bool,
     pub(crate) message: String,
     pub(crate) status: String,
 }
 
 impl ControlResponse {
-    pub(crate) fn ok(
-        build_hash: impl Into<String>,
-        message: impl Into<String>,
-        status: impl Into<String>,
-    ) -> Self {
+    pub(crate) fn ok(message: impl Into<String>, status: impl Into<String>) -> Self {
         Self {
-            build_hash: build_hash.into(),
+            protocol_version: CONTROL_PROTOCOL_VERSION,
             ok: true,
             message: message.into(),
             status: status.into(),
         }
     }
 
-    pub(crate) fn error(
-        build_hash: impl Into<String>,
-        message: impl Into<String>,
-        status: impl Into<String>,
-    ) -> Self {
+    pub(crate) fn error(message: impl Into<String>, status: impl Into<String>) -> Self {
         Self {
-            build_hash: build_hash.into(),
+            protocol_version: CONTROL_PROTOCOL_VERSION,
             ok: false,
             message: message.into(),
             status: status.into(),
         }
     }
 
-    pub(crate) fn build_mismatch(client_hash: &str, server_hash: &str) -> Self {
+    pub(crate) fn protocol_mismatch(peer_version: u32) -> Self {
         Self::error(
-            server_hash,
             format!(
-                "control build hash mismatch: client={}, server={}; restart the elevated primary instance",
-                short_hash(client_hash),
-                short_hash(server_hash)
+                "control protocol version mismatch: peer={}, local={}; restart the host instance",
+                peer_version, CONTROL_PROTOCOL_VERSION
             ),
-            BUILD_MISMATCH_STATUS,
+            PROTOCOL_MISMATCH_STATUS,
         )
     }
 }
@@ -119,23 +110,19 @@ pub(crate) fn validate_message_len(len: usize) -> Result<(), InjectorError> {
     Ok(())
 }
 
-pub(crate) fn validate_response_build_hash(
+pub(crate) fn validate_response_protocol(
     response: ControlResponse,
-    local_build_hash: &str,
 ) -> Result<ControlResponse, InjectorError> {
-    if response.build_hash == local_build_hash || response.status == BUILD_MISMATCH_STATUS {
+    if response.protocol_version == CONTROL_PROTOCOL_VERSION
+        || response.status == PROTOCOL_MISMATCH_STATUS
+    {
         return Ok(response);
     }
 
     Err(InjectorError::ControlProtocol(format!(
-        "control response build hash mismatch: client={}, server={}",
-        short_hash(local_build_hash),
-        short_hash(&response.build_hash)
+        "control response protocol version mismatch: peer={}, local={}",
+        response.protocol_version, CONTROL_PROTOCOL_VERSION
     )))
-}
-
-fn short_hash(hash: &str) -> &str {
-    hash.get(..12).unwrap_or(hash)
 }
 
 #[cfg(test)]
@@ -145,7 +132,7 @@ mod tests {
     #[test]
     fn request_roundtrips_through_json() {
         let request = ControlRequest {
-            build_hash: "client-hash".to_string(),
+            protocol_version: CONTROL_PROTOCOL_VERSION,
             command: ControlCommand::Apply {
                 config_path: PathBuf::from(r"C:\profiles\config.json"),
                 profile: Some("desktop".to_string()),
@@ -160,7 +147,7 @@ mod tests {
 
     #[test]
     fn response_roundtrips_through_json() {
-        let response = ControlResponse::ok("server-hash", "primary instance is running", "running");
+        let response = ControlResponse::ok("host instance is running", "running");
 
         let encoded = encode_response(&response).expect("response should encode");
         let decoded = decode_response(&encoded).expect("response should decode");
@@ -170,7 +157,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_command() {
-        let error = decode_request(br#"{"build_hash":"client-hash","command":"reload"}"#)
+        let error = decode_request(br#"{"protocol_version":1,"command":"reload"}"#)
             .expect_err("unknown command fails");
 
         assert!(matches!(error, InjectorError::ControlProtocol(_)));
@@ -178,7 +165,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_json() {
-        let error = decode_request(br#"{"build_hash":"client-hash","command":"status""#)
+        let error = decode_request(br#"{"protocol_version":1,"command":"status""#)
             .expect_err("malformed json fails");
 
         assert!(matches!(error, InjectorError::ControlProtocol(_)));
@@ -204,25 +191,26 @@ mod tests {
     }
 
     #[test]
-    fn normal_response_rejects_different_build_hash() {
-        let response = ControlResponse::ok("server-hash", "done", "running");
-        let error = validate_response_build_hash(response, "client-hash")
-            .expect_err("normal response from a different build must fail");
+    fn normal_response_rejects_different_protocol_version() {
+        let mut response = ControlResponse::ok("done", "running");
+        response.protocol_version = CONTROL_PROTOCOL_VERSION + 1;
+        let error = validate_response_protocol(response)
+            .expect_err("normal response from a different protocol version must fail");
 
         assert!(
-            matches!(error, InjectorError::ControlProtocol(message) if message.contains("build hash mismatch"))
+            matches!(error, InjectorError::ControlProtocol(message) if message.contains("protocol version mismatch"))
         );
     }
 
     #[test]
-    fn build_mismatch_response_is_displayable_with_different_build_hash() {
-        let response = ControlResponse::build_mismatch("client-hash", "server-hash");
-        let response = validate_response_build_hash(response, "client-hash")
-            .expect("build mismatch response should remain displayable");
+    fn protocol_mismatch_response_is_displayable_with_different_protocol_version() {
+        let response = ControlResponse::protocol_mismatch(CONTROL_PROTOCOL_VERSION + 1);
+        let response = validate_response_protocol(response)
+            .expect("protocol mismatch response should remain displayable");
 
         assert!(!response.ok);
-        assert_eq!(response.status, BUILD_MISMATCH_STATUS);
-        assert!(response.message.contains("client=client-hash"));
-        assert!(response.message.contains("server=server-hash"));
+        assert_eq!(response.status, PROTOCOL_MISMATCH_STATUS);
+        assert!(response.message.contains("peer=2"));
+        assert!(response.message.contains("local=1"));
     }
 }

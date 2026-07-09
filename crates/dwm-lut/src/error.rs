@@ -2,16 +2,16 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-pub(crate) use dwm_lut_payload::{InitializeStatus, ReplaceAssignmentsStatus, ShutdownStatus};
+pub use dwm_lut_payload::{InitializeStatus, ReplaceAssignmentsStatus, ShutdownStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InitializeContext {
+pub enum InitializeContext {
     FreshInstall,
     AfterShutdown,
     AfterReplaceFallback,
 }
 
-pub(crate) fn format_hook_initialize_failure(
+pub fn format_hook_initialize_failure(
     context: InitializeContext,
     status: InitializeStatus,
 ) -> String {
@@ -27,7 +27,7 @@ pub(crate) fn format_hook_initialize_failure(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InjectionStep {
+pub enum InjectionStep {
     FindDwmProcess,
     ResolveCurrentSession,
     EnableDebugPrivilege,
@@ -118,7 +118,7 @@ impl fmt::Display for InjectionStep {
 }
 
 #[derive(Debug)]
-pub(crate) enum InjectorError {
+pub enum InjectorError {
     Usage(String),
     Config(crate::config::ConfigError),
     Payload(dwm_lut_payload::PayloadError),
@@ -130,9 +130,14 @@ pub(crate) enum InjectorError {
         operation: &'static str,
     },
     ControlProtocol(String),
-    PrimaryUnavailable,
-    PrimaryBusy,
-    PrimaryAlreadyRunning,
+    HostUnavailable,
+    HostBusy,
+    HostAlreadyRunning,
+    HostLaunchFailed {
+        operation: &'static str,
+        source: io::Error,
+    },
+    HostStartupFailed(String),
     DebugPrivilegeUnavailable,
     MissingFile {
         kind: &'static str,
@@ -192,18 +197,24 @@ impl fmt::Display for InjectorError {
             }
             Self::ControlTimeout { operation } => write!(f, "control pipe {operation} timed out"),
             Self::ControlProtocol(message) => write!(f, "control protocol failed: {message}"),
-            Self::PrimaryUnavailable => write!(
+            Self::HostUnavailable => write!(
                 f,
-                "dwm-lut primary instance is not running; start it with elevated `dwm-lut run`"
+                "dwm-lut host instance is not running; start it with `dwm-lut-cli run`"
             ),
-            Self::PrimaryBusy => write!(
+            Self::HostBusy => write!(
                 f,
-                "dwm-lut primary instance is busy; retry after the current command finishes"
+                "dwm-lut host instance is busy; retry after the current command finishes"
             ),
-            Self::PrimaryAlreadyRunning => write!(
+            Self::HostAlreadyRunning => write!(
                 f,
-                "dwm-lut primary instance is already running in this session"
+                "dwm-lut host instance is already running in this session"
             ),
+            Self::HostLaunchFailed { operation, source } => {
+                write!(f, "host background launch {operation} failed: {source}")
+            }
+            Self::HostStartupFailed(message) => {
+                write!(f, "host background startup failed: {message}")
+            }
             Self::DebugPrivilegeUnavailable => {
                 write!(
                     f,
@@ -261,8 +272,8 @@ mod tests {
     use super::InjectorError;
 
     #[test]
-    fn primary_busy_message_does_not_claim_primary_is_stopped() {
-        let message = InjectorError::PrimaryBusy.to_string();
+    fn host_busy_message_does_not_claim_host_is_stopped() {
+        let message = InjectorError::HostBusy.to_string();
 
         assert!(message.contains("busy"));
         assert!(!message.contains("not running"));

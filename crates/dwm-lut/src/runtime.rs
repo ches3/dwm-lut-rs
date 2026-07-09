@@ -1,64 +1,52 @@
 use crate::backend::{
     self, ApplyOutcome, ApplyReport, ApplyRequest, DisableOutcome, DisableReport,
 };
-use crate::control::build_hash::current_build_hash;
-use crate::control::protocol::{ControlCommand, ControlRequest, ControlResponse};
+use crate::control::protocol::{
+    CONTROL_PROTOCOL_VERSION, ControlCommand, ControlRequest, ControlResponse,
+};
 use crate::error::{InjectionStep, InjectorError, ShutdownStatus};
 use std::path::PathBuf;
 
 pub(crate) fn handle_command(
     command: ControlCommand,
-    build_hash: &str,
-    primary_dll_path: Option<PathBuf>,
+    host_dll_path: Option<PathBuf>,
 ) -> ControlResponse {
     match command {
         ControlCommand::Apply {
             config_path,
             profile,
-        } => response_from_result(
-            apply(ApplyRequest {
-                dll_path: primary_dll_path,
-                config_path,
-                profile,
-            }),
-            build_hash,
-        ),
-        ControlCommand::Disable => response_from_result(disable(), build_hash),
-        ControlCommand::Status => {
-            ControlResponse::ok(build_hash, "primary instance is running", "running")
-        }
+        } => response_from_result(apply(ApplyRequest {
+            dll_path: host_dll_path,
+            config_path,
+            profile,
+        })),
+        ControlCommand::Disable => response_from_result(disable()),
+        ControlCommand::Status => ControlResponse::ok("host instance is running", "running"),
     }
 }
 
 pub(crate) fn apply(request: ApplyRequest) -> Result<ControlResponse, InjectorError> {
     backend::apply(request).map(|report| match report.outcome {
-        ApplyOutcome::Replaced => ControlResponse::ok("", apply_message(&report), "replaced"),
-        ApplyOutcome::Initialized => ControlResponse::ok("", apply_message(&report), "initialized"),
-        ApplyOutcome::Reinitialized => {
-            ControlResponse::ok("", apply_message(&report), "reinitialized")
-        }
+        ApplyOutcome::Replaced => ControlResponse::ok(apply_message(&report), "replaced"),
+        ApplyOutcome::Initialized => ControlResponse::ok(apply_message(&report), "initialized"),
+        ApplyOutcome::Reinitialized => ControlResponse::ok(apply_message(&report), "reinitialized"),
     })
 }
 
 pub(crate) fn disable() -> Result<ControlResponse, InjectorError> {
     backend::disable().and_then(|report| match report.outcome {
         DisableOutcome::NotInjected => Ok(ControlResponse::ok(
-            "",
             disable_message(&report),
             "not_injected",
         )),
-        DisableOutcome::ShutDown(ShutdownStatus::Success) => Ok(ControlResponse::ok(
-            "",
-            disable_message(&report),
-            "disabled",
-        )),
+        DisableOutcome::ShutDown(ShutdownStatus::Success) => {
+            Ok(ControlResponse::ok(disable_message(&report), "disabled"))
+        }
         DisableOutcome::ShutDown(ShutdownStatus::NotInitialized) => Ok(ControlResponse::ok(
-            "",
             disable_message(&report),
             "not_initialized",
         )),
         DisableOutcome::ShutDown(ShutdownStatus::AlreadyShutDown) => Ok(ControlResponse::ok(
-            "",
             disable_message(&report),
             "already_shutdown",
         )),
@@ -68,17 +56,13 @@ pub(crate) fn disable() -> Result<ControlResponse, InjectorError> {
 
 pub(crate) fn response_from_result(
     result: Result<ControlResponse, InjectorError>,
-    build_hash: &str,
 ) -> ControlResponse {
     match result {
-        Ok(mut response) => {
-            response.build_hash = build_hash.to_string();
-            response
+        Ok(response) => response,
+        Err(InjectorError::HostBusy) => {
+            ControlResponse::error(InjectorError::HostBusy.to_string(), "busy")
         }
-        Err(InjectorError::PrimaryBusy) => {
-            ControlResponse::error(build_hash, InjectorError::PrimaryBusy.to_string(), "busy")
-        }
-        Err(error) => ControlResponse::error(build_hash, error.to_string(), "error"),
+        Err(error) => ControlResponse::error(error.to_string(), "error"),
     }
 }
 
@@ -97,12 +81,12 @@ pub(crate) fn request_from_cli(
         return Ok(None);
     };
     Ok(Some(ControlRequest {
-        build_hash: current_build_hash()?,
+        protocol_version: CONTROL_PROTOCOL_VERSION,
         command,
     }))
 }
 
-pub(crate) fn resolve_primary_dll_path(
+pub(crate) fn resolve_host_dll_path(
     dll_path: Option<PathBuf>,
 ) -> Result<Option<PathBuf>, InjectorError> {
     let Some(dll_path) = dll_path else {
@@ -235,38 +219,32 @@ mod tests {
 
     #[test]
     fn response_from_error_keeps_display_message() {
-        let response = response_from_result(Err(InjectorError::PrimaryUnavailable), "server-hash");
+        let response = response_from_result(Err(InjectorError::HostUnavailable));
 
         assert!(!response.ok);
-        assert_eq!(response.build_hash, "server-hash");
+        assert_eq!(response.protocol_version, CONTROL_PROTOCOL_VERSION);
         assert_eq!(response.status, "error");
-        assert!(response.message.contains("primary instance is not running"));
+        assert!(response.message.contains("host instance is not running"));
     }
 
     #[test]
-    fn response_from_primary_busy_uses_busy_status() {
-        let response = response_from_result(Err(InjectorError::PrimaryBusy), "server-hash");
+    fn response_from_host_busy_uses_busy_status() {
+        let response = response_from_result(Err(InjectorError::HostBusy));
 
         assert!(!response.ok);
-        assert_eq!(response.build_hash, "server-hash");
+        assert_eq!(response.protocol_version, CONTROL_PROTOCOL_VERSION);
         assert_eq!(response.status, "busy");
-        assert!(response.message.contains("primary instance is busy"));
+        assert!(response.message.contains("host instance is busy"));
     }
 
     #[test]
-    fn request_from_cli_attaches_build_hash() {
+    fn request_from_cli_attaches_protocol_version() {
         let request = request_from_cli(CliCommand::Status)
-            .expect("build hash should resolve")
+            .expect("request should resolve")
             .expect("status should map to control request");
 
         assert_eq!(request.command, ControlCommand::Status);
-        assert_eq!(request.build_hash.len(), 64);
-        assert!(
-            request
-                .build_hash
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
-        );
+        assert_eq!(request.protocol_version, CONTROL_PROTOCOL_VERSION);
     }
 
     #[test]
@@ -275,7 +253,7 @@ mod tests {
             config_path: PathBuf::from("config.json"),
             profile: None,
         }))
-        .expect("build hash should resolve")
+        .expect("request should resolve")
         .expect("apply should map to control request");
 
         match request.command {
@@ -291,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_primary_dll_path_canonicalizes_existing_relative_path() {
+    fn resolve_host_dll_path_canonicalizes_existing_relative_path() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
@@ -301,7 +279,7 @@ mod tests {
         fs::create_dir_all("target").expect("target directory should be available");
         fs::write(&relative_path, b"hook").expect("test hook DLL should be written");
 
-        let resolved = resolve_primary_dll_path(Some(relative_path.clone()))
+        let resolved = resolve_host_dll_path(Some(relative_path.clone()))
             .expect("existing hook DLL should resolve")
             .expect("explicit hook DLL should remain configured");
 
@@ -311,8 +289,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_primary_dll_path_rejects_missing_file_at_startup() {
-        let error = resolve_primary_dll_path(Some(PathBuf::from(r"C:\missing\hook.dll")))
+    fn resolve_host_dll_path_rejects_missing_file_at_startup() {
+        let error = resolve_host_dll_path(Some(PathBuf::from(r"C:\missing\hook.dll")))
             .expect_err("missing hook DLL must be rejected");
 
         match error {

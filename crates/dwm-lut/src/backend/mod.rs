@@ -33,9 +33,18 @@ pub(crate) struct DisableReport {
     pub(crate) pid: u32,
 }
 
-pub(crate) fn ensure_primary_privileges() -> Result<(), InjectorError> {
+pub fn ensure_host_privileges() -> Result<(), InjectorError> {
     win32::enable_debug_privilege()
 }
+
+pub fn start_background_host(
+    host_executable: &std::path::Path,
+    dll_path: Option<PathBuf>,
+) -> Result<(), InjectorError> {
+    win32::start_background_host(host_executable, dll_path)
+}
+
+pub type StartupNotifier = win32::StartupNotifier;
 
 pub(crate) fn apply(request: ApplyRequest) -> Result<ApplyReport, InjectorError> {
     let input_dll_path = request

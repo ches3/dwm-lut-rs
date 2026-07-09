@@ -18,7 +18,6 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::error::InjectorError;
 
-pub(crate) mod build_hash;
 pub(crate) mod client;
 pub(crate) mod protocol;
 pub(crate) mod server;
@@ -66,7 +65,7 @@ impl UserSid {
         let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
         if ok == 0 {
             return Err(InjectorError::ControlPipe {
-                operation: "open primary process token",
+                operation: "open host process token",
                 source: last_os_error(),
             });
         }
@@ -78,7 +77,7 @@ impl UserSid {
         }
         if required_len == 0 {
             return Err(InjectorError::ControlPipe {
-                operation: "measure primary token user",
+                operation: "measure host token user",
                 source: last_os_error(),
             });
         }
@@ -95,7 +94,7 @@ impl UserSid {
         };
         if ok == 0 {
             return Err(InjectorError::ControlPipe {
-                operation: "read primary token user",
+                operation: "read host token user",
                 source: last_os_error(),
             });
         }
@@ -105,7 +104,7 @@ impl UserSid {
         let ok = unsafe { ConvertSidToStringSidW(token_user.User.Sid, &mut sid_text) };
         if ok == 0 {
             return Err(InjectorError::ControlPipe {
-                operation: "convert primary user sid",
+                operation: "convert host user sid",
                 source: last_os_error(),
             });
         }

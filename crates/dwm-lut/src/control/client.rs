@@ -1,6 +1,3 @@
-use std::ffi::OsString;
-use std::os::windows::ffi::OsStringExt;
-use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
 
@@ -14,17 +11,13 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
-    GetNamedPipeServerProcessId, PIPE_READMODE_MESSAGE, SetNamedPipeHandleState, WaitNamedPipeW,
+    PIPE_READMODE_MESSAGE, SetNamedPipeHandleState, WaitNamedPipeW,
 };
-use windows_sys::Win32::System::Threading::{
-    CreateEventW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-    WaitForSingleObject,
-};
+use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
-use crate::control::build_hash::{current_build_hash, file_build_hash};
 use crate::control::protocol::{
     ControlRequest, ControlResponse, MAX_CONTROL_MESSAGE_BYTES, decode_response, encode_request,
-    validate_message_len, validate_response_build_hash,
+    validate_message_len, validate_response_protocol,
 };
 use crate::control::{current_pipe_name, last_os_error, wide_null};
 use crate::error::InjectorError;
@@ -35,11 +28,10 @@ const RESPONSE_READ_TIMEOUT_MS: u32 = 120_000;
 pub(crate) fn send_request(request: &ControlRequest) -> Result<ControlResponse, InjectorError> {
     let pipe_name = current_pipe_name()?;
     let pipe = PipeHandle::open(&pipe_name)?;
-    let local_build_hash = request.build_hash.clone();
     let request = encode_request(request)?;
     pipe.write_message(&request)?;
     let response = pipe.read_message()?;
-    validate_response_build_hash(decode_response(&response)?, &local_build_hash)
+    validate_response_protocol(decode_response(&response)?)
 }
 
 struct PipeHandle(HANDLE);
@@ -54,7 +46,7 @@ impl PipeHandle {
                 let error = last_os_error();
                 match error.raw_os_error() {
                     Some(code) if code == ERROR_FILE_NOT_FOUND as i32 => {
-                        return Err(InjectorError::PrimaryUnavailable);
+                        return Err(InjectorError::HostUnavailable);
                     }
                     Some(code) if code == ERROR_PIPE_BUSY as i32 && Instant::now() < deadline => {
                         continue;
@@ -62,13 +54,13 @@ impl PipeHandle {
                     Some(code)
                         if code == ERROR_PIPE_BUSY as i32 || code == ERROR_SEM_TIMEOUT as i32 =>
                     {
-                        return Err(InjectorError::PrimaryBusy);
+                        return Err(InjectorError::HostBusy);
                     }
                     _ => {}
                 }
 
                 return Err(InjectorError::ControlPipe {
-                    operation: "wait for primary pipe",
+                    operation: "wait for host pipe",
                     source: error,
                 });
             }
@@ -87,19 +79,18 @@ impl PipeHandle {
             if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
                 let pipe = Self(handle);
                 pipe.set_message_read_mode()?;
-                pipe.verify_server_process()?;
                 return Ok(pipe);
             }
 
             let error = last_os_error();
             match error.raw_os_error() {
                 Some(code) if code == ERROR_FILE_NOT_FOUND as i32 => {
-                    return Err(InjectorError::PrimaryUnavailable);
+                    return Err(InjectorError::HostUnavailable);
                 }
                 Some(code) if code == ERROR_PIPE_BUSY as i32 && Instant::now() < deadline => {}
                 _ => {
                     return Err(InjectorError::ControlPipe {
-                        operation: "open primary pipe",
+                        operation: "open host pipe",
                         source: error,
                     });
                 }
@@ -112,41 +103,12 @@ impl PipeHandle {
         let ok = unsafe { SetNamedPipeHandleState(self.0, &mode, null_mut(), null_mut()) };
         if ok == FALSE {
             return Err(InjectorError::ControlPipe {
-                operation: "set primary pipe read mode",
+                operation: "set host pipe read mode",
                 source: last_os_error(),
             });
         }
 
         Ok(())
-    }
-
-    fn verify_server_process(&self) -> Result<(), InjectorError> {
-        let server_pid = self.server_process_id()?;
-        let server = ProcessHandle::open(server_pid)?;
-        let server_path = server.image_path()?;
-        let local_hash = current_build_hash()?;
-        let server_hash = file_build_hash(&server_path)?;
-        if server_hash != local_hash {
-            return Err(InjectorError::ControlProtocol(format!(
-                "primary process image mismatch: pid={server_pid}, path={}",
-                server_path.display()
-            )));
-        }
-
-        Ok(())
-    }
-
-    fn server_process_id(&self) -> Result<u32, InjectorError> {
-        let mut pid = 0u32;
-        let ok = unsafe { GetNamedPipeServerProcessId(self.0, &mut pid) };
-        if ok == FALSE {
-            return Err(InjectorError::ControlPipe {
-                operation: "resolve primary pipe server process",
-                source: last_os_error(),
-            });
-        }
-
-        Ok(pid)
     }
 
     fn write_message(&self, bytes: &[u8]) -> Result<(), InjectorError> {
@@ -311,47 +273,6 @@ impl EventHandle {
 }
 
 impl Drop for EventHandle {
-    fn drop(&mut self) {
-        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
-            unsafe {
-                windows_sys::Win32::Foundation::CloseHandle(self.0);
-            }
-        }
-    }
-}
-
-struct ProcessHandle(HANDLE);
-
-impl ProcessHandle {
-    fn open(pid: u32) -> Result<Self, InjectorError> {
-        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return Err(InjectorError::ControlPipe {
-                operation: "open primary process",
-                source: last_os_error(),
-            });
-        }
-
-        Ok(Self(handle))
-    }
-
-    fn image_path(&self) -> Result<PathBuf, InjectorError> {
-        let mut buffer = vec![0u16; 32_768];
-        let mut len = buffer.len() as u32;
-        let ok = unsafe { QueryFullProcessImageNameW(self.0, 0, buffer.as_mut_ptr(), &mut len) };
-        if ok == FALSE {
-            return Err(InjectorError::ControlPipe {
-                operation: "query primary process image",
-                source: last_os_error(),
-            });
-        }
-
-        buffer.truncate(len as usize);
-        Ok(PathBuf::from(OsString::from_wide(&buffer)))
-    }
-}
-
-impl Drop for ProcessHandle {
     fn drop(&mut self) {
         if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
             unsafe {

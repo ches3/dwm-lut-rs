@@ -20,10 +20,9 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateMutexW, INFINITE, WaitForSingleObject,
 };
 
-use crate::control::build_hash::current_build_hash;
 use crate::control::protocol::{
-    ControlCommand, ControlRequest, ControlResponse, MAX_CONTROL_MESSAGE_BYTES, decode_request,
-    encode_response, validate_message_len,
+    CONTROL_PROTOCOL_VERSION, ControlCommand, ControlRequest, ControlResponse,
+    MAX_CONTROL_MESSAGE_BYTES, decode_request, encode_response, validate_message_len,
 };
 use crate::control::{SecurityDescriptor, UserSid, current_pipe_name, last_os_error, wide_null};
 use crate::error::InjectorError;
@@ -35,15 +34,18 @@ const REQUEST_READ_TIMEOUT_MS: u32 = 2_000;
 const PIPE_CREATE_RETRY_DELAY_MS: u64 = 500;
 const MAX_PIPE_CREATE_RETRIES: usize = 5;
 
-pub(crate) fn run_server(primary_dll_path: Option<PathBuf>) -> Result<(), InjectorError> {
-    let _primary_guard = PrimaryInstanceGuard::acquire()?;
+pub(crate) fn run_server(
+    host_dll_path: Option<PathBuf>,
+    on_ready: impl FnOnce() -> Result<(), InjectorError>,
+) -> Result<(), InjectorError> {
+    let _host_guard = HostInstanceGuard::acquire()?;
     let pipe_name = current_pipe_name()?;
-    let primary_user_sid = UserSid::current_process()?;
-    let build_hash = current_build_hash()?;
+    let host_user_sid = UserSid::current_process()?;
     let command_lock = Arc::new(Mutex::new(()));
     let worker_slots = Arc::new(WorkerSlots::new(MAX_WORKER_THREADS));
-    let mut pipe = create_pipe(&pipe_name, true, &primary_user_sid)?;
-    println!("dwm-lut primary instance is running on {pipe_name}");
+    let mut pipe = create_pipe(&pipe_name, true, &host_user_sid)?;
+    on_ready()?;
+    println!("dwm-lut host instance is running on {pipe_name}");
     loop {
         let worker_slot = worker_slots.acquire();
         match pipe.connect() {
@@ -51,65 +53,60 @@ pub(crate) fn run_server(primary_dll_path: Option<PathBuf>) -> Result<(), Inject
             Ok(ConnectOutcome::Abandoned) => {
                 drop(worker_slot);
                 pipe.disconnect();
-                pipe = create_pipe_for_accept_loop(&pipe_name, &primary_user_sid)?;
+                pipe = create_pipe_for_accept_loop(&pipe_name, &host_user_sid)?;
                 continue;
             }
             Err(error) => {
                 drop(worker_slot);
                 eprintln!("{error}");
                 pipe.disconnect();
-                pipe = create_pipe_for_accept_loop(&pipe_name, &primary_user_sid)?;
+                pipe = create_pipe_for_accept_loop(&pipe_name, &host_user_sid)?;
                 continue;
             }
         }
 
-        let build_hash = build_hash.clone();
-        let primary_dll_path = primary_dll_path.clone();
+        let host_dll_path = host_dll_path.clone();
         let command_lock = Arc::clone(&command_lock);
         std::thread::spawn(move || {
             let _worker_slot = worker_slot;
-            if let Err(error) =
-                handle_connected_client(&pipe, &build_hash, primary_dll_path, command_lock)
-            {
+            if let Err(error) = handle_connected_client(&pipe, host_dll_path, command_lock) {
                 eprintln!("{error}");
             }
             pipe.disconnect();
         });
-        pipe = create_pipe_for_accept_loop(&pipe_name, &primary_user_sid)?;
+        pipe = create_pipe_for_accept_loop(&pipe_name, &host_user_sid)?;
     }
 }
 
 pub(crate) fn handle_control_request(
     request: ControlRequest,
-    local_build_hash: &str,
-    handler: impl FnOnce(ControlCommand, &str) -> ControlResponse,
+    handler: impl FnOnce(ControlCommand) -> ControlResponse,
 ) -> ControlResponse {
-    if request.build_hash != local_build_hash {
-        return ControlResponse::build_mismatch(&request.build_hash, local_build_hash);
+    if request.protocol_version != CONTROL_PROTOCOL_VERSION {
+        return ControlResponse::protocol_mismatch(request.protocol_version);
     }
 
-    handler(request.command, local_build_hash)
+    handler(request.command)
 }
 
 fn handle_connected_client(
     pipe: &PipeHandle,
-    build_hash: &str,
-    primary_dll_path: Option<PathBuf>,
+    host_dll_path: Option<PathBuf>,
     command_lock: Arc<Mutex<()>>,
 ) -> Result<(), InjectorError> {
     let bytes = match pipe.read_message() {
         Ok(bytes) => bytes,
         Err(error @ InjectorError::ControlTimeout { .. }) => return Err(error),
         Err(error) => {
-            let response = runtime::response_from_result(Err(error), build_hash);
+            let response = runtime::response_from_result(Err(error));
             let response = encode_response(&response)?;
             return pipe.write_message(&response);
         }
     };
-    let result = handle_control_request_bytes(&bytes, build_hash, primary_dll_path, command_lock);
+    let result = handle_control_request_bytes(&bytes, host_dll_path, command_lock);
     let response = match result {
         Ok(response) => response,
-        Err(error) => runtime::response_from_result(Err(error), build_hash),
+        Err(error) => runtime::response_from_result(Err(error)),
     };
     let response = encode_response(&response)?;
     pipe.write_message(&response)
@@ -117,41 +114,33 @@ fn handle_connected_client(
 
 fn handle_control_request_bytes(
     bytes: &[u8],
-    build_hash: &str,
-    primary_dll_path: Option<PathBuf>,
+    host_dll_path: Option<PathBuf>,
     command_lock: Arc<Mutex<()>>,
 ) -> Result<ControlResponse, InjectorError> {
     let request = decode_request(bytes)?;
-    Ok(handle_control_request(
-        request,
-        build_hash,
-        |command, build_hash| {
-            if command == ControlCommand::Status {
-                return runtime::handle_command(command, build_hash, primary_dll_path);
-            }
+    Ok(handle_control_request(request, |command| {
+        if command == ControlCommand::Status {
+            return runtime::handle_command(command, host_dll_path);
+        }
 
-            let _command_guard = match command_lock.try_lock() {
-                Ok(guard) => guard,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    return runtime::response_from_result(
-                        Err(InjectorError::PrimaryBusy),
-                        build_hash,
-                    );
-                }
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            };
-            runtime::handle_command(command, build_hash, primary_dll_path)
-        },
-    ))
+        let _command_guard = match command_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return runtime::response_from_result(Err(InjectorError::HostBusy));
+            }
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
+        runtime::handle_command(command, host_dll_path)
+    }))
 }
 
 fn create_pipe(
     pipe_name: &str,
     first_instance: bool,
-    primary_user_sid: &UserSid,
+    host_user_sid: &UserSid,
 ) -> Result<PipeHandle, InjectorError> {
     let pipe_name = wide_null(pipe_name);
-    let security_descriptor = SecurityDescriptor::from_pipe_dacl(primary_user_sid)?;
+    let security_descriptor = SecurityDescriptor::from_pipe_dacl(host_user_sid)?;
     let security_attributes = security_descriptor.as_security_attributes();
     let open_mode = if first_instance {
         PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED
@@ -175,10 +164,10 @@ fn create_pipe(
 
 fn create_pipe_for_accept_loop(
     pipe_name: &str,
-    primary_user_sid: &UserSid,
+    host_user_sid: &UserSid,
 ) -> Result<PipeHandle, InjectorError> {
     for attempt in 1..=MAX_PIPE_CREATE_RETRIES {
-        match create_pipe(pipe_name, false, primary_user_sid) {
+        match create_pipe(pipe_name, false, host_user_sid) {
             Ok(pipe) => return Ok(pipe),
             Err(error) if attempt < MAX_PIPE_CREATE_RETRIES => {
                 eprintln!("{error}; retrying pipe creation ({attempt}/{MAX_PIPE_CREATE_RETRIES})");
@@ -191,7 +180,7 @@ fn create_pipe_for_accept_loop(
     unreachable!("pipe creation retry loop always returns")
 }
 
-fn primary_mutex_name_for_current_session() -> Result<String, InjectorError> {
+fn host_mutex_name_for_current_session() -> Result<String, InjectorError> {
     let pipe_name = current_pipe_name()?;
     Ok(pipe_name.replace(r"\\.\pipe\", r"Local\"))
 }
@@ -265,7 +254,8 @@ mod tests {
     };
 
     use crate::control::protocol::{
-        BUILD_MISMATCH_STATUS, ControlCommand, ControlRequest, encode_request,
+        CONTROL_PROTOCOL_VERSION, ControlCommand, ControlRequest, PROTOCOL_MISMATCH_STATUS,
+        encode_request,
     };
 
     use super::{
@@ -273,18 +263,17 @@ mod tests {
     };
 
     #[test]
-    fn matching_build_hash_dispatches_command() {
+    fn matching_protocol_version_dispatches_command() {
         let called = Cell::new(false);
         let response = handle_control_request(
             ControlRequest {
-                build_hash: "same-hash".to_string(),
+                protocol_version: CONTROL_PROTOCOL_VERSION,
                 command: ControlCommand::Status,
             },
-            "same-hash",
-            |command, build_hash| {
+            |command| {
                 called.set(true);
                 assert_eq!(command, ControlCommand::Status);
-                crate::control::protocol::ControlResponse::ok(build_hash, "ok", "running")
+                crate::control::protocol::ControlResponse::ok("ok", "running")
             },
         );
 
@@ -293,38 +282,36 @@ mod tests {
     }
 
     #[test]
-    fn different_build_hash_rejects_without_dispatching_command() {
+    fn different_protocol_version_rejects_without_dispatching_command() {
         let called = Cell::new(false);
         let response = handle_control_request(
             ControlRequest {
-                build_hash: "client-hash".to_string(),
+                protocol_version: CONTROL_PROTOCOL_VERSION + 1,
                 command: ControlCommand::Status,
             },
-            "server-hash",
-            |_command, build_hash| {
+            |_command| {
                 called.set(true);
-                crate::control::protocol::ControlResponse::ok(build_hash, "ok", "running")
+                crate::control::protocol::ControlResponse::ok("ok", "running")
             },
         );
 
         assert!(!called.get());
         assert!(!response.ok);
-        assert_eq!(response.status, BUILD_MISMATCH_STATUS);
+        assert_eq!(response.status, PROTOCOL_MISMATCH_STATUS);
     }
 
     #[test]
     fn malformed_request_bytes_become_error_response() {
         let result = handle_control_request_bytes(
-            br#"{"build_hash":"client-hash","command":"status""#,
-            "server-hash",
+            br#"{"protocol_version":1,"command":"status""#,
             None,
             Arc::new(Mutex::new(())),
         );
 
-        let response = crate::runtime::response_from_result(result, "server-hash");
+        let response = crate::runtime::response_from_result(result);
 
         assert!(!response.ok);
-        assert_eq!(response.build_hash, "server-hash");
+        assert_eq!(response.protocol_version, CONTROL_PROTOCOL_VERSION);
         assert_eq!(response.status, "error");
         assert!(response.message.contains("control protocol failed"));
     }
@@ -336,19 +323,18 @@ mod tests {
             .lock()
             .expect("command lock should be available");
         let request = encode_request(&ControlRequest {
-            build_hash: "server-hash".to_string(),
+            protocol_version: CONTROL_PROTOCOL_VERSION,
             command: ControlCommand::Disable,
         })
         .expect("request should encode");
 
-        let response =
-            handle_control_request_bytes(&request, "server-hash", None, Arc::clone(&command_lock))
-                .expect("busy response should be encoded as a control response");
+        let response = handle_control_request_bytes(&request, None, Arc::clone(&command_lock))
+            .expect("busy response should be encoded as a control response");
 
         assert!(!response.ok);
-        assert_eq!(response.build_hash, "server-hash");
+        assert_eq!(response.protocol_version, CONTROL_PROTOCOL_VERSION);
         assert_eq!(response.status, "busy");
-        assert!(response.message.contains("primary instance is busy"));
+        assert!(response.message.contains("host instance is busy"));
     }
 
     #[test]
@@ -618,18 +604,18 @@ impl Drop for EventHandle {
     }
 }
 
-struct PrimaryInstanceGuard(HANDLE);
+struct HostInstanceGuard(HANDLE);
 
-impl PrimaryInstanceGuard {
+impl HostInstanceGuard {
     fn acquire() -> Result<Self, InjectorError> {
-        let mutex_name = wide_null(&primary_mutex_name_for_current_session()?);
+        let mutex_name = wide_null(&host_mutex_name_for_current_session()?);
         unsafe {
             SetLastError(0);
         }
         let handle = unsafe { CreateMutexW(null_mut(), FALSE, mutex_name.as_ptr()) };
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
             return Err(InjectorError::ControlPipe {
-                operation: "create primary instance mutex",
+                operation: "create host instance mutex",
                 source: last_os_error(),
             });
         }
@@ -639,14 +625,14 @@ impl PrimaryInstanceGuard {
             unsafe {
                 windows_sys::Win32::Foundation::CloseHandle(handle);
             }
-            return Err(InjectorError::PrimaryAlreadyRunning);
+            return Err(InjectorError::HostAlreadyRunning);
         }
 
         Ok(Self(handle))
     }
 }
 
-impl Drop for PrimaryInstanceGuard {
+impl Drop for HostInstanceGuard {
     fn drop(&mut self) {
         if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
             unsafe {
