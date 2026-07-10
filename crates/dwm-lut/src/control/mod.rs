@@ -55,12 +55,12 @@ fn last_os_error() -> io::Error {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct UserSid {
+pub(crate) struct UserSid {
     sddl: String,
 }
 
 impl UserSid {
-    fn current_process() -> Result<Self, InjectorError> {
+    pub(crate) fn current_process() -> Result<Self, InjectorError> {
         let mut token = null_mut();
         let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
         if ok == 0 {
@@ -145,12 +145,12 @@ fn mutex_security_descriptor_for_user(user_sid: &str) -> String {
     format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{user_sid})S:(ML;;NW;;;ME)")
 }
 
-struct SecurityDescriptor {
+pub(crate) struct SecurityDescriptor {
     ptr: PSECURITY_DESCRIPTOR,
 }
 
 impl SecurityDescriptor {
-    fn from_pipe_dacl(user_sid: &UserSid) -> Result<Self, InjectorError> {
+    pub(crate) fn from_pipe_dacl(user_sid: &UserSid) -> Result<Self, InjectorError> {
         Self::from_sddl(
             pipe_security_descriptor_for_user(&user_sid.sddl),
             "build pipe security descriptor",
@@ -185,7 +185,7 @@ impl SecurityDescriptor {
         Ok(Self { ptr })
     }
 
-    fn as_security_attributes(&self) -> SECURITY_ATTRIBUTES {
+    pub(crate) fn as_security_attributes(&self) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: self.ptr,

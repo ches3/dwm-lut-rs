@@ -2,7 +2,7 @@
 
 fn main() {
     let result = parse_host_args()
-        .and_then(|options| dwm_lut::run_host(options.dll_path, options.startup_result_handle));
+        .and_then(|options| dwm_lut::run_host(options.dll_path, options.startup_result_pipe));
     if let Err(err) = result {
         std::process::exit(dwm_lut::report_host_startup_error(&err));
     }
@@ -10,12 +10,12 @@ fn main() {
 
 struct HostOptions {
     dll_path: Option<std::path::PathBuf>,
-    startup_result_handle: Option<usize>,
+    startup_result_pipe: Option<String>,
 }
 
 fn parse_host_args() -> Result<HostOptions, dwm_lut::error::InjectorError> {
     let mut dll_path = None;
-    let mut startup_result_handle = None;
+    let mut startup_result_pipe = None;
     let mut args = std::env::args_os();
     let _program = args.next();
 
@@ -27,18 +27,13 @@ fn parse_host_args() -> Result<HostOptions, dwm_lut::error::InjectorError> {
                 })?;
                 dll_path = Some(std::path::PathBuf::from(value));
             }
-            "--startup-result-handle" => {
+            "--startup-result-pipe" => {
                 let value = args.next().ok_or_else(|| {
                     dwm_lut::error::InjectorError::Usage(
-                        "--startup-result-handle requires a value".to_string(),
+                        "--startup-result-pipe requires a value".to_string(),
                     )
                 })?;
-                startup_result_handle =
-                    Some(value.to_string_lossy().parse::<usize>().map_err(|_| {
-                        dwm_lut::error::InjectorError::Usage(
-                            "--startup-result-handle must be an integer".to_string(),
-                        )
-                    })?);
+                startup_result_pipe = Some(value.to_string_lossy().into_owned());
             }
             other => {
                 return Err(dwm_lut::error::InjectorError::Usage(format!(
@@ -50,6 +45,6 @@ fn parse_host_args() -> Result<HostOptions, dwm_lut::error::InjectorError> {
 
     Ok(HostOptions {
         dll_path,
-        startup_result_handle,
+        startup_result_pipe,
     })
 }

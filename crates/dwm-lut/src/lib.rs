@@ -42,9 +42,9 @@ pub fn run_cli() -> Result<(), InjectorError> {
 
 pub fn run_host(
     dll_path: Option<PathBuf>,
-    startup_result_handle: Option<usize>,
+    startup_result_pipe: Option<String>,
 ) -> Result<(), InjectorError> {
-    let mut startup_notifier = startup_result_handle.map(backend::StartupNotifier::from_raw_handle);
+    let mut startup_notifier = startup_result_pipe.map(backend::StartupNotifier::new);
     let result = run_host_inner(dll_path, &mut startup_notifier);
     if let Err(error) = &result
         && let Some(notifier) = startup_notifier.take()

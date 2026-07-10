@@ -137,6 +137,7 @@ pub enum InjectorError {
         operation: &'static str,
         source: io::Error,
     },
+    HostElevationCancelled,
     HostStartupFailed(String),
     DebugPrivilegeUnavailable,
     MissingFile {
@@ -212,6 +213,7 @@ impl fmt::Display for InjectorError {
             Self::HostLaunchFailed { operation, source } => {
                 write!(f, "host background launch {operation} failed: {source}")
             }
+            Self::HostElevationCancelled => write!(f, "host elevation was canceled"),
             Self::HostStartupFailed(message) => {
                 write!(f, "host background startup failed: {message}")
             }
