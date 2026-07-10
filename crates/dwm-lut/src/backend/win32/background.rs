@@ -31,6 +31,8 @@ const STARTUP_RESULT_OK: &str = "ok\n";
 const STARTUP_RESULT_ERROR_PREFIX: &str = "err\n";
 const STARTUP_RESULT_MAX_BYTES: usize = 16 * 1024;
 const STARTUP_TIMEOUT_EXIT_CODE: u32 = 0xE000_0001;
+const STARTUP_FAILURE_KIND_ERROR: &str = "error";
+const STARTUP_FAILURE_KIND_HOST_ALREADY_RUNNING: &str = "host_already_running";
 const ARG_SEPARATOR: u16 = b' ' as u16;
 const BACKSLASH: u16 = b'\\' as u16;
 const DOUBLE_QUOTE: u16 = b'"' as u16;
@@ -124,9 +126,14 @@ impl StartupNotifier {
         self.write_result(STARTUP_RESULT_OK.as_bytes())
     }
 
-    pub(crate) fn notify_failure(self, message: &str) -> Result<(), InjectorError> {
-        let mut bytes = Vec::with_capacity(STARTUP_RESULT_ERROR_PREFIX.len() + message.len());
+    pub(crate) fn notify_failure(self, error: &InjectorError) -> Result<(), InjectorError> {
+        let kind = startup_failure_kind(error);
+        let message = error.to_string();
+        let mut bytes =
+            Vec::with_capacity(STARTUP_RESULT_ERROR_PREFIX.len() + kind.len() + 1 + message.len());
         bytes.extend_from_slice(STARTUP_RESULT_ERROR_PREFIX.as_bytes());
+        bytes.extend_from_slice(kind.as_bytes());
+        bytes.push(b'\n');
         bytes.extend_from_slice(message.as_bytes());
         self.write_result(&bytes)
     }
@@ -362,8 +369,21 @@ fn parse_startup_result(message: &str) -> Result<(), InjectorError> {
     if message == STARTUP_RESULT_OK {
         return Ok(());
     }
-    if let Some(message) = message.strip_prefix(STARTUP_RESULT_ERROR_PREFIX) {
-        return Err(InjectorError::HostStartupFailed(message.to_string()));
+    if let Some(failure) = message.strip_prefix(STARTUP_RESULT_ERROR_PREFIX) {
+        let Some((kind, message)) = failure.split_once('\n') else {
+            return Err(InjectorError::HostStartupFailed(
+                "host process reported an invalid startup result".to_string(),
+            ));
+        };
+        return match kind {
+            STARTUP_FAILURE_KIND_HOST_ALREADY_RUNNING => Err(InjectorError::HostAlreadyRunning),
+            STARTUP_FAILURE_KIND_ERROR => {
+                Err(InjectorError::HostStartupFailed(message.to_string()))
+            }
+            _ => Err(InjectorError::HostStartupFailed(
+                "host process reported an invalid startup result".to_string(),
+            )),
+        };
     }
     if message.is_empty() {
         return Err(InjectorError::HostStartupFailed(
@@ -373,6 +393,13 @@ fn parse_startup_result(message: &str) -> Result<(), InjectorError> {
     Err(InjectorError::HostStartupFailed(
         "host process reported an invalid startup result".to_string(),
     ))
+}
+
+fn startup_failure_kind(error: &InjectorError) -> &'static str {
+    match error {
+        InjectorError::HostAlreadyRunning => STARTUP_FAILURE_KIND_HOST_ALREADY_RUNNING,
+        _ => STARTUP_FAILURE_KIND_ERROR,
+    }
 }
 
 fn read_startup_result(handle: ProcessHandle) -> io::Result<String> {
@@ -455,7 +482,9 @@ mod tests {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::Path;
 
-    use super::{host_command_line, parse_startup_result, quote_windows_arg};
+    use crate::error::InjectorError;
+
+    use super::{host_command_line, parse_startup_result, quote_windows_arg, startup_failure_kind};
 
     fn wide(value: &str) -> Vec<u16> {
         OsStr::new(value).encode_wide().collect()
@@ -527,8 +556,34 @@ mod tests {
 
     #[test]
     fn parses_startup_failure_result() {
-        let error = parse_startup_result("err\nmissing hook").expect_err("error result must fail");
+        let error =
+            parse_startup_result("err\nerror\nmissing hook").expect_err("error result must fail");
 
         assert!(error.to_string().contains("missing hook"));
+    }
+
+    #[test]
+    fn parses_host_already_running_startup_failure_as_specific_error() {
+        let error = parse_startup_result(
+            "err\nhost_already_running\ndwm-lut host instance is already running in this session",
+        )
+        .expect_err("already running result must be surfaced as a specific error");
+
+        assert!(matches!(error, InjectorError::HostAlreadyRunning));
+    }
+
+    #[test]
+    fn rejects_unstructured_startup_failure_result() {
+        let error =
+            parse_startup_result("err\nmissing hook").expect_err("legacy error result must fail");
+        assert!(error.to_string().contains("invalid startup result"));
+    }
+
+    #[test]
+    fn startup_failure_kind_preserves_host_already_running() {
+        assert_eq!(
+            startup_failure_kind(&InjectorError::HostAlreadyRunning),
+            "host_already_running"
+        );
     }
 }

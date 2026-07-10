@@ -11,27 +11,41 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
-    PIPE_READMODE_MESSAGE, SetNamedPipeHandleState, WaitNamedPipeW,
+    GetNamedPipeServerProcessId, PIPE_READMODE_MESSAGE, SetNamedPipeHandleState, WaitNamedPipeW,
 };
-use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+};
 
 use crate::control::protocol::{
-    ControlRequest, ControlResponse, MAX_CONTROL_MESSAGE_BYTES, decode_response, encode_request,
-    validate_message_len, validate_response_protocol,
+    ControlCommand, ControlRequest, ControlResponse, MAX_CONTROL_MESSAGE_BYTES, decode_response,
+    encode_request, validate_message_len, validate_response_protocol,
 };
 use crate::control::{current_pipe_name, last_os_error, wide_null};
 use crate::error::InjectorError;
 
 const WAIT_PIPE_TIMEOUT_MS: u32 = 2_000;
 const RESPONSE_READ_TIMEOUT_MS: u32 = 120_000;
+const HOST_SHUTDOWN_TIMEOUT_MS: u32 = 5_000;
 
 pub(crate) fn send_request(request: &ControlRequest) -> Result<ControlResponse, InjectorError> {
     let pipe_name = current_pipe_name()?;
     let pipe = PipeHandle::open(&pipe_name)?;
+    let host_process = if request.command == ControlCommand::Stop {
+        Some(pipe.server_process()?)
+    } else {
+        None
+    };
     let request = encode_request(request)?;
     pipe.write_message(&request)?;
     let response = pipe.read_message()?;
-    validate_response_protocol(decode_response(&response)?)
+    let response = validate_response_protocol(decode_response(&response)?)?;
+    if response.ok
+        && let Some(host_process) = host_process
+    {
+        host_process.wait_for_exit()?;
+    }
+    Ok(response)
 }
 
 struct PipeHandle(HANDLE);
@@ -111,6 +125,20 @@ impl PipeHandle {
         Ok(())
     }
 
+    fn server_process(&self) -> Result<HostProcessHandle, InjectorError> {
+        let mut process_id = 0;
+        let ok = unsafe { GetNamedPipeServerProcessId(self.0, &mut process_id) };
+        if ok == FALSE {
+            return Err(InjectorError::ControlPipe {
+                operation: "resolve host process",
+                source: last_os_error(),
+            });
+        }
+
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, FALSE, process_id) };
+        HostProcessHandle::new(handle)
+    }
+
     fn write_message(&self, bytes: &[u8]) -> Result<(), InjectorError> {
         validate_message_len(bytes.len())?;
         let len = u32::try_from(bytes.len()).map_err(|_| {
@@ -182,6 +210,43 @@ impl PipeHandle {
         validate_message_len(read)?;
         buffer.truncate(read);
         Ok(buffer)
+    }
+}
+
+struct HostProcessHandle(HANDLE);
+
+impl HostProcessHandle {
+    fn new(handle: HANDLE) -> Result<Self, InjectorError> {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(InjectorError::ControlPipe {
+                operation: "open host process",
+                source: last_os_error(),
+            });
+        }
+        Ok(Self(handle))
+    }
+
+    fn wait_for_exit(&self) -> Result<(), InjectorError> {
+        match unsafe { WaitForSingleObject(self.0, HOST_SHUTDOWN_TIMEOUT_MS) } {
+            WAIT_OBJECT_0 => Ok(()),
+            WAIT_TIMEOUT => Err(InjectorError::ControlTimeout {
+                operation: "wait for host shutdown",
+            }),
+            _ => Err(InjectorError::ControlPipe {
+                operation: "wait for host shutdown",
+                source: last_os_error(),
+            }),
+        }
+    }
+}
+
+impl Drop for HostProcessHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.0);
+            }
+        }
     }
 }
 

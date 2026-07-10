@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
-    ERROR_PIPE_NOT_CONNECTED, FALSE, HANDLE, INVALID_HANDLE_VALUE, SetLastError, TRUE,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_ALREADY_EXISTS, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA,
+    ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, FALSE, HANDLE,
+    INVALID_HANDLE_VALUE, SetLastError, TRUE, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
@@ -17,7 +18,8 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, INFINITE, WaitForSingleObject,
+    CreateEventW, CreateMutexW, INFINITE, ReleaseMutex, SetEvent, WaitForMultipleObjects,
+    WaitForSingleObject,
 };
 
 use crate::control::protocol::{
@@ -35,21 +37,29 @@ const PIPE_CREATE_RETRY_DELAY_MS: u64 = 500;
 const MAX_PIPE_CREATE_RETRIES: usize = 5;
 
 pub(crate) fn run_server(
+    host_guard: HostInstanceGuard,
     host_dll_path: Option<PathBuf>,
     on_ready: impl FnOnce() -> Result<(), InjectorError>,
 ) -> Result<(), InjectorError> {
-    let _host_guard = HostInstanceGuard::acquire()?;
+    let _host_guard = host_guard;
     let pipe_name = current_pipe_name()?;
     let host_user_sid = UserSid::current_process()?;
     let command_lock = Arc::new(Mutex::new(()));
+    let shutdown = Arc::new(ServerShutdown::new()?);
     let worker_slots = Arc::new(WorkerSlots::new(MAX_WORKER_THREADS));
     let mut pipe = create_pipe(&pipe_name, true, &host_user_sid)?;
     on_ready()?;
     println!("dwm-lut host instance is running on {pipe_name}");
     loop {
         let worker_slot = worker_slots.acquire();
-        match pipe.connect() {
+        match pipe.connect(&shutdown) {
             Ok(ConnectOutcome::Connected) => {}
+            Ok(ConnectOutcome::Shutdown) => {
+                drop(worker_slot);
+                pipe.disconnect();
+                worker_slots.wait_until_idle();
+                return Ok(());
+            }
             Ok(ConnectOutcome::Abandoned) => {
                 drop(worker_slot);
                 pipe.disconnect();
@@ -67,9 +77,12 @@ pub(crate) fn run_server(
 
         let host_dll_path = host_dll_path.clone();
         let command_lock = Arc::clone(&command_lock);
+        let shutdown = Arc::clone(&shutdown);
         std::thread::spawn(move || {
             let _worker_slot = worker_slot;
-            if let Err(error) = handle_connected_client(&pipe, host_dll_path, command_lock) {
+            if let Err(error) =
+                handle_connected_client(&pipe, host_dll_path, command_lock, shutdown)
+            {
                 eprintln!("{error}");
             }
             pipe.disconnect();
@@ -93,6 +106,7 @@ fn handle_connected_client(
     pipe: &PipeHandle,
     host_dll_path: Option<PathBuf>,
     command_lock: Arc<Mutex<()>>,
+    shutdown: Arc<ServerShutdown>,
 ) -> Result<(), InjectorError> {
     let bytes = match pipe.read_message() {
         Ok(bytes) => bytes,
@@ -103,23 +117,57 @@ fn handle_connected_client(
             return pipe.write_message(&response);
         }
     };
-    let result = handle_control_request_bytes(&bytes, host_dll_path, command_lock);
-    let response = match result {
-        Ok(response) => response,
-        Err(error) => runtime::response_from_result(Err(error)),
+    let result = handle_control_request_bytes(&bytes, host_dll_path, command_lock, &shutdown);
+    let handled = match result {
+        Ok(handled) => handled,
+        Err(error) => HandledControlRequest {
+            response: runtime::response_from_result(Err(error)),
+            stop_after_response: false,
+        },
     };
-    let response = encode_response(&response)?;
-    pipe.write_message(&response)
+    let response = match encode_response(&handled.response) {
+        Ok(response) => response,
+        Err(error) => {
+            if handled.stop_after_response {
+                shutdown.cancel();
+            }
+            return Err(error);
+        }
+    };
+    if let Err(error) = pipe.write_message(&response) {
+        if handled.stop_after_response {
+            shutdown.cancel();
+        }
+        return Err(error);
+    }
+    if handled.stop_after_response
+        && let Err(error) = shutdown.request()
+    {
+        shutdown.cancel();
+        return Err(error);
+    }
+    Ok(())
+}
+
+struct HandledControlRequest {
+    response: ControlResponse,
+    stop_after_response: bool,
 }
 
 fn handle_control_request_bytes(
     bytes: &[u8],
     host_dll_path: Option<PathBuf>,
     command_lock: Arc<Mutex<()>>,
-) -> Result<ControlResponse, InjectorError> {
+    shutdown: &ServerShutdown,
+) -> Result<HandledControlRequest, InjectorError> {
     let request = decode_request(bytes)?;
-    Ok(handle_control_request(request, |command| {
+    let is_stop = request.protocol_version == CONTROL_PROTOCOL_VERSION
+        && request.command == ControlCommand::Stop;
+    let response = handle_control_request(request, |command| {
         if command == ControlCommand::Status {
+            if shutdown.is_stopping() {
+                return ControlResponse::ok("dwm-lut host instance is stopping", "stopping");
+            }
             return runtime::handle_command(command, host_dll_path);
         }
 
@@ -130,8 +178,73 @@ fn handle_control_request_bytes(
             }
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         };
+        if shutdown.is_stopping() {
+            return ControlResponse::error(
+                "dwm-lut host instance is stopping".to_string(),
+                "stopping",
+            );
+        }
+        if command == ControlCommand::Stop {
+            shutdown.begin();
+        }
         runtime::handle_command(command, host_dll_path)
-    }))
+    });
+    Ok(HandledControlRequest {
+        stop_after_response: is_stop && response.ok,
+        response,
+    })
+}
+
+struct ServerShutdown {
+    stopping: AtomicBool,
+    event: EventHandle,
+}
+
+// Windows event handles may be signaled and waited on from different threads.
+unsafe impl Send for ServerShutdown {}
+unsafe impl Sync for ServerShutdown {}
+
+impl ServerShutdown {
+    fn new() -> Result<Self, InjectorError> {
+        Ok(Self {
+            stopping: AtomicBool::new(false),
+            event: EventHandle::new()?,
+        })
+    }
+
+    fn begin(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+    }
+
+    fn cancel(&self) {
+        self.stopping.store(false, Ordering::SeqCst);
+    }
+
+    fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
+    fn request(&self) -> Result<(), InjectorError> {
+        let ok = unsafe { SetEvent(self.event.0) };
+        if ok == FALSE {
+            return Err(InjectorError::ControlPipe {
+                operation: "signal host shutdown",
+                source: last_os_error(),
+            });
+        }
+        Ok(())
+    }
+
+    fn is_requested(&self) -> Result<bool, InjectorError> {
+        match unsafe { WaitForSingleObject(self.event.0, 0) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err(InjectorError::ControlPipe {
+                operation: "check host shutdown",
+                source: last_os_error(),
+            }),
+        }
+    }
 }
 
 fn create_pipe(
@@ -225,7 +338,20 @@ impl WorkerSlots {
             Err(poisoned) => poisoned.into_inner(),
         };
         state.active -= 1;
-        self.available.notify_one();
+        self.available.notify_all();
+    }
+
+    fn wait_until_idle(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        while state.active != 0 {
+            state = match self.available.wait(state) {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+        }
     }
 }
 
@@ -247,7 +373,8 @@ impl Drop for WorkerSlotGuard {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use windows_sys::Win32::Foundation::{
         ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED,
@@ -259,7 +386,8 @@ mod tests {
     };
 
     use super::{
-        handle_control_request, handle_control_request_bytes, is_disconnected_pipe_error_code,
+        HostInstanceClaim, ServerShutdown, claim_host_instance, handle_control_request,
+        handle_control_request_bytes, is_disconnected_pipe_error_code,
     };
 
     #[test]
@@ -302,13 +430,15 @@ mod tests {
 
     #[test]
     fn malformed_request_bytes_become_error_response() {
+        let shutdown = ServerShutdown::new().expect("shutdown event should be created");
         let result = handle_control_request_bytes(
             br#"{"protocol_version":1,"command":"status""#,
             None,
             Arc::new(Mutex::new(())),
+            &shutdown,
         );
 
-        let response = crate::runtime::response_from_result(result);
+        let response = crate::runtime::response_from_result(result.map(|handled| handled.response));
 
         assert!(!response.ok);
         assert_eq!(response.protocol_version, CONTROL_PROTOCOL_VERSION);
@@ -327,14 +457,138 @@ mod tests {
             command: ControlCommand::Disable,
         })
         .expect("request should encode");
+        let shutdown = ServerShutdown::new().expect("shutdown event should be created");
 
-        let response = handle_control_request_bytes(&request, None, Arc::clone(&command_lock))
-            .expect("busy response should be encoded as a control response");
+        let handled =
+            handle_control_request_bytes(&request, None, Arc::clone(&command_lock), &shutdown)
+                .expect("busy response should be encoded as a control response");
+        let response = handled.response;
 
         assert!(!response.ok);
         assert_eq!(response.protocol_version, CONTROL_PROTOCOL_VERSION);
         assert_eq!(response.status, "busy");
         assert!(response.message.contains("host instance is busy"));
+        assert!(!handled.stop_after_response);
+    }
+
+    #[test]
+    fn stop_request_succeeds_and_is_marked_for_shutdown_after_response() {
+        let request = encode_request(&ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            command: ControlCommand::Stop,
+        })
+        .expect("request should encode");
+        let shutdown = ServerShutdown::new().expect("shutdown event should be created");
+
+        let handled =
+            handle_control_request_bytes(&request, None, Arc::new(Mutex::new(())), &shutdown)
+                .expect("stop response should be encoded as a control response");
+
+        assert!(handled.response.ok);
+        assert_eq!(handled.response.status, "stopped");
+        assert_eq!(handled.response.message, "stopped dwm-lut host instance");
+        assert!(handled.stop_after_response);
+        assert!(shutdown.is_stopping());
+    }
+
+    #[test]
+    fn stop_request_returns_busy_without_beginning_shutdown_when_command_is_running() {
+        let command_lock = Arc::new(Mutex::new(()));
+        let _guard = command_lock
+            .lock()
+            .expect("command lock should be available");
+        let shutdown = ServerShutdown::new().expect("shutdown event should be created");
+        let request = encode_request(&ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            command: ControlCommand::Stop,
+        })
+        .expect("request should encode");
+
+        let handled =
+            handle_control_request_bytes(&request, None, Arc::clone(&command_lock), &shutdown)
+                .expect("busy response should be encoded as a control response");
+
+        assert!(!handled.response.ok);
+        assert_eq!(handled.response.status, "busy");
+        assert!(!handled.stop_after_response);
+        assert!(!shutdown.is_stopping());
+    }
+
+    #[test]
+    fn mutating_request_is_rejected_after_stop_is_accepted() {
+        let shutdown = ServerShutdown::new().expect("shutdown event should be created");
+        shutdown.begin();
+        let request = encode_request(&ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            command: ControlCommand::Disable,
+        })
+        .expect("request should encode");
+
+        let handled =
+            handle_control_request_bytes(&request, None, Arc::new(Mutex::new(())), &shutdown)
+                .expect("stopping response should be encoded as a control response");
+
+        assert!(!handled.response.ok);
+        assert_eq!(handled.response.status, "stopping");
+        assert!(!handled.stop_after_response);
+    }
+
+    #[test]
+    fn protocol_mismatch_stop_does_not_begin_shutdown() {
+        let shutdown = ServerShutdown::new().expect("shutdown event should be created");
+        let request = encode_request(&ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION + 1,
+            command: ControlCommand::Stop,
+        })
+        .expect("request should encode");
+
+        let handled =
+            handle_control_request_bytes(&request, None, Arc::new(Mutex::new(())), &shutdown)
+                .expect("protocol mismatch should be encoded as a control response");
+
+        assert!(!handled.response.ok);
+        assert!(!handled.stop_after_response);
+        assert!(!shutdown.is_stopping());
+    }
+
+    #[test]
+    fn status_request_reports_stopping_after_stop_is_accepted() {
+        let shutdown = ServerShutdown::new().expect("shutdown event should be created");
+        shutdown.begin();
+        let request = encode_request(&ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            command: ControlCommand::Status,
+        })
+        .expect("request should encode");
+
+        let handled =
+            handle_control_request_bytes(&request, None, Arc::new(Mutex::new(())), &shutdown)
+                .expect("status response should be encoded as a control response");
+
+        assert!(handled.response.ok);
+        assert_eq!(handled.response.status, "stopping");
+        assert!(!handled.stop_after_response);
+    }
+
+    #[test]
+    fn shutdown_event_records_request() {
+        let shutdown = ServerShutdown::new().expect("shutdown event should be created");
+        assert!(!shutdown.is_requested().expect("event should be readable"));
+
+        shutdown.request().expect("shutdown should be signaled");
+
+        assert!(shutdown.is_requested().expect("event should be readable"));
+    }
+
+    #[test]
+    fn shutdown_state_can_be_cancelled_before_event_is_signaled() {
+        let shutdown = ServerShutdown::new().expect("shutdown event should be created");
+        shutdown.begin();
+
+        shutdown.cancel();
+
+        assert!(!shutdown.is_stopping());
+        assert!(!shutdown.is_requested().expect("event should be readable"));
     }
 
     #[test]
@@ -350,6 +604,46 @@ mod tests {
     fn unrelated_pipe_errors_are_not_connection_abandonment() {
         assert!(!is_disconnected_pipe_error_code(ERROR_ACCESS_DENIED as i32));
     }
+
+    #[test]
+    fn host_instance_waiter_acquires_mutex_after_owner_releases_it() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let mutex_name = format!(r"Local\dwm-lut-rs-test-{}-{unique}", std::process::id());
+        let guard = match claim_host_instance(&mutex_name).expect("mutex claim should succeed") {
+            HostInstanceClaim::Acquired(guard) => guard,
+            HostInstanceClaim::Contended(_) => panic!("unique mutex should not be contended"),
+        };
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        let (acquired_sender, acquired_receiver) = mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            let mut waiter = match claim_host_instance(&mutex_name)
+                .expect("second mutex claim should succeed")
+            {
+                HostInstanceClaim::Acquired(_) => panic!("owned mutex should be contended"),
+                HostInstanceClaim::Contended(waiter) => waiter,
+            };
+            ready_sender.send(()).expect("ready signal should send");
+            let acquired = waiter
+                .wait(5_000)
+                .expect("mutex wait should succeed")
+                .expect("mutex should become available");
+            acquired_sender
+                .send(())
+                .expect("acquired signal should send");
+            drop(acquired);
+        });
+
+        ready_receiver.recv().expect("worker should become ready");
+        drop(guard);
+        acquired_receiver
+            .recv()
+            .expect("worker should acquire released mutex");
+        worker.join().expect("worker should complete");
+    }
 }
 
 struct PipeHandle(HANDLE);
@@ -361,6 +655,7 @@ unsafe impl Send for PipeHandle {}
 enum ConnectOutcome {
     Connected,
     Abandoned,
+    Shutdown,
 }
 
 impl PipeHandle {
@@ -375,7 +670,10 @@ impl PipeHandle {
         Ok(Self(handle))
     }
 
-    fn connect(&self) -> Result<ConnectOutcome, InjectorError> {
+    fn connect(&self, shutdown: &ServerShutdown) -> Result<ConnectOutcome, InjectorError> {
+        if shutdown.is_requested()? {
+            return Ok(ConnectOutcome::Shutdown);
+        }
         let mut operation = OverlappedOperation::new()?;
         let ok = unsafe { ConnectNamedPipe(self.0, operation.as_mut_ptr()) };
         if ok != FALSE {
@@ -386,8 +684,9 @@ impl PipeHandle {
         match error.raw_os_error() {
             Some(code) if is_disconnected_pipe_error_code(code) => Ok(ConnectOutcome::Abandoned),
             Some(code) if code == ERROR_IO_PENDING as i32 => {
-                match operation.wait(self.0, "connect server pipe", INFINITE) {
-                    Ok(_) => Ok(ConnectOutcome::Connected),
+                match operation.wait_or_shutdown(self.0, "connect server pipe", shutdown) {
+                    Ok(Some(_)) => Ok(ConnectOutcome::Connected),
+                    Ok(None) => Ok(ConnectOutcome::Shutdown),
                     Err(error) if is_disconnected_pipe_error(&error) => {
                         Ok(ConnectOutcome::Abandoned)
                     }
@@ -557,6 +856,46 @@ impl OverlappedOperation {
         }
     }
 
+    fn wait_or_shutdown(
+        &mut self,
+        handle: HANDLE,
+        operation: &'static str,
+        shutdown: &ServerShutdown,
+    ) -> Result<Option<u32>, InjectorError> {
+        let handles = [self.event.0, shutdown.event.0];
+        let wait_result = unsafe {
+            WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), FALSE, INFINITE)
+        };
+        match wait_result {
+            WAIT_OBJECT_0 => self.result(handle, operation).map(Some),
+            result if result == WAIT_OBJECT_0 + 1 => {
+                unsafe {
+                    CancelIoEx(handle, self.as_mut_ptr());
+                }
+                match self.result_waiting(handle, operation) {
+                    Ok(transferred) => Ok(Some(transferred)),
+                    Err(InjectorError::ControlPipe { source, .. })
+                        if source.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) =>
+                    {
+                        Ok(None)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            _ => {
+                let error = last_os_error();
+                unsafe {
+                    CancelIoEx(handle, self.as_mut_ptr());
+                }
+                self.wait_for_cancel(handle);
+                Err(InjectorError::ControlPipe {
+                    operation,
+                    source: error,
+                })
+            }
+        }
+    }
+
     fn result(&mut self, handle: HANDLE, operation: &'static str) -> Result<u32, InjectorError> {
         let mut transferred = 0u32;
         let ok = unsafe { GetOverlappedResult(handle, self.as_mut_ptr(), &mut transferred, FALSE) };
@@ -567,6 +906,22 @@ impl OverlappedOperation {
             });
         }
 
+        Ok(transferred)
+    }
+
+    fn result_waiting(
+        &mut self,
+        handle: HANDLE,
+        operation: &'static str,
+    ) -> Result<u32, InjectorError> {
+        let mut transferred = 0u32;
+        let ok = unsafe { GetOverlappedResult(handle, self.as_mut_ptr(), &mut transferred, TRUE) };
+        if ok == FALSE {
+            return Err(InjectorError::ControlPipe {
+                operation,
+                source: last_os_error(),
+            });
+        }
         Ok(transferred)
     }
 
@@ -604,35 +959,76 @@ impl Drop for EventHandle {
     }
 }
 
-struct HostInstanceGuard(HANDLE);
+pub(crate) enum HostInstanceClaim {
+    Acquired(HostInstanceGuard),
+    Contended(HostInstanceWaiter),
+}
+
+pub(crate) struct HostInstanceGuard(HANDLE);
+
+pub(crate) struct HostInstanceWaiter(HANDLE);
 
 impl HostInstanceGuard {
-    fn acquire() -> Result<Self, InjectorError> {
-        let mutex_name = wide_null(&host_mutex_name_for_current_session()?);
-        unsafe {
-            SetLastError(0);
-        }
-        let handle = unsafe { CreateMutexW(null_mut(), FALSE, mutex_name.as_ptr()) };
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return Err(InjectorError::ControlPipe {
-                operation: "create host instance mutex",
-                source: last_os_error(),
-            });
-        }
+    pub(crate) fn claim() -> Result<HostInstanceClaim, InjectorError> {
+        claim_host_instance(&host_mutex_name_for_current_session()?)
+    }
+}
 
-        let error = last_os_error();
-        if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
-            unsafe {
-                windows_sys::Win32::Foundation::CloseHandle(handle);
+fn claim_host_instance(mutex_name: &str) -> Result<HostInstanceClaim, InjectorError> {
+    let mutex_name = wide_null(mutex_name);
+    let user_sid = UserSid::current_process()?;
+    let security_descriptor = SecurityDescriptor::from_mutex_dacl(&user_sid)?;
+    let security_attributes = security_descriptor.as_security_attributes();
+    unsafe {
+        SetLastError(0);
+    }
+    let handle = unsafe { CreateMutexW(&security_attributes, TRUE, mutex_name.as_ptr()) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(InjectorError::ControlPipe {
+            operation: "create host instance mutex",
+            source: last_os_error(),
+        });
+    }
+
+    let error = last_os_error();
+    if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
+        return Ok(HostInstanceClaim::Contended(HostInstanceWaiter(handle)));
+    }
+
+    Ok(HostInstanceClaim::Acquired(HostInstanceGuard(handle)))
+}
+
+impl HostInstanceWaiter {
+    pub(crate) fn wait(
+        &mut self,
+        timeout_ms: u32,
+    ) -> Result<Option<HostInstanceGuard>, InjectorError> {
+        match unsafe { WaitForSingleObject(self.0, timeout_ms) } {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => {
+                let handle = std::mem::replace(&mut self.0, null_mut());
+                Ok(Some(HostInstanceGuard(handle)))
             }
-            return Err(InjectorError::HostAlreadyRunning);
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(InjectorError::ControlPipe {
+                operation: "wait for host instance mutex",
+                source: last_os_error(),
+            }),
         }
-
-        Ok(Self(handle))
     }
 }
 
 impl Drop for HostInstanceGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+            unsafe {
+                let _ = ReleaseMutex(self.0);
+                windows_sys::Win32::Foundation::CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+impl Drop for HostInstanceWaiter {
     fn drop(&mut self) {
         if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
             unsafe {

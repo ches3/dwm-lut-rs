@@ -199,7 +199,7 @@ impl fmt::Display for InjectorError {
             Self::ControlProtocol(message) => write!(f, "control protocol failed: {message}"),
             Self::HostUnavailable => write!(
                 f,
-                "dwm-lut host instance is not running; start it with `dwm-lut-cli run`"
+                "dwm-lut host instance is not running; start it with `dwm-lut-cli host start`"
             ),
             Self::HostBusy => write!(
                 f,

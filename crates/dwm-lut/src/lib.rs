@@ -8,22 +8,31 @@ mod monitor_list;
 mod runtime;
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use cli::{CliCommand, ParseArgsResult, parse_args};
+use control::server::{HostInstanceClaim, HostInstanceGuard, HostInstanceWaiter};
 use error::InjectorError;
+
+const HOST_INSTANCE_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
+const HOST_INSTANCE_WAIT_SLICE: Duration = Duration::from_millis(100);
 
 pub fn run_cli() -> Result<(), InjectorError> {
     match parse_args()? {
-        ParseArgsResult::Run(CliCommand::Apply(options)) => {
+        ParseArgsResult::Command(CliCommand::Apply(options)) => {
             run_control_command(CliCommand::Apply(options))
         }
-        ParseArgsResult::Run(CliCommand::Disable) => run_control_command(CliCommand::Disable),
-        ParseArgsResult::Run(CliCommand::Monitors) => monitor_list::run_monitors(),
-        ParseArgsResult::Run(CliCommand::Run(options)) => {
+        ParseArgsResult::Command(CliCommand::Disable) => run_control_command(CliCommand::Disable),
+        ParseArgsResult::Command(CliCommand::HostStart(options)) => {
             let host_exe = resolve_host_executable_path(options.host_path)?;
-            backend::start_background_host(&host_exe, options.dll_path)
+            let message =
+                host_start_message(backend::start_background_host(&host_exe, options.dll_path))?;
+            println!("{message}");
+            Ok(())
         }
-        ParseArgsResult::Run(CliCommand::Status) => run_control_command(CliCommand::Status),
+        ParseArgsResult::Command(CliCommand::HostStop) => run_control_command(CliCommand::HostStop),
+        ParseArgsResult::Command(CliCommand::Monitors) => monitor_list::run_monitors(),
+        ParseArgsResult::Command(CliCommand::Status) => run_control_command(CliCommand::Status),
         ParseArgsResult::Help(message) => {
             println!("{message}");
             Ok(())
@@ -40,7 +49,7 @@ pub fn run_host(
     if let Err(error) = &result
         && let Some(notifier) = startup_notifier.take()
     {
-        let _ = notifier.notify_failure(&error.to_string());
+        let _ = notifier.notify_failure(error);
     }
     result
 }
@@ -54,14 +63,92 @@ fn run_host_inner(
     dll_path: Option<PathBuf>,
     startup_notifier: &mut Option<backend::StartupNotifier>,
 ) -> Result<(), InjectorError> {
+    let host_guard = acquire_host_instance()?;
     backend::ensure_host_privileges()?;
     let dll_path = runtime::resolve_host_dll_path(dll_path)?;
-    control::server::run_server(dll_path, || {
+    control::server::run_server(host_guard, dll_path, || {
         if let Some(notifier) = startup_notifier.take() {
             notifier.notify_success()?;
         }
         Ok(())
     })
+}
+
+fn acquire_host_instance() -> Result<HostInstanceGuard, InjectorError> {
+    match HostInstanceGuard::claim()? {
+        HostInstanceClaim::Acquired(guard) => Ok(guard),
+        HostInstanceClaim::Contended(waiter) => wait_for_host_instance_transition(waiter),
+    }
+}
+
+fn wait_for_host_instance_transition(
+    mut waiter: HostInstanceWaiter,
+) -> Result<HostInstanceGuard, InjectorError> {
+    let deadline = Instant::now() + HOST_INSTANCE_TRANSITION_TIMEOUT;
+    loop {
+        if let Some(guard) = waiter.wait(0)? {
+            return Ok(guard);
+        }
+
+        match existing_host_state() {
+            Ok(ExistingHostState::Running) => return Err(InjectorError::HostAlreadyRunning),
+            Ok(ExistingHostState::Stopping) => {}
+            Err(error) if is_transient_host_state_error(&error) => {}
+            Err(error) => return Err(error),
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(InjectorError::HostStartupFailed(format!(
+                "existing host instance did not become ready or exit within {}ms",
+                HOST_INSTANCE_TRANSITION_TIMEOUT.as_millis()
+            )));
+        }
+        let wait = remaining.min(HOST_INSTANCE_WAIT_SLICE);
+        let wait_ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX);
+        if let Some(guard) = waiter.wait(wait_ms)? {
+            return Ok(guard);
+        }
+    }
+}
+
+fn is_transient_host_state_error(error: &InjectorError) -> bool {
+    match error {
+        InjectorError::HostUnavailable
+        | InjectorError::HostBusy
+        | InjectorError::ControlTimeout { .. } => true,
+        InjectorError::ControlPipe { source, .. } => matches!(
+            source.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::UnexpectedEof
+        ),
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingHostState {
+    Running,
+    Stopping,
+}
+
+fn existing_host_state() -> Result<ExistingHostState, InjectorError> {
+    let request = runtime::request_from_cli(CliCommand::Status)?
+        .expect("status command must map to a control request");
+    let response = control::client::send_request(&request)?;
+    if !response.ok {
+        return Err(InjectorError::ControlProtocol(response.message));
+    }
+
+    match response.status.as_str() {
+        "running" => Ok(ExistingHostState::Running),
+        "stopping" => Ok(ExistingHostState::Stopping),
+        status => Err(InjectorError::ControlProtocol(format!(
+            "unknown host status: {status}"
+        ))),
+    }
 }
 
 fn run_control_command(command: CliCommand) -> Result<(), InjectorError> {
@@ -74,6 +161,14 @@ fn run_control_command(command: CliCommand) -> Result<(), InjectorError> {
 
     println!("{}", response.message);
     Ok(())
+}
+
+fn host_start_message(result: Result<(), InjectorError>) -> Result<&'static str, InjectorError> {
+    match result {
+        Ok(()) => Ok("started dwm-lut host instance"),
+        Err(InjectorError::HostAlreadyRunning) => Ok("dwm-lut host instance is already running"),
+        Err(error) => Err(error),
+    }
 }
 
 fn default_host_executable_path() -> Result<PathBuf, InjectorError> {
@@ -121,12 +216,13 @@ fn absolute_cli_path(path: PathBuf) -> Result<PathBuf, InjectorError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::error::InjectorError;
 
-    use super::resolve_host_executable_path;
+    use super::{host_start_message, is_transient_host_state_error, resolve_host_executable_path};
 
     #[test]
     fn resolve_host_executable_path_uses_current_directory_for_relative_path() {
@@ -162,5 +258,33 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn host_start_message_reports_started() {
+        let message = host_start_message(Ok(())).expect("successful start should report message");
+        assert_eq!(message, "started dwm-lut host instance");
+    }
+
+    #[test]
+    fn host_start_message_treats_already_running_as_success() {
+        let message = host_start_message(Err(InjectorError::HostAlreadyRunning))
+            .expect("already running should be a successful start result");
+        assert_eq!(message, "dwm-lut host instance is already running");
+    }
+
+    #[test]
+    fn host_state_wait_retries_disconnection_but_not_access_denied() {
+        let disconnected = InjectorError::ControlPipe {
+            operation: "query existing host",
+            source: io::Error::from(io::ErrorKind::BrokenPipe),
+        };
+        let access_denied = InjectorError::ControlPipe {
+            operation: "query existing host",
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+
+        assert!(is_transient_host_state_error(&disconnected));
+        assert!(!is_transient_host_state_error(&access_denied));
     }
 }

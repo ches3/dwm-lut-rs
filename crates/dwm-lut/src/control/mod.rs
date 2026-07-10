@@ -141,13 +141,31 @@ fn pipe_security_descriptor_for_user(user_sid: &str) -> String {
     format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;{user_sid})S:(ML;;NW;;;ME)")
 }
 
+fn mutex_security_descriptor_for_user(user_sid: &str) -> String {
+    format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{user_sid})S:(ML;;NW;;;ME)")
+}
+
 struct SecurityDescriptor {
     ptr: PSECURITY_DESCRIPTOR,
 }
 
 impl SecurityDescriptor {
     fn from_pipe_dacl(user_sid: &UserSid) -> Result<Self, InjectorError> {
-        let sddl = wide_null(&pipe_security_descriptor_for_user(&user_sid.sddl));
+        Self::from_sddl(
+            pipe_security_descriptor_for_user(&user_sid.sddl),
+            "build pipe security descriptor",
+        )
+    }
+
+    fn from_mutex_dacl(user_sid: &UserSid) -> Result<Self, InjectorError> {
+        Self::from_sddl(
+            mutex_security_descriptor_for_user(&user_sid.sddl),
+            "build host instance mutex security descriptor",
+        )
+    }
+
+    fn from_sddl(sddl: String, operation: &'static str) -> Result<Self, InjectorError> {
+        let sddl = wide_null(&sddl);
         let mut ptr = null_mut();
         let ok = unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -159,7 +177,7 @@ impl SecurityDescriptor {
         };
         if ok == 0 {
             return Err(InjectorError::ControlPipe {
-                operation: "build pipe security descriptor",
+                operation,
                 source: last_os_error(),
             });
         }
@@ -188,7 +206,7 @@ impl Drop for SecurityDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use super::pipe_security_descriptor_for_user;
+    use super::{mutex_security_descriptor_for_user, pipe_security_descriptor_for_user};
 
     #[test]
     fn pipe_security_descriptor_grants_user_access_at_medium_integrity() {
@@ -197,6 +215,17 @@ mod tests {
         assert_eq!(
             descriptor,
             "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;S-1-5-21-1-2-3-1001)S:(ML;;NW;;;ME)"
+        );
+        assert!(!descriptor.contains(";;;IU"));
+    }
+
+    #[test]
+    fn mutex_security_descriptor_grants_user_access_at_medium_integrity() {
+        let descriptor = mutex_security_descriptor_for_user("S-1-5-21-1-2-3-1001");
+
+        assert_eq!(
+            descriptor,
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-1-2-3-1001)S:(ML;;NW;;;ME)"
         );
         assert!(!descriptor.contains(";;;IU"));
     }

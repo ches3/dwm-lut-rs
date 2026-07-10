@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::InjectorError;
 
 pub(crate) const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
-pub(crate) const CONTROL_PROTOCOL_VERSION: u32 = 1;
+pub(crate) const CONTROL_PROTOCOL_VERSION: u32 = 2;
 pub(crate) const PROTOCOL_MISMATCH_STATUS: &str = "protocol_mismatch";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +24,7 @@ pub(crate) enum ControlCommand {
     },
     Disable,
     Status,
+    Stop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +157,18 @@ mod tests {
     }
 
     #[test]
+    fn stop_request_roundtrips_through_json() {
+        let request = ControlRequest {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            command: ControlCommand::Stop,
+        };
+
+        let encoded = encode_request(&request).expect("request should encode");
+        let decoded = decode_request(&encoded).expect("request should decode");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
     fn rejects_unknown_command() {
         let error = decode_request(br#"{"protocol_version":1,"command":"reload"}"#)
             .expect_err("unknown command fails");
@@ -210,7 +223,7 @@ mod tests {
 
         assert!(!response.ok);
         assert_eq!(response.status, PROTOCOL_MISMATCH_STATUS);
-        assert!(response.message.contains("peer=2"));
-        assert!(response.message.contains("local=1"));
+        assert!(response.message.contains("peer=3"));
+        assert!(response.message.contains("local=2"));
     }
 }

@@ -11,7 +11,7 @@ pub struct ApplyOptions {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct RunOptions {
+pub struct HostStartOptions {
     pub host_path: Option<PathBuf>,
     pub dll_path: Option<PathBuf>,
 }
@@ -20,14 +20,15 @@ pub struct RunOptions {
 pub enum CliCommand {
     Apply(ApplyOptions),
     Disable,
+    HostStart(HostStartOptions),
+    HostStop,
     Monitors,
-    Run(RunOptions),
     Status,
 }
 
 #[derive(Debug)]
 pub enum ParseArgsResult {
-    Run(CliCommand),
+    Command(CliCommand),
     Help(String),
 }
 
@@ -54,8 +55,8 @@ where
     match first_string.as_ref() {
         "apply" => parse_apply_args(args),
         "disable" => parse_disable_args(args),
+        "host" => parse_host_args(args),
         "monitors" => parse_monitors_args(args),
-        "run" => parse_run_args(args),
         "status" => parse_no_arg_command(args, "status", CliCommand::Status),
         other => Err(InjectorError::Usage(usage_message(&format!(
             "unknown command: {other}"
@@ -72,7 +73,7 @@ fn parse_apply_args(
         match arg.to_string_lossy().as_ref() {
             "--dll" => {
                 return Err(InjectorError::Usage(usage_message(
-                    "apply --dll is not supported through the host instance; start the host with `dwm-lut-cli run --dll <hook-dll-path>`",
+                    "apply --dll is not supported through the host instance; start the host with `dwm-lut-cli host start --dll <hook-dll-path>`",
                 )));
             }
             "--config" => {
@@ -107,13 +108,30 @@ fn parse_apply_args(
     let config_path =
         config_path.ok_or_else(|| InjectorError::Usage(usage_message("missing --config")))?;
 
-    Ok(ParseArgsResult::Run(CliCommand::Apply(ApplyOptions {
+    Ok(ParseArgsResult::Command(CliCommand::Apply(ApplyOptions {
         config_path,
         profile,
     })))
 }
 
-fn parse_run_args(
+fn parse_host_args(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<ParseArgsResult, InjectorError> {
+    let Some(subcommand) = args.next() else {
+        return Err(InjectorError::Usage(usage_message("missing host command")));
+    };
+
+    match subcommand.to_string_lossy().as_ref() {
+        "start" => parse_host_start_args(args),
+        "stop" => parse_no_arg_command(args, "host stop", CliCommand::HostStop),
+        "--help" | "-h" => Ok(ParseArgsResult::Help(usage_message(""))),
+        other => Err(InjectorError::Usage(usage_message(&format!(
+            "unknown host command: {other}"
+        )))),
+    }
+}
+
+fn parse_host_start_args(
     mut args: impl Iterator<Item = OsString>,
 ) -> Result<ParseArgsResult, InjectorError> {
     let mut host_path = None;
@@ -137,16 +155,18 @@ fn parse_run_args(
             }
             other => {
                 return Err(InjectorError::Usage(usage_message(&format!(
-                    "unknown argument for run: {other}"
+                    "unknown argument for host start: {other}"
                 ))));
             }
         }
     }
 
-    Ok(ParseArgsResult::Run(CliCommand::Run(RunOptions {
-        host_path,
-        dll_path,
-    })))
+    Ok(ParseArgsResult::Command(CliCommand::HostStart(
+        HostStartOptions {
+            host_path,
+            dll_path,
+        },
+    )))
 }
 
 fn parse_disable_args(
@@ -159,7 +179,7 @@ fn parse_disable_args(
         ))));
     }
 
-    Ok(ParseArgsResult::Run(CliCommand::Disable))
+    Ok(ParseArgsResult::Command(CliCommand::Disable))
 }
 
 fn parse_monitors_args(
@@ -172,7 +192,7 @@ fn parse_monitors_args(
         ))));
     }
 
-    Ok(ParseArgsResult::Run(CliCommand::Monitors))
+    Ok(ParseArgsResult::Command(CliCommand::Monitors))
 }
 
 fn parse_no_arg_command(
@@ -187,11 +207,11 @@ fn parse_no_arg_command(
         ))));
     }
 
-    Ok(ParseArgsResult::Run(parsed))
+    Ok(ParseArgsResult::Command(parsed))
 }
 
 fn usage_message(problem: &str) -> String {
-    let usage = "usage: dwm-lut-cli apply --config <config-path> [--profile <profile-name>]\n       dwm-lut-cli disable\n       dwm-lut-cli status\n       dwm-lut-cli monitors\n       dwm-lut-cli run [--host <host-exe-path>] [--dll <hook-dll-path>]";
+    let usage = "usage: dwm-lut-cli apply --config <config-path> [--profile <profile-name>]\n       dwm-lut-cli disable\n       dwm-lut-cli status\n       dwm-lut-cli monitors\n       dwm-lut-cli host start [--host <host-exe-path>] [--dll <hook-dll-path>]\n       dwm-lut-cli host stop";
     if problem.is_empty() {
         usage.to_string()
     } else {
@@ -205,7 +225,7 @@ mod tests {
 
     use crate::error::InjectorError;
 
-    use super::{ApplyOptions, CliCommand, ParseArgsResult, RunOptions, parse_args_from};
+    use super::{ApplyOptions, CliCommand, HostStartOptions, ParseArgsResult, parse_args_from};
 
     #[test]
     fn reports_help_without_treating_it_as_invalid_usage() {
@@ -215,7 +235,7 @@ mod tests {
             ParseArgsResult::Help(message) => {
                 assert!(message.starts_with("usage: dwm-lut-cli"));
             }
-            ParseArgsResult::Run(_) => panic!("help must not continue to normal execution"),
+            ParseArgsResult::Command(_) => panic!("help must not continue to normal execution"),
         }
     }
 
@@ -251,7 +271,7 @@ mod tests {
             .expect("explicit apply command should parse");
 
         assert_eq!(
-            run_options(parsed),
+            apply_options(parsed),
             ApplyOptions {
                 config_path: PathBuf::from("config.json"),
                 profile: None,
@@ -272,7 +292,7 @@ mod tests {
         .expect("profile argument should parse");
 
         assert_eq!(
-            run_options(parsed),
+            apply_options(parsed),
             ApplyOptions {
                 config_path: PathBuf::from("config.json"),
                 profile: Some("gaming".to_string()),
@@ -293,7 +313,7 @@ mod tests {
         .expect("mixed-case profile argument should parse");
 
         assert_eq!(
-            run_options(parsed),
+            apply_options(parsed),
             ApplyOptions {
                 config_path: PathBuf::from("config.json"),
                 profile: Some("GAMING".to_string()),
@@ -314,7 +334,7 @@ mod tests {
         .expect("profile argument should parse");
 
         assert_eq!(
-            run_options(parsed),
+            apply_options(parsed),
             ApplyOptions {
                 config_path: PathBuf::from("config.json"),
                 profile: Some("gaming".to_string()),
@@ -387,7 +407,7 @@ mod tests {
             parse_args_from(["dwm-lut-cli", "disable"]).expect("disable command should parse");
 
         match parsed {
-            ParseArgsResult::Run(CliCommand::Disable) => {}
+            ParseArgsResult::Command(CliCommand::Disable) => {}
             other => panic!("unexpected parse result: {other:?}"),
         }
     }
@@ -398,17 +418,18 @@ mod tests {
             parse_args_from(["dwm-lut-cli", "status"]).expect("status command should parse");
 
         match parsed {
-            ParseArgsResult::Run(CliCommand::Status) => {}
+            ParseArgsResult::Command(CliCommand::Status) => {}
             other => panic!("unexpected parse result: {other:?}"),
         }
     }
 
     #[test]
-    fn accepts_run_command_without_arguments() {
-        let parsed = parse_args_from(["dwm-lut-cli", "run"]).expect("run command should parse");
+    fn accepts_host_start_command_without_arguments() {
+        let parsed = parse_args_from(["dwm-lut-cli", "host", "start"])
+            .expect("host start command should parse");
 
         match parsed {
-            ParseArgsResult::Run(CliCommand::Run(RunOptions {
+            ParseArgsResult::Command(CliCommand::HostStart(HostStartOptions {
                 host_path: None,
                 dll_path: None,
             })) => {}
@@ -417,51 +438,48 @@ mod tests {
     }
 
     #[test]
-    fn accepts_run_dll_argument() {
-        let parsed =
-            parse_args_from(["dwm-lut-cli", "run", "--dll", "hook.dll"]).expect("run should parse");
+    fn accepts_host_start_dll_argument() {
+        let parsed = parse_args_from(["dwm-lut-cli", "host", "start", "--dll", "hook.dll"])
+            .expect("host start should parse");
 
         match parsed {
-            ParseArgsResult::Run(CliCommand::Run(RunOptions {
+            ParseArgsResult::Command(CliCommand::HostStart(HostStartOptions {
                 host_path: None,
                 dll_path: Some(path),
-            })) => {
-                assert_eq!(path, PathBuf::from("hook.dll"));
-            }
+            })) => assert_eq!(path, PathBuf::from("hook.dll")),
             other => panic!("unexpected parse result: {other:?}"),
         }
     }
 
     #[test]
-    fn accepts_run_host_argument() {
-        let parsed = parse_args_from(["dwm-lut-cli", "run", "--host", "dwm-lut.exe"])
-            .expect("run should parse");
+    fn accepts_host_start_host_argument() {
+        let parsed = parse_args_from(["dwm-lut-cli", "host", "start", "--host", "dwm-lut.exe"])
+            .expect("host start should parse");
 
         match parsed {
-            ParseArgsResult::Run(CliCommand::Run(RunOptions {
+            ParseArgsResult::Command(CliCommand::HostStart(HostStartOptions {
                 host_path: Some(path),
                 dll_path: None,
-            })) => {
-                assert_eq!(path, PathBuf::from("dwm-lut.exe"));
-            }
+            })) => assert_eq!(path, PathBuf::from("dwm-lut.exe")),
             other => panic!("unexpected parse result: {other:?}"),
         }
     }
 
     #[test]
-    fn accepts_run_host_and_dll_arguments() {
+    fn accepts_host_start_host_and_dll_arguments() {
         let parsed = parse_args_from([
             "dwm-lut-cli",
-            "run",
+            "host",
+            "start",
             "--host",
             "dwm-lut.exe",
             "--dll",
             "hook.dll",
         ])
-        .expect("run should parse");
+        .expect("host start should parse");
 
         match parsed {
-            ParseArgsResult::Run(CliCommand::Run(RunOptions {
+            ParseArgsResult::Command(CliCommand::HostStart(HostStartOptions {
                 host_path: Some(host_path),
                 dll_path: Some(dll_path),
             })) => {
@@ -473,39 +491,81 @@ mod tests {
     }
 
     #[test]
-    fn rejects_run_host_without_value() {
-        let error = parse_args_from(["dwm-lut-cli", "run", "--host"])
+    fn rejects_host_start_host_without_value() {
+        let error = parse_args_from(["dwm-lut-cli", "host", "start", "--host"])
             .expect_err("host without value must be rejected");
 
-        match error {
-            InjectorError::Usage(message) => {
-                assert!(message.contains("--host requires a value"));
-            }
-            other => panic!("unexpected error: {other}"),
-        }
+        assert!(
+            matches!(error, InjectorError::Usage(message) if message.contains("--host requires a value"))
+        );
     }
 
     #[test]
-    fn rejects_unknown_run_arguments() {
-        let error = parse_args_from(["dwm-lut-cli", "run", "--config", "config.json"])
-            .expect_err("run must reject arguments");
+    fn rejects_unknown_host_start_arguments() {
+        let error = parse_args_from(["dwm-lut-cli", "host", "start", "--config", "config.json"])
+            .expect_err("host start must reject arguments");
 
-        match error {
-            InjectorError::Usage(message) => {
-                assert!(message.contains("unknown argument for run: --config"));
-            }
-            other => panic!("unexpected error: {other}"),
-        }
+        assert!(
+            matches!(error, InjectorError::Usage(message) if message.contains("unknown argument for host start: --config"))
+        );
     }
 
     #[test]
-    fn help_lists_status_and_run_commands() {
+    fn accepts_host_stop_command_without_arguments() {
+        let parsed =
+            parse_args_from(["dwm-lut-cli", "host", "stop"]).expect("host stop should parse");
+        assert!(matches!(
+            parsed,
+            ParseArgsResult::Command(CliCommand::HostStop)
+        ));
+    }
+
+    #[test]
+    fn rejects_host_stop_arguments() {
+        let error = parse_args_from(["dwm-lut-cli", "host", "stop", "--host"])
+            .expect_err("host stop must reject arguments");
+        assert!(
+            matches!(error, InjectorError::Usage(message) if message.contains("unknown argument for host stop: --host"))
+        );
+    }
+
+    #[test]
+    fn rejects_missing_host_command() {
+        let error = parse_args_from(["dwm-lut-cli", "host"])
+            .expect_err("host without subcommand must be rejected");
+        assert!(
+            matches!(error, InjectorError::Usage(message) if message.contains("missing host command"))
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_host_command() {
+        let error = parse_args_from(["dwm-lut-cli", "host", "restart"])
+            .expect_err("unknown host subcommand must be rejected");
+        assert!(
+            matches!(error, InjectorError::Usage(message) if message.contains("unknown host command: restart"))
+        );
+    }
+
+    #[test]
+    fn rejects_old_run_command() {
+        let error =
+            parse_args_from(["dwm-lut-cli", "run"]).expect_err("old run command must be rejected");
+        assert!(
+            matches!(error, InjectorError::Usage(message) if message.contains("unknown command: run"))
+        );
+    }
+
+    #[test]
+    fn help_lists_status_and_host_commands() {
         let parsed = parse_args_from(["dwm-lut-cli", "--help"]).expect("help should parse");
 
         match parsed {
             ParseArgsResult::Help(message) => {
                 assert!(message.contains("dwm-lut-cli status"));
-                assert!(message.contains("dwm-lut-cli run"));
+                assert!(message.contains("dwm-lut-cli host start"));
+                assert!(message.contains("dwm-lut-cli host stop"));
+                assert!(!message.contains("dwm-lut-cli run"));
                 assert!(message.contains("--host <host-exe-path>"));
             }
             other => panic!("unexpected parse result: {other:?}"),
@@ -518,7 +578,7 @@ mod tests {
             parse_args_from(["dwm-lut-cli", "monitors"]).expect("monitors command should parse");
 
         match parsed {
-            ParseArgsResult::Run(CliCommand::Monitors) => {}
+            ParseArgsResult::Command(CliCommand::Monitors) => {}
             other => panic!("unexpected parse result: {other:?}"),
         }
     }
@@ -550,19 +610,20 @@ mod tests {
 
         match error {
             InjectorError::Usage(message) => {
-                assert!(message.contains("dwm-lut-cli run --dll"));
+                assert!(message.contains("dwm-lut-cli host start --dll"));
             }
             other => panic!("unexpected error: {other}"),
         }
     }
 
-    fn run_options(parsed: ParseArgsResult) -> ApplyOptions {
+    fn apply_options(parsed: ParseArgsResult) -> ApplyOptions {
         match parsed {
-            ParseArgsResult::Run(CliCommand::Apply(options)) => options,
-            ParseArgsResult::Run(
+            ParseArgsResult::Command(CliCommand::Apply(options)) => options,
+            ParseArgsResult::Command(
                 CliCommand::Disable
+                | CliCommand::HostStart(_)
+                | CliCommand::HostStop
                 | CliCommand::Monitors
-                | CliCommand::Run(_)
                 | CliCommand::Status,
             ) => {
                 panic!("expected apply command arguments")

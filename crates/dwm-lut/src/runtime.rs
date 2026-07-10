@@ -22,6 +22,7 @@ pub(crate) fn handle_command(
         })),
         ControlCommand::Disable => response_from_result(disable()),
         ControlCommand::Status => ControlResponse::ok("host instance is running", "running"),
+        ControlCommand::Stop => ControlResponse::ok("stopped dwm-lut host instance", "stopped"),
     }
 }
 
@@ -75,8 +76,9 @@ pub(crate) fn request_from_cli(
             profile: options.profile,
         }),
         crate::cli::CliCommand::Disable => Some(ControlCommand::Disable),
+        crate::cli::CliCommand::HostStop => Some(ControlCommand::Stop),
         crate::cli::CliCommand::Status => Some(ControlCommand::Status),
-        crate::cli::CliCommand::Monitors | crate::cli::CliCommand::Run(_) => None,
+        crate::cli::CliCommand::HostStart(_) | crate::cli::CliCommand::Monitors => None,
     }) else {
         return Ok(None);
     };
@@ -244,6 +246,16 @@ mod tests {
             .expect("status should map to control request");
 
         assert_eq!(request.command, ControlCommand::Status);
+        assert_eq!(request.protocol_version, CONTROL_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn request_from_host_stop_cli_maps_to_stop_command() {
+        let request = request_from_cli(CliCommand::HostStop)
+            .expect("request should resolve")
+            .expect("host stop should map to control request");
+
+        assert_eq!(request.command, ControlCommand::Stop);
         assert_eq!(request.protocol_version, CONTROL_PROTOCOL_VERSION);
     }
 
