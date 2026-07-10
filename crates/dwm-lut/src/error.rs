@@ -120,6 +120,7 @@ impl fmt::Display for InjectionStep {
 #[derive(Debug)]
 pub enum InjectorError {
     Usage(String),
+    DebugBuildRequiresConfig,
     Config(crate::config::ConfigError),
     Payload(dwm_lut_payload::PayloadError),
     ControlPipe {
@@ -191,6 +192,9 @@ impl fmt::Display for InjectorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage(message) => write!(f, "{message}"),
+            Self::DebugBuildRequiresConfig => {
+                write!(f, "debug builds require --config <config-path>")
+            }
             Self::Config(error) => write!(f, "config load failed: {error}"),
             Self::Payload(error) => write!(f, "payload build failed: {error}"),
             Self::ControlPipe { operation, source } => {
@@ -272,6 +276,13 @@ impl std::error::Error for InjectorError {}
 #[cfg(test)]
 mod tests {
     use super::InjectorError;
+
+    #[test]
+    fn debug_config_error_is_concise() {
+        let message = InjectorError::DebugBuildRequiresConfig.to_string();
+
+        assert_eq!(message, "debug builds require --config <config-path>");
+    }
 
     #[test]
     fn host_busy_message_does_not_claim_host_is_stopped() {

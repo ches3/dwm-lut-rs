@@ -6,7 +6,7 @@ use crate::error::InjectorError;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ApplyOptions {
-    pub config_path: PathBuf,
+    pub config_path: Option<PathBuf>,
     pub profile: Option<String>,
 }
 
@@ -104,9 +104,6 @@ fn parse_apply_args(
             }
         }
     }
-
-    let config_path =
-        config_path.ok_or_else(|| InjectorError::Usage(usage_message("missing --config")))?;
 
     Ok(ParseArgsResult::Command(CliCommand::Apply(ApplyOptions {
         config_path,
@@ -211,12 +208,25 @@ fn parse_no_arg_command(
 }
 
 fn usage_message(problem: &str) -> String {
-    let usage = "usage: dwm-lut-cli apply --config <config-path> [--profile <profile-name>]\n       dwm-lut-cli disable\n       dwm-lut-cli status\n       dwm-lut-cli monitors\n       dwm-lut-cli host start [--host <host-exe-path>] [--dll <hook-dll-path>]\n       dwm-lut-cli host stop";
+    let usage = format!(
+        "usage: {}\n       dwm-lut-cli disable\n       dwm-lut-cli status\n       dwm-lut-cli monitors\n       dwm-lut-cli host start [--host <host-exe-path>] [--dll <hook-dll-path>]\n       dwm-lut-cli host stop",
+        apply_usage_line()
+    );
     if problem.is_empty() {
-        usage.to_string()
+        usage
     } else {
         format!("{problem}\n{usage}")
     }
+}
+
+#[cfg(debug_assertions)]
+fn apply_usage_line() -> &'static str {
+    "dwm-lut-cli apply --config <config-path> [--profile <profile-name>]"
+}
+
+#[cfg(not(debug_assertions))]
+fn apply_usage_line() -> &'static str {
+    "dwm-lut-cli apply [--config <config-path>] [--profile <profile-name>]"
 }
 
 #[cfg(test)]
@@ -240,16 +250,17 @@ mod tests {
     }
 
     #[test]
-    fn requires_config_path() {
-        let error =
-            parse_args_from(["dwm-lut-cli", "apply"]).expect_err("missing config must be rejected");
+    fn accepts_apply_without_config_for_runtime_resolution() {
+        let parsed = parse_args_from(["dwm-lut-cli", "apply"])
+            .expect("config selection should be deferred to runtime");
 
-        match error {
-            InjectorError::Usage(message) => {
-                assert!(message.contains("missing --config"));
+        assert_eq!(
+            apply_options(parsed),
+            ApplyOptions {
+                config_path: None,
+                profile: None,
             }
-            other => panic!("unexpected error: {other}"),
-        }
+        );
     }
 
     #[test]
@@ -273,7 +284,7 @@ mod tests {
         assert_eq!(
             apply_options(parsed),
             ApplyOptions {
-                config_path: PathBuf::from("config.json"),
+                config_path: Some(PathBuf::from("config.json")),
                 profile: None,
             }
         );
@@ -294,7 +305,7 @@ mod tests {
         assert_eq!(
             apply_options(parsed),
             ApplyOptions {
-                config_path: PathBuf::from("config.json"),
+                config_path: Some(PathBuf::from("config.json")),
                 profile: Some("gaming".to_string()),
             }
         );
@@ -315,7 +326,7 @@ mod tests {
         assert_eq!(
             apply_options(parsed),
             ApplyOptions {
-                config_path: PathBuf::from("config.json"),
+                config_path: Some(PathBuf::from("config.json")),
                 profile: Some("GAMING".to_string()),
             }
         );
@@ -336,7 +347,7 @@ mod tests {
         assert_eq!(
             apply_options(parsed),
             ApplyOptions {
-                config_path: PathBuf::from("config.json"),
+                config_path: Some(PathBuf::from("config.json")),
                 profile: Some("gaming".to_string()),
             }
         );
@@ -567,6 +578,36 @@ mod tests {
                 assert!(message.contains("dwm-lut-cli host stop"));
                 assert!(!message.contains("dwm-lut-cli run"));
                 assert!(message.contains("--host <host-exe-path>"));
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn debug_help_requires_config() {
+        let parsed = parse_args_from(["dwm-lut-cli", "--help"]).expect("help should parse");
+
+        match parsed {
+            ParseArgsResult::Help(message) => {
+                assert!(message.contains(
+                    "dwm-lut-cli apply --config <config-path> [--profile <profile-name>]"
+                ))
+            }
+            other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn release_help_makes_config_optional() {
+        let parsed = parse_args_from(["dwm-lut-cli", "--help"]).expect("help should parse");
+
+        match parsed {
+            ParseArgsResult::Help(message) => {
+                assert!(message.contains(
+                    "dwm-lut-cli apply [--config <config-path>] [--profile <profile-name>]"
+                ))
             }
             other => panic!("unexpected parse result: {other:?}"),
         }

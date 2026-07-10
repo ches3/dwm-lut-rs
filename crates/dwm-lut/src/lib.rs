@@ -5,6 +5,7 @@ mod control;
 pub mod error;
 mod lut;
 mod monitor_list;
+mod paths;
 mod runtime;
 
 use std::path::{Path, PathBuf};

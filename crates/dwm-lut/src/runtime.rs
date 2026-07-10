@@ -72,7 +72,7 @@ pub(crate) fn request_from_cli(
 ) -> Result<Option<ControlRequest>, InjectorError> {
     let Some(command) = (match command {
         crate::cli::CliCommand::Apply(options) => Some(ControlCommand::Apply {
-            config_path: absolute_cli_path(options.config_path)?,
+            config_path: resolve_apply_config_path(options.config_path)?,
             profile: options.profile,
         }),
         crate::cli::CliCommand::Disable => Some(ControlCommand::Disable),
@@ -86,6 +86,31 @@ pub(crate) fn request_from_cli(
         protocol_version: CONTROL_PROTOCOL_VERSION,
         command,
     }))
+}
+
+fn resolve_apply_config_path(config_path: Option<PathBuf>) -> Result<PathBuf, InjectorError> {
+    if let Some(config_path) = config_path {
+        return absolute_cli_path(config_path);
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        Err(InjectorError::DebugBuildRequiresConfig)
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        default_config_path()
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn default_config_path() -> Result<PathBuf, InjectorError> {
+    Ok(
+        crate::paths::program_data_directory(InjectionStep::ResolveConfigPath)?
+            .join("dwm-lut-rs")
+            .join("config.json"),
+    )
 }
 
 pub(crate) fn resolve_host_dll_path(
@@ -262,7 +287,7 @@ mod tests {
     #[test]
     fn request_from_cli_resolves_relative_config_path_before_ipc() {
         let request = request_from_cli(CliCommand::Apply(ApplyOptions {
-            config_path: PathBuf::from("config.json"),
+            config_path: Some(PathBuf::from("config.json")),
             profile: None,
         }))
         .expect("request should resolve")
@@ -275,6 +300,36 @@ mod tests {
                     config_path,
                     std::env::current_dir().unwrap().join("config.json")
                 );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn request_from_cli_requires_config_in_debug_builds() {
+        let error = request_from_cli(CliCommand::Apply(ApplyOptions {
+            config_path: None,
+            profile: None,
+        }))
+        .expect_err("debug apply without config must be rejected");
+
+        assert!(matches!(error, InjectorError::DebugBuildRequiresConfig));
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn request_from_cli_uses_default_config_in_release_builds() {
+        let request = request_from_cli(CliCommand::Apply(ApplyOptions {
+            config_path: None,
+            profile: None,
+        }))
+        .expect("release apply should resolve the default config")
+        .expect("apply should map to control request");
+
+        match request.command {
+            ControlCommand::Apply { config_path, .. } => {
+                assert_eq!(config_path, default_config_path().unwrap());
             }
             other => panic!("unexpected command: {other:?}"),
         }

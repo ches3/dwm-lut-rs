@@ -1,9 +1,8 @@
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -12,10 +11,9 @@ use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptor
 use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
 };
-use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
 
 use crate::error::{InjectionStep, InjectorError};
+use crate::paths;
 
 const HOOK_DLL_NAME: &str = "dwm_lut_hook.dll";
 const HASH_PREFIX_BYTES: usize = 16;
@@ -74,21 +72,11 @@ pub(crate) fn stage_hook_dll(input_path: &Path) -> Result<PathBuf, InjectorError
 }
 
 fn staging_directory() -> Result<PathBuf, InjectorError> {
-    Ok(program_data_directory()?.join("dwm-lut-rs").join("hook"))
-}
-
-fn program_data_directory() -> Result<PathBuf, InjectorError> {
-    let mut path = std::ptr::null_mut();
-    let result =
-        unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut path) };
-    if result < 0 {
-        return Err(InjectorError::StepFailed {
-            step: InjectionStep::ResolveStagingDirectory,
-            source: io::Error::from_raw_os_error(result),
-        });
-    }
-
-    Ok(KnownFolderPath { ptr: path }.to_path_buf())
+    Ok(
+        paths::program_data_directory(InjectionStep::ResolveStagingDirectory)?
+            .join("dwm-lut-rs")
+            .join("hook"),
+    )
 }
 
 fn write_staged_file(staged_path: &Path, dll_bytes: &[u8]) -> Result<(), InjectorError> {
@@ -197,32 +185,6 @@ fn wide_null(value: &OsStr) -> Vec<u16> {
 
 struct SecurityDescriptor {
     ptr: PSECURITY_DESCRIPTOR,
-}
-
-struct KnownFolderPath {
-    ptr: *mut u16,
-}
-
-impl KnownFolderPath {
-    fn to_path_buf(&self) -> PathBuf {
-        let mut len = 0usize;
-        while unsafe { *self.ptr.add(len) } != 0 {
-            len += 1;
-        }
-
-        let units = unsafe { std::slice::from_raw_parts(self.ptr, len) };
-        PathBuf::from(OsString::from_wide(units))
-    }
-}
-
-impl Drop for KnownFolderPath {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe {
-                CoTaskMemFree(self.ptr.cast());
-            }
-        }
-    }
 }
 
 impl SecurityDescriptor {
