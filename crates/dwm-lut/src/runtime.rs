@@ -78,7 +78,10 @@ pub(crate) fn request_from_cli(
         crate::cli::CliCommand::Disable => Some(ControlCommand::Disable),
         crate::cli::CliCommand::HostStop => Some(ControlCommand::Stop),
         crate::cli::CliCommand::Status => Some(ControlCommand::Status),
-        crate::cli::CliCommand::HostStart(_) | crate::cli::CliCommand::Monitors => None,
+        crate::cli::CliCommand::HostStart(_)
+        | crate::cli::CliCommand::Install
+        | crate::cli::CliCommand::Monitors
+        | crate::cli::CliCommand::Uninstall => None,
     }) else {
         return Ok(None);
     };

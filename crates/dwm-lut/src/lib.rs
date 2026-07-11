@@ -7,6 +7,7 @@ mod lut;
 mod monitor_list;
 mod paths;
 mod runtime;
+mod startup;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -32,12 +33,30 @@ pub fn run_cli() -> Result<(), InjectorError> {
             Ok(())
         }
         ParseArgsResult::Command(CliCommand::HostStop) => run_control_command(CliCommand::HostStop),
+        ParseArgsResult::Command(CliCommand::Install) => {
+            startup::install()?;
+            println!("installed dwm-lut startup task");
+            Ok(())
+        }
         ParseArgsResult::Command(CliCommand::Monitors) => monitor_list::run_monitors(),
         ParseArgsResult::Command(CliCommand::Status) => run_control_command(CliCommand::Status),
+        ParseArgsResult::Command(CliCommand::Uninstall) => {
+            startup::uninstall()?;
+            println!("uninstalled dwm-lut startup task");
+            Ok(())
+        }
         ParseArgsResult::Help(message) => {
             println!("{message}");
             Ok(())
         }
+    }
+}
+
+pub fn report_cli_error(error: &InjectorError) -> i32 {
+    eprintln!("{error}");
+    match error {
+        InjectorError::StartupTaskOperationFailed { exit_code, .. } => *exit_code as i32,
+        _ => 1,
     }
 }
 

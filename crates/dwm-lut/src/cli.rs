@@ -22,8 +22,10 @@ pub enum CliCommand {
     Disable,
     HostStart(HostStartOptions),
     HostStop,
+    Install,
     Monitors,
     Status,
+    Uninstall,
 }
 
 #[derive(Debug)]
@@ -56,8 +58,10 @@ where
         "apply" => parse_apply_args(args),
         "disable" => parse_disable_args(args),
         "host" => parse_host_args(args),
+        "install" => parse_no_arg_command(args, "install", CliCommand::Install),
         "monitors" => parse_monitors_args(args),
         "status" => parse_no_arg_command(args, "status", CliCommand::Status),
+        "uninstall" => parse_no_arg_command(args, "uninstall", CliCommand::Uninstall),
         other => Err(InjectorError::Usage(usage_message(&format!(
             "unknown command: {other}"
         )))),
@@ -209,7 +213,7 @@ fn parse_no_arg_command(
 
 fn usage_message(problem: &str) -> String {
     let usage = format!(
-        "usage: {}\n       dwm-lut-cli disable\n       dwm-lut-cli status\n       dwm-lut-cli monitors\n       dwm-lut-cli host start [--host <host-exe-path>] [--dll <hook-dll-path>]\n       dwm-lut-cli host stop",
+        "usage: {}\n       dwm-lut-cli disable\n       dwm-lut-cli status\n       dwm-lut-cli monitors\n       dwm-lut-cli host start [--host <host-exe-path>] [--dll <hook-dll-path>]\n       dwm-lut-cli host stop\n       dwm-lut-cli install\n       dwm-lut-cli uninstall",
         apply_usage_line()
     );
     if problem.is_empty() {
@@ -526,6 +530,27 @@ mod tests {
     }
 
     #[test]
+    fn accepts_install_and_uninstall_commands_without_arguments() {
+        assert!(matches!(
+            parse_args_from(["dwm-lut-cli", "install"]).unwrap(),
+            ParseArgsResult::Command(CliCommand::Install)
+        ));
+        assert!(matches!(
+            parse_args_from(["dwm-lut-cli", "uninstall"]).unwrap(),
+            ParseArgsResult::Command(CliCommand::Uninstall)
+        ));
+    }
+
+    #[test]
+    fn rejects_arguments_for_task_commands() {
+        for command in ["install", "uninstall"] {
+            let error = parse_args_from(["dwm-lut-cli", command, "extra"])
+                .expect_err("task command arguments must be rejected");
+            assert!(matches!(error, InjectorError::Usage(_)));
+        }
+    }
+
+    #[test]
     fn rejects_host_stop_arguments() {
         let error = parse_args_from(["dwm-lut-cli", "host", "stop", "--host"])
             .expect_err("host stop must reject arguments");
@@ -642,8 +667,10 @@ mod tests {
                 CliCommand::Disable
                 | CliCommand::HostStart(_)
                 | CliCommand::HostStop
+                | CliCommand::Install
                 | CliCommand::Monitors
-                | CliCommand::Status,
+                | CliCommand::Status
+                | CliCommand::Uninstall,
             ) => {
                 panic!("expected apply command arguments")
             }

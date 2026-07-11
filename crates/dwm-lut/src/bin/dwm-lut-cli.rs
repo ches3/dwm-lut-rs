@@ -1,6 +1,5 @@
 fn main() {
     if let Err(err) = dwm_lut::run_cli() {
-        eprintln!("{err}");
-        std::process::exit(1);
+        std::process::exit(dwm_lut::report_cli_error(&err));
     }
 }

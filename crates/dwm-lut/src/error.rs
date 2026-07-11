@@ -139,6 +139,16 @@ pub enum InjectorError {
     },
     HostElevationCancelled,
     HostStartupFailed(String),
+    StartupTaskElevationCancelled,
+    StartupTaskRequiresAdministratorUser,
+    StartupTaskLaunchFailed {
+        operation: &'static str,
+        source: io::Error,
+    },
+    StartupTaskOperationFailed {
+        operation: &'static str,
+        exit_code: u32,
+    },
     DebugPrivilegeUnavailable,
     MissingFile {
         kind: &'static str,
@@ -217,6 +227,23 @@ impl fmt::Display for InjectorError {
             Self::HostStartupFailed(message) => {
                 write!(f, "host background startup failed: {message}")
             }
+            Self::StartupTaskElevationCancelled => {
+                write!(f, "startup task elevation was canceled")
+            }
+            Self::StartupTaskRequiresAdministratorUser => write!(
+                f,
+                "startup task installation and removal require signing in with an administrator account"
+            ),
+            Self::StartupTaskLaunchFailed { operation, source } => {
+                write!(f, "startup task {operation} launch failed: {source}")
+            }
+            Self::StartupTaskOperationFailed {
+                operation,
+                exit_code,
+            } => write!(
+                f,
+                "startup task {operation} failed with exit code {exit_code:#x}"
+            ),
             Self::DebugPrivilegeUnavailable => {
                 write!(
                     f,

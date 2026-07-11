@@ -14,6 +14,7 @@ dwm-lut-payload = { path = "../dwm-lut-payload" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.11.0"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant"] }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Devices_Display",
     "Win32_Foundation",
