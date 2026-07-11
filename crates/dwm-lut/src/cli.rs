@@ -219,12 +219,6 @@ fn usage_message(problem: &str) -> String {
     }
 }
 
-#[cfg(debug_assertions)]
-fn apply_usage_line() -> &'static str {
-    "dwm-lut-cli apply --config <config-path> [--profile <profile-name>]"
-}
-
-#[cfg(not(debug_assertions))]
 fn apply_usage_line() -> &'static str {
     "dwm-lut-cli apply [--config <config-path>] [--profile <profile-name>]"
 }
@@ -584,23 +578,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    fn debug_help_requires_config() {
-        let parsed = parse_args_from(["dwm-lut-cli", "--help"]).expect("help should parse");
-
-        match parsed {
-            ParseArgsResult::Help(message) => {
-                assert!(message.contains(
-                    "dwm-lut-cli apply --config <config-path> [--profile <profile-name>]"
-                ))
-            }
-            other => panic!("unexpected parse result: {other:?}"),
-        }
-    }
-
-    #[test]
-    #[cfg(not(debug_assertions))]
-    fn release_help_makes_config_optional() {
+    fn help_makes_config_optional() {
         let parsed = parse_args_from(["dwm-lut-cli", "--help"]).expect("help should parse");
 
         match parsed {

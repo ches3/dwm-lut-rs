@@ -93,18 +93,9 @@ fn resolve_apply_config_path(config_path: Option<PathBuf>) -> Result<PathBuf, In
         return absolute_cli_path(config_path);
     }
 
-    #[cfg(debug_assertions)]
-    {
-        Err(InjectorError::DebugBuildRequiresConfig)
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        default_config_path()
-    }
+    default_config_path()
 }
 
-#[cfg(not(debug_assertions))]
 fn default_config_path() -> Result<PathBuf, InjectorError> {
     Ok(
         crate::paths::program_data_directory(InjectionStep::ResolveConfigPath)?
@@ -306,25 +297,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    fn request_from_cli_requires_config_in_debug_builds() {
-        let error = request_from_cli(CliCommand::Apply(ApplyOptions {
-            config_path: None,
-            profile: None,
-        }))
-        .expect_err("debug apply without config must be rejected");
-
-        assert!(matches!(error, InjectorError::DebugBuildRequiresConfig));
-    }
-
-    #[test]
-    #[cfg(not(debug_assertions))]
-    fn request_from_cli_uses_default_config_in_release_builds() {
+    fn request_from_cli_uses_default_config() {
         let request = request_from_cli(CliCommand::Apply(ApplyOptions {
             config_path: None,
             profile: None,
         }))
-        .expect("release apply should resolve the default config")
+        .expect("apply should resolve the default config")
         .expect("apply should map to control request");
 
         match request.command {
