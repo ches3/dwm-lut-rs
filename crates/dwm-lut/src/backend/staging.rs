@@ -73,7 +73,7 @@ pub(crate) fn stage_hook_dll(input_path: &Path) -> Result<PathBuf, InjectorError
 
 fn staging_directory() -> Result<PathBuf, InjectorError> {
     Ok(
-        paths::program_data_directory(InjectionStep::ResolveStagingDirectory)?
+        paths::local_app_data_directory(InjectionStep::ResolveStagingDirectory)?
             .join("dwm-lut-rs")
             .join("hook"),
     )
@@ -245,25 +245,25 @@ mod tests {
     #[test]
     fn staged_hook_dll_cleanup_matches_only_content_addressed_hook_dlls() {
         assert!(is_staged_hook_dll_path(Path::new(
-            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdef.dll"
+            r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdef.dll"
         )));
         assert!(is_staged_hook_dll_path(Path::new(
-            r"C:\ProgramData\dwm-lut-rs\hook\DWM_LUT_HOOK-0123456789ABCDEF0123456789ABCDEF.DLL"
+            r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\DWM_LUT_HOOK-0123456789ABCDEF0123456789ABCDEF.DLL"
         )));
         assert!(!is_staged_hook_dll_path(Path::new(
-            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook.dll"
+            r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\dwm_lut_hook.dll"
         )));
         assert!(!is_staged_hook_dll_path(Path::new(
-            r"C:\ProgramData\dwm-lut-rs\hook\other-0123456789abcdef0123456789abcdef.dll"
+            r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\other-0123456789abcdef0123456789abcdef.dll"
         )));
         assert!(!is_staged_hook_dll_path(Path::new(
-            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef.dll"
+            r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef.dll"
         )));
         assert!(!is_staged_hook_dll_path(Path::new(
-            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdeg.dll"
+            r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdeg.dll"
         )));
         assert!(!is_staged_hook_dll_path(Path::new(
-            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdef-extra.dll"
+            r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdef-extra.dll"
         )));
     }
 

@@ -538,7 +538,7 @@ mod tests {
     fn staged_hook_module_match_uses_module_path_basename() {
         assert_eq!(
             module_basename(
-                r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdef.dll",
+                r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdef.dll",
                 "ignored.dll",
             ),
             "dwm_lut_hook-0123456789abcdef0123456789abcdef.dll"
@@ -658,10 +658,10 @@ mod tests {
     #[test]
     fn staged_dll_basename_matching_is_case_insensitive() {
         let staged = PathBuf::from(
-            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdef.dll",
+            r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\dwm_lut_hook-0123456789abcdef0123456789abcdef.dll",
         );
         let module = sample_remote_module(
-            r"C:\ProgramData\dwm-lut-rs\hook\DWM_LUT_HOOK-0123456789ABCDEF0123456789ABCDEF.DLL",
+            r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\DWM_LUT_HOOK-0123456789ABCDEF0123456789ABCDEF.DLL",
             "ignored.dll",
         );
 
@@ -679,10 +679,10 @@ mod tests {
     #[test]
     fn staged_dll_basename_matching_rejects_different_content_hash() {
         let staged = PathBuf::from(
-            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-11111111111111111111111111111111.dll",
+            r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\dwm_lut_hook-11111111111111111111111111111111.dll",
         );
         let module = sample_remote_module(
-            r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-22222222222222222222222222222222.dll",
+            r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\dwm_lut_hook-22222222222222222222222222222222.dll",
             "ignored.dll",
         );
 

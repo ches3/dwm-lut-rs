@@ -101,7 +101,7 @@ fn resolve_apply_config_path(config_path: Option<PathBuf>) -> Result<PathBuf, In
 
 fn default_config_path() -> Result<PathBuf, InjectorError> {
     Ok(
-        crate::paths::program_data_directory(InjectionStep::ResolveConfigPath)?
+        crate::paths::local_app_data_directory(InjectionStep::ResolveConfigPath)?
             .join("dwm-lut-rs")
             .join("config.json"),
     )
@@ -208,7 +208,7 @@ mod tests {
             pid: 4242,
             input_dll_path: PathBuf::from(r"C:\tools\dwm_lut_hook.dll"),
             staged_dll_path: PathBuf::from(
-                r"C:\ProgramData\dwm-lut-rs\hook\dwm_lut_hook-11111111111111111111111111111111.dll",
+                r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\dwm_lut_hook-11111111111111111111111111111111.dll",
             ),
             config_path: PathBuf::from(r"C:\profiles\config.json"),
             profile_name: "desktop".to_string(),

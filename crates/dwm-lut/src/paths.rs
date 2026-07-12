@@ -4,14 +4,14 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
 use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath};
+use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
 
 use crate::error::{InjectionStep, InjectorError};
 
-pub(crate) fn program_data_directory(step: InjectionStep) -> Result<PathBuf, InjectorError> {
+pub(crate) fn local_app_data_directory(step: InjectionStep) -> Result<PathBuf, InjectorError> {
     let mut path = std::ptr::null_mut();
     let result =
-        unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, 0, std::ptr::null_mut(), &mut path) };
+        unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, std::ptr::null_mut(), &mut path) };
     if result < 0 {
         return Err(InjectorError::StepFailed {
             step,
