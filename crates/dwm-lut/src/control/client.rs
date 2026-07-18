@@ -1,4 +1,4 @@
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::time::Duration;
 
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, PipeMode};
@@ -94,7 +94,7 @@ async fn open_pipe(pipe_name: &str) -> Result<NamedPipeClient, InjectorError> {
 }
 
 struct HostProcessHandle {
-    handle: HANDLE,
+    handle: OwnedHandle,
 }
 
 impl HostProcessHandle {
@@ -119,11 +119,15 @@ impl HostProcessHandle {
                 source: last_os_error(),
             });
         }
-        Ok(Self { handle })
+        // SAFETY: OpenProcess returned an owned process handle that must be closed.
+        Ok(Self {
+            handle: unsafe { OwnedHandle::from_raw_handle(handle) },
+        })
     }
 
     fn wait_for_exit(&self) -> Result<(), InjectorError> {
-        match unsafe { WaitForSingleObject(self.handle, HOST_SHUTDOWN_TIMEOUT_MS) } {
+        match unsafe { WaitForSingleObject(self.handle.as_raw_handle(), HOST_SHUTDOWN_TIMEOUT_MS) }
+        {
             WAIT_OBJECT_0 => Ok(()),
             WAIT_TIMEOUT => Err(InjectorError::ControlTimeout {
                 operation: "wait for host shutdown",
@@ -132,14 +136,6 @@ impl HostProcessHandle {
                 operation: "wait for host shutdown",
                 source: last_os_error(),
             }),
-        }
-    }
-}
-
-impl Drop for HostProcessHandle {
-    fn drop(&mut self) {
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.handle);
         }
     }
 }

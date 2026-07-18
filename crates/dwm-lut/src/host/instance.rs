@@ -1,11 +1,11 @@
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::ptr::null_mut;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, HANDLE, INVALID_HANDLE_VALUE, SetLastError, WAIT_ABANDONED,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_ALREADY_EXISTS, INVALID_HANDLE_VALUE, SetLastError, WAIT_ABANDONED, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 
@@ -18,9 +18,9 @@ pub(crate) enum HostInstanceClaim {
     Contended(HostInstanceWaiter),
 }
 
-pub(crate) struct HostInstanceGuard(HANDLE);
+pub(crate) struct HostInstanceGuard(OwnedHandle);
 
-pub(crate) struct HostInstanceWaiter(HANDLE);
+pub(crate) struct HostInstanceWaiter(Option<OwnedHandle>);
 
 impl HostInstanceGuard {
     pub(crate) fn claim() -> Result<HostInstanceClaim, InjectorError> {
@@ -50,8 +50,12 @@ fn claim_host_instance(mutex_name: &str) -> Result<HostInstanceClaim, InjectorEr
     }
 
     let error = last_os_error();
+    // SAFETY: CreateMutexW returned an owned mutex handle that must be closed.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
     if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
-        return Ok(HostInstanceClaim::Contended(HostInstanceWaiter(handle)));
+        return Ok(HostInstanceClaim::Contended(HostInstanceWaiter(Some(
+            handle,
+        ))));
     }
     Ok(HostInstanceClaim::Acquired(HostInstanceGuard(handle)))
 }
@@ -61,9 +65,16 @@ impl HostInstanceWaiter {
         &mut self,
         timeout_ms: u32,
     ) -> Result<Option<HostInstanceGuard>, InjectorError> {
-        match unsafe { WaitForSingleObject(self.0, timeout_ms) } {
+        let handle = self
+            .0
+            .as_ref()
+            .expect("host instance waiter must own its mutex");
+        match unsafe { WaitForSingleObject(handle.as_raw_handle(), timeout_ms) } {
             WAIT_OBJECT_0 | WAIT_ABANDONED => {
-                let handle = std::mem::replace(&mut self.0, null_mut());
+                let handle = self
+                    .0
+                    .take()
+                    .expect("host instance waiter must own its mutex");
                 Ok(Some(HostInstanceGuard(handle)))
             }
             WAIT_TIMEOUT => Ok(None),
@@ -77,21 +88,8 @@ impl HostInstanceWaiter {
 
 impl Drop for HostInstanceGuard {
     fn drop(&mut self) {
-        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
-            unsafe {
-                let _ = ReleaseMutex(self.0);
-                windows_sys::Win32::Foundation::CloseHandle(self.0);
-            }
-        }
-    }
-}
-
-impl Drop for HostInstanceWaiter {
-    fn drop(&mut self) {
-        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
-            unsafe {
-                windows_sys::Win32::Foundation::CloseHandle(self.0);
-            }
+        unsafe {
+            let _ = ReleaseMutex(self.0.as_raw_handle());
         }
     }
 }

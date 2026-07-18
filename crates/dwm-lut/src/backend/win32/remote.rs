@@ -1,11 +1,10 @@
 use std::ffi::{OsStr, c_void};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle as StdOwnedHandle};
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
-};
+use windows_sys::Win32::Foundation::{FALSE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
 use windows_sys::Win32::System::Memory::{
     MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx, VirtualFreeEx,
@@ -18,7 +17,7 @@ use crate::error::{InjectionStep, InjectorError};
 
 use super::last_os_error;
 
-pub(crate) struct OwnedHandle(HANDLE);
+pub(crate) struct OwnedHandle(StdOwnedHandle);
 
 impl OwnedHandle {
     pub(crate) fn new(handle: HANDLE, step: InjectionStep) -> Result<Self, InjectorError> {
@@ -29,21 +28,12 @@ impl OwnedHandle {
             });
         }
 
-        Ok(Self(handle))
+        // SAFETY: the creating Win32 API returned an owned handle that must be closed.
+        Ok(Self(unsafe { StdOwnedHandle::from_raw_handle(handle) }))
     }
 
     pub(crate) fn raw(&self) -> HANDLE {
-        self.0
-    }
-}
-
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
-            unsafe {
-                let _ = CloseHandle(self.0);
-            }
-        }
+        self.0.as_raw_handle()
     }
 }
 

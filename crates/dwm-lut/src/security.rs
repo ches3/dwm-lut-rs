@@ -1,9 +1,10 @@
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::null_mut;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{GetLastError, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
 };
@@ -32,11 +33,18 @@ impl UserSid {
                 last_os_error(),
             ));
         }
-        let token = TokenHandle(token);
+        // SAFETY: OpenProcessToken returned an owned token handle that must be closed.
+        let token = unsafe { OwnedHandle::from_raw_handle(token) };
 
         let mut required_len = 0u32;
         unsafe {
-            GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut required_len);
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenUser,
+                null_mut(),
+                0,
+                &mut required_len,
+            );
         }
         if required_len == 0 {
             return Err(security_error(
@@ -50,7 +58,7 @@ impl UserSid {
         let mut returned_len = 0u32;
         let ok = unsafe {
             GetTokenInformation(
-                token.0,
+                token.as_raw_handle(),
                 TokenUser,
                 buffer.as_mut_ptr().cast(),
                 buffer_len,
@@ -94,18 +102,6 @@ impl UserSid {
 
     pub(crate) fn as_sddl(&self) -> &str {
         &self.sddl
-    }
-}
-
-struct TokenHandle(HANDLE);
-
-impl Drop for TokenHandle {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
     }
 }
 

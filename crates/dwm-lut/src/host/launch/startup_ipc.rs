@@ -1,14 +1,15 @@
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_PIPE_CONNECTED, FALSE, GENERIC_READ,
-    GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, TRUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_PIPE_CONNECTED, FALSE, GENERIC_READ, GENERIC_WRITE,
+    HANDLE, INVALID_HANDLE_VALUE, TRUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
@@ -39,7 +40,7 @@ const STARTUP_FAILURE_KIND_HOST_ALREADY_RUNNING: &str = "host_already_running";
 static STARTUP_PIPE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct StartupNotifier {
-    pipe: Arc<ProcessHandle>,
+    pipe: Arc<OwnedHandle>,
     ready_for_ack: Arc<AtomicBool>,
     acknowledgement: mpsc::Receiver<Result<(), InjectorError>>,
 }
@@ -68,7 +69,8 @@ impl StartupNotifier {
             });
         }
 
-        let pipe = Arc::new(ProcessHandle(handle));
+        // SAFETY: CreateFileW returned an owned pipe handle that must be closed.
+        let pipe = Arc::new(unsafe { OwnedHandle::from_raw_handle(handle) });
         let ready_for_ack = Arc::new(AtomicBool::new(false));
         let (acknowledgement_sender, acknowledgement) = mpsc::sync_channel(1);
         let watcher_pipe = Arc::clone(&pipe);
@@ -93,7 +95,7 @@ impl StartupNotifier {
     pub(crate) fn notify_success(self) -> Result<(), InjectorError> {
         self.ready_for_ack.store(true, Ordering::Release);
         write_message_with_timeout(
-            self.pipe.0,
+            self.pipe.as_raw_handle(),
             STARTUP_RESULT_OK.as_bytes(),
             STARTUP_RESULT_TIMEOUT,
             "write startup result",
@@ -124,7 +126,7 @@ impl StartupNotifier {
             ));
         }
         write_message_with_timeout(
-            self.pipe.0,
+            self.pipe.as_raw_handle(),
             &bytes,
             STARTUP_RESULT_TIMEOUT,
             "write startup result",
@@ -133,12 +135,12 @@ impl StartupNotifier {
 }
 
 fn watch_startup_channel(
-    pipe: Arc<ProcessHandle>,
+    pipe: Arc<OwnedHandle>,
     ready_for_ack: Arc<AtomicBool>,
     acknowledgement: mpsc::SyncSender<Result<(), InjectorError>>,
 ) {
     let result = read_message_waiting(
-        pipe.0,
+        pipe.as_raw_handle(),
         STARTUP_RESULT_ACK.len(),
         "read startup result acknowledgement",
     )
@@ -158,7 +160,7 @@ fn watch_startup_channel(
 
 pub(super) struct StartupEvent {
     name: String,
-    event: ProcessHandle,
+    event: OwnedHandle,
 }
 
 impl StartupEvent {
@@ -180,7 +182,8 @@ impl StartupEvent {
         }
         Ok(Self {
             name,
-            event: ProcessHandle(event),
+            // SAFETY: CreateEventW returned an owned event handle that must be closed.
+            event: unsafe { OwnedHandle::from_raw_handle(event) },
         })
     }
 
@@ -189,7 +192,7 @@ impl StartupEvent {
     }
 
     fn handle(&self) -> HANDLE {
-        self.event.0
+        self.event.as_raw_handle()
     }
 
     #[cfg(test)]
@@ -221,7 +224,7 @@ impl StartupEvent {
 pub(super) struct StartupResultPipe {
     name: String,
     connect: OverlappedOperation,
-    pipe: ProcessHandle,
+    pipe: OwnedHandle,
 }
 
 impl StartupResultPipe {
@@ -252,9 +255,10 @@ impl StartupResultPipe {
                 source: last_os_error(),
             });
         }
-        let pipe = ProcessHandle(pipe);
+        // SAFETY: CreateNamedPipeW returned an owned pipe handle that must be closed.
+        let pipe = unsafe { OwnedHandle::from_raw_handle(pipe) };
         let mut connect = OverlappedOperation::new("create startup pipe connection event")?;
-        let ok = unsafe { ConnectNamedPipe(pipe.0, connect.as_mut_ptr()) };
+        let ok = unsafe { ConnectNamedPipe(pipe.as_raw_handle(), connect.as_mut_ptr()) };
         if ok != FALSE {
             unsafe {
                 SetEvent(connect.event());
@@ -262,7 +266,9 @@ impl StartupResultPipe {
         } else {
             let error = last_os_error();
             match error.raw_os_error() {
-                Some(code) if code == ERROR_IO_PENDING as i32 => connect.mark_pending(pipe.0),
+                Some(code) if code == ERROR_IO_PENDING as i32 => {
+                    connect.mark_pending(pipe.as_raw_handle())
+                }
                 Some(code) if code == ERROR_PIPE_CONNECTED as i32 => unsafe {
                     SetEvent(connect.event());
                 },
@@ -298,10 +304,10 @@ impl StartupResultPipe {
             Err(StartupWaitFailure::Error(error)) => Err(error),
             Err(StartupWaitFailure::Timeout) => {
                 if self.connect.is_pending() {
-                    self.connect.cancel_and_wait(self.pipe.0);
+                    self.connect.cancel_and_wait(self.pipe.as_raw_handle());
                 }
                 unsafe {
-                    DisconnectNamedPipe(self.pipe.0);
+                    DisconnectNamedPipe(self.pipe.as_raw_handle());
                 }
                 drop(self);
                 wait_after_startup_disconnect(process, panic_event)
@@ -317,13 +323,15 @@ impl StartupResultPipe {
     ) -> StartupWaitResult<()> {
         wait_for_startup_operation(self.connect.event(), panic_event, process, deadline)?;
         if self.connect.is_pending() {
-            self.connect
-                .result(self.pipe.0, "complete startup result pipe connection")?;
+            self.connect.result(
+                self.pipe.as_raw_handle(),
+                "complete startup result pipe connection",
+            )?;
         }
 
         let expected_pid = unsafe { GetProcessId(process.handle()) };
         let mut actual_pid = 0;
-        let ok = unsafe { GetNamedPipeClientProcessId(self.pipe.0, &mut actual_pid) };
+        let ok = unsafe { GetNamedPipeClientProcessId(self.pipe.as_raw_handle(), &mut actual_pid) };
         if ok == FALSE {
             return Err(InjectorError::HostLaunchFailed {
                 operation: "identify startup result pipe client",
@@ -495,7 +503,7 @@ fn host_exited_before_startup(process: &elevation::ElevatedProcess) -> InjectorE
 }
 
 fn read_startup_result(
-    pipe: &ProcessHandle,
+    pipe: &OwnedHandle,
     panic_event: &StartupEvent,
     process: &elevation::ElevatedProcess,
     deadline: Instant,
@@ -505,7 +513,7 @@ fn read_startup_result(
     let mut read = 0u32;
     let ok = unsafe {
         ReadFile(
-            pipe.0,
+            pipe.as_raw_handle(),
             bytes.as_mut_ptr().cast(),
             bytes.len() as u32,
             &mut read,
@@ -516,9 +524,9 @@ fn read_startup_result(
         let error = last_os_error();
         match error.raw_os_error() {
             Some(code) if code == ERROR_IO_PENDING as i32 => {
-                operation.mark_pending(pipe.0);
+                operation.mark_pending(pipe.as_raw_handle());
                 wait_for_startup_operation(operation.event(), panic_event, process, deadline)?;
-                read = operation.result(pipe.0, "read startup result")?;
+                read = operation.result(pipe.as_raw_handle(), "read startup result")?;
             }
             Some(code) if code == ERROR_MORE_DATA as i32 => {
                 return Err(InjectorError::HostStartupFailed(
@@ -541,7 +549,7 @@ fn read_startup_result(
 }
 
 fn write_startup_ack(
-    pipe: &ProcessHandle,
+    pipe: &OwnedHandle,
     panic_event: &StartupEvent,
     process: &elevation::ElevatedProcess,
     deadline: Instant,
@@ -551,7 +559,7 @@ fn write_startup_ack(
     let bytes = STARTUP_RESULT_ACK.as_bytes();
     let ok = unsafe {
         WriteFile(
-            pipe.0,
+            pipe.as_raw_handle(),
             bytes.as_ptr().cast(),
             bytes.len() as u32,
             &mut written,
@@ -567,9 +575,9 @@ fn write_startup_ack(
             }
             .into());
         }
-        operation.mark_pending(pipe.0);
+        operation.mark_pending(pipe.as_raw_handle());
         wait_for_startup_operation(operation.event(), panic_event, process, deadline)?;
-        written = operation.result(pipe.0, "write startup result acknowledgement")?;
+        written = operation.result(pipe.as_raw_handle(), "write startup result acknowledgement")?;
     }
     verify_complete_write(bytes.len(), written, "startup result acknowledgement")?;
     Ok(())
@@ -680,7 +688,7 @@ fn wait_for_event(
 
 struct OverlappedOperation {
     overlapped: Box<OVERLAPPED>,
-    event: ProcessHandle,
+    event: OwnedHandle,
     pending_handle: Option<HANDLE>,
 }
 
@@ -693,9 +701,10 @@ impl OverlappedOperation {
                 source: last_os_error(),
             });
         }
-        let event = ProcessHandle(event);
+        // SAFETY: CreateEventW returned an owned event handle that must be closed.
+        let event = unsafe { OwnedHandle::from_raw_handle(event) };
         let mut overlapped = Box::new(OVERLAPPED::default());
-        overlapped.hEvent = event.0;
+        overlapped.hEvent = event.as_raw_handle();
         Ok(Self {
             overlapped,
             event,
@@ -708,7 +717,7 @@ impl OverlappedOperation {
     }
 
     fn event(&self) -> HANDLE {
-        self.event.0
+        self.event.as_raw_handle()
     }
 
     fn mark_pending(&mut self, handle: HANDLE) {
@@ -770,22 +779,6 @@ impl Drop for OverlappedOperation {
     fn drop(&mut self) {
         if let Some(handle) = self.pending_handle {
             self.cancel_and_wait(handle);
-        }
-    }
-}
-
-struct ProcessHandle(HANDLE);
-
-// Windows handles may be used from multiple threads. Arc ensures the handle is closed once.
-unsafe impl Send for ProcessHandle {}
-unsafe impl Sync for ProcessHandle {}
-
-impl Drop for ProcessHandle {
-    fn drop(&mut self) {
-        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
-            unsafe {
-                let _ = CloseHandle(self.0);
-            }
         }
     }
 }

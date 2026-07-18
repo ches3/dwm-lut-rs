@@ -1,9 +1,10 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE};
+use windows_sys::Win32::Foundation::{FALSE, HANDLE};
 use windows_sys::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
 
 use crate::error::InjectorError;
@@ -23,11 +24,7 @@ struct StartupEvents {
     panic: EventHandle,
 }
 
-struct EventHandle(HANDLE);
-
-// Windows event handles may be signaled and waited on from different threads.
-unsafe impl Send for EventHandle {}
-unsafe impl Sync for EventHandle {}
+struct EventHandle(OwnedHandle);
 
 impl EventHandle {
     fn open(name: &str, access: u32, operation: &'static str) -> Result<Self, InjectorError> {
@@ -39,21 +36,16 @@ impl EventHandle {
                 source: std::io::Error::last_os_error(),
             });
         }
-        Ok(Self(handle))
+        // SAFETY: OpenEventW returned an owned event handle that must be closed.
+        Ok(Self(unsafe { OwnedHandle::from_raw_handle(handle) }))
     }
 
     fn signal(&self) -> bool {
-        (unsafe { SetEvent(self.0) }) != FALSE
+        (unsafe { SetEvent(self.raw()) }) != FALSE
     }
-}
 
-impl Drop for EventHandle {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
+    fn raw(&self) -> HANDLE {
+        self.0.as_raw_handle()
     }
 }
 
@@ -230,6 +222,8 @@ mod tests {
         let event_name_wide = wide_null(&event_name);
         let creator = unsafe { CreateEventW(null_mut(), TRUE, FALSE, event_name_wide.as_ptr()) };
         assert!(!creator.is_null());
+        // SAFETY: CreateEventW returned an owned event handle that must be closed.
+        let creator = unsafe { OwnedHandle::from_raw_handle(creator) };
 
         let opened = EventHandle::open(
             &event_name,
@@ -237,12 +231,13 @@ mod tests {
             "open test startup event",
         )
         .expect("event should open while creator owns it");
-        unsafe {
-            CloseHandle(creator);
-        }
+        drop(creator);
 
         assert!(opened.signal());
-        assert_eq!(unsafe { WaitForSingleObject(opened.0, 0) }, WAIT_OBJECT_0);
+        assert_eq!(
+            unsafe { WaitForSingleObject(opened.raw(), 0) },
+            WAIT_OBJECT_0
+        );
     }
 
     #[test]

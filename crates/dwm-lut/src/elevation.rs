@@ -1,12 +1,11 @@
 use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_CANCELLED, FALSE, HANDLE, INVALID_HANDLE_VALUE,
-};
+use windows_sys::Win32::Foundation::{ERROR_CANCELLED, FALSE, HANDLE};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_QUERY, TokenElevation,
     TokenElevationType,
@@ -73,7 +72,10 @@ pub(crate) fn run_as(executable: &Path, parameters: &[u16]) -> Result<ElevatedPr
     if execute.hProcess.is_null() {
         return Err(RunAsError::MissingProcessHandle);
     }
-    Ok(ElevatedProcess(OwnedHandle(execute.hProcess)))
+    // SAFETY: ShellExecuteExW returned an owned process handle that must be closed.
+    Ok(ElevatedProcess(unsafe {
+        OwnedHandle::from_raw_handle(execute.hProcess)
+    }))
 }
 
 fn current_process_token() -> io::Result<OwnedHandle> {
@@ -81,7 +83,8 @@ fn current_process_token() -> io::Result<OwnedHandle> {
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == FALSE {
         return Err(io::Error::last_os_error());
     }
-    Ok(OwnedHandle(token))
+    // SAFETY: OpenProcessToken returned an owned token handle that must be closed.
+    Ok(unsafe { OwnedHandle::from_raw_handle(token) })
 }
 
 fn get_token_information(
@@ -93,7 +96,7 @@ fn get_token_information(
     let mut returned_len = 0;
     if unsafe {
         GetTokenInformation(
-            token.0,
+            token.as_raw_handle(),
             information_class,
             information,
             information_len,
@@ -120,18 +123,6 @@ pub(crate) struct ElevatedProcess(OwnedHandle);
 
 impl ElevatedProcess {
     pub(crate) fn handle(&self) -> HANDLE {
-        self.0.0
-    }
-}
-
-struct OwnedHandle(HANDLE);
-
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
-            unsafe {
-                let _ = CloseHandle(self.0);
-            }
-        }
+        self.0.as_raw_handle()
     }
 }
