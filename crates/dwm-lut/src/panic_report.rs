@@ -1,19 +1,14 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::ptr::null_mut;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, TRUE, WAIT_OBJECT_0};
-use windows_sys::Win32::System::Threading::{
-    CreateEventW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, SetEvent, WaitForMultipleObjects,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE};
+use windows_sys::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
 
 use crate::error::InjectorError;
 
 pub const PANIC_EXIT_CODE: i32 = 101;
-const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
-
 const STATE_STANDALONE: u8 = 0;
 const STATE_STARTING: u8 = 1;
 const STATE_INITIATOR_REPORTING: u8 = 2;
@@ -26,7 +21,6 @@ static STARTUP_EVENTS: OnceLock<StartupEvents> = OnceLock::new();
 
 struct StartupEvents {
     panic: EventHandle,
-    completion: EventHandle,
 }
 
 struct EventHandle(HANDLE);
@@ -39,17 +33,6 @@ impl EventHandle {
     fn open(name: &str, access: u32, operation: &'static str) -> Result<Self, InjectorError> {
         let name = wide_null(name);
         let handle = unsafe { OpenEventW(access, FALSE, name.as_ptr()) };
-        if handle.is_null() {
-            return Err(InjectorError::HostLaunchFailed {
-                operation,
-                source: std::io::Error::last_os_error(),
-            });
-        }
-        Ok(Self(handle))
-    }
-
-    fn unnamed(operation: &'static str) -> Result<Self, InjectorError> {
-        let handle = unsafe { CreateEventW(null_mut(), TRUE, FALSE, null_mut()) };
         if handle.is_null() {
             return Err(InjectorError::HostLaunchFailed {
                 operation,
@@ -81,70 +64,35 @@ pub enum PanicReportAction {
     AlreadyReported,
 }
 
-pub fn configure(
-    panic_event_name: Option<&str>,
-    startup_abort_event_name: Option<&str>,
-) -> Result<(), InjectorError> {
-    let (panic_event_name, startup_abort_event_name) =
-        match (panic_event_name, startup_abort_event_name) {
-            (None, None) => return Ok(()),
-            (Some(panic_event_name), Some(startup_abort_event_name)) => {
-                (panic_event_name, startup_abort_event_name)
-            }
-            _ => {
-                return Err(InjectorError::HostStartupFailed(
-                    "startup event arguments must be specified together".to_string(),
-                ));
-            }
-        };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupChannelFailureAction {
+    Exit,
+    ClaimAndExit,
+    Ignore,
+}
 
+pub fn configure(panic_event_name: Option<&str>) -> Result<(), InjectorError> {
+    let Some(panic_event_name) = panic_event_name else {
+        return Ok(());
+    };
     let panic = EventHandle::open(
         panic_event_name,
         EVENT_MODIFY_STATE,
         "open startup panic event",
     )?;
-    let abort = EventHandle::open(
-        startup_abort_event_name,
-        SYNCHRONIZE_ACCESS,
-        "open startup abort event",
-    )?;
-    let completion = EventHandle::unnamed("create startup completion event")?;
-    STARTUP_EVENTS
-        .set(StartupEvents { panic, completion })
-        .map_err(|_| {
-            InjectorError::HostStartupFailed("startup reporting was already configured".to_string())
-        })?;
+    STARTUP_EVENTS.set(StartupEvents { panic }).map_err(|_| {
+        InjectorError::HostStartupFailed("startup reporting was already configured".to_string())
+    })?;
     REPORT_STATE.store(STATE_STARTING, Ordering::Release);
-
-    let completion = &STARTUP_EVENTS
-        .get()
-        .expect("startup events were just configured")
-        .completion;
-    std::thread::Builder::new()
-        .name("dwm-lut-startup-abort".to_string())
-        .spawn(move || watch_startup(abort, completion))
-        .map_err(|source| InjectorError::HostLaunchFailed {
-            operation: "start startup abort watcher",
-            source,
-        })
-        .map(|_| ())
+    Ok(())
 }
 
-fn watch_startup(abort: EventHandle, completion: &'static EventHandle) {
-    let handles = [abort.0, completion.0];
-    match unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), FALSE, INFINITE) }
-    {
-        WAIT_OBJECT_0 => abort_startup(),
-        result if result == WAIT_OBJECT_0 + 1 => {}
-        _ => std::process::exit(1),
-    }
-}
-
-fn abort_startup() {
+pub(crate) fn abort_startup() {
     loop {
-        match REPORT_STATE.load(Ordering::Acquire) {
-            STATE_INITIATOR_REPORTING => std::process::exit(1),
-            STATE_STARTING => {
+        let state = REPORT_STATE.load(Ordering::Acquire);
+        match startup_channel_failure_action(state) {
+            StartupChannelFailureAction::Exit => std::process::exit(1),
+            StartupChannelFailureAction::ClaimAndExit => {
                 if REPORT_STATE
                     .compare_exchange(
                         STATE_STARTING,
@@ -157,8 +105,16 @@ fn abort_startup() {
                     std::process::exit(1);
                 }
             }
-            _ => return,
+            StartupChannelFailureAction::Ignore => return,
         }
+    }
+}
+
+fn startup_channel_failure_action(state: u8) -> StartupChannelFailureAction {
+    match state {
+        STATE_INITIATOR_REPORTING => StartupChannelFailureAction::Exit,
+        STATE_STARTING => StartupChannelFailureAction::ClaimAndExit,
+        _ => StartupChannelFailureAction::Ignore,
     }
 }
 
@@ -218,7 +174,7 @@ pub(crate) fn claim_startup_failure() -> bool {
 }
 
 pub(crate) fn complete_startup() -> Result<(), InjectorError> {
-    let result = match REPORT_STATE.compare_exchange(
+    match REPORT_STATE.compare_exchange(
         STATE_STARTING,
         STATE_RUNNING,
         Ordering::AcqRel,
@@ -230,17 +186,7 @@ pub(crate) fn complete_startup() -> Result<(), InjectorError> {
         Err(_) => Err(InjectorError::HostStartupFailed(
             "startup reporting ownership was already committed".to_string(),
         )),
-    };
-    if result.is_ok()
-        && let Some(events) = STARTUP_EVENTS.get()
-        && !events.completion.signal()
-    {
-        return Err(InjectorError::HostLaunchFailed {
-            operation: "signal startup completion",
-            source: std::io::Error::last_os_error(),
-        });
     }
-    result
 }
 
 pub(crate) fn was_reported() -> bool {
@@ -263,12 +209,15 @@ fn wide_null(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr::null_mut;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use windows_sys::Win32::Foundation::{TRUE, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
     use super::*;
 
+    const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
     static NEXT_EVENT_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
@@ -294,5 +243,25 @@ mod tests {
 
         assert!(opened.signal());
         assert_eq!(unsafe { WaitForSingleObject(opened.0, 0) }, WAIT_OBJECT_0);
+    }
+
+    #[test]
+    fn startup_channel_failure_exits_only_before_startup_commit() {
+        assert_eq!(
+            startup_channel_failure_action(STATE_STARTING),
+            StartupChannelFailureAction::ClaimAndExit
+        );
+        assert_eq!(
+            startup_channel_failure_action(STATE_INITIATOR_REPORTING),
+            StartupChannelFailureAction::Exit
+        );
+        assert_eq!(
+            startup_channel_failure_action(STATE_BACKGROUND_REPORTING_PANIC),
+            StartupChannelFailureAction::Ignore
+        );
+        assert_eq!(
+            startup_channel_failure_action(STATE_RUNNING),
+            StartupChannelFailureAction::Ignore
+        );
     }
 }

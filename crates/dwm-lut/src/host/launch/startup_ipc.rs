@@ -2,7 +2,8 @@ use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{
@@ -15,8 +16,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_MESSAGE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+    PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, GetExitCodeProcess, GetProcessId, SetEvent, WaitForMultipleObjects,
@@ -38,34 +39,74 @@ const STARTUP_FAILURE_KIND_HOST_ALREADY_RUNNING: &str = "host_already_running";
 static STARTUP_PIPE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct StartupNotifier {
-    pipe_name: Vec<u16>,
+    pipe: Arc<ProcessHandle>,
+    ready_for_ack: Arc<AtomicBool>,
+    acknowledgement: mpsc::Receiver<Result<(), InjectorError>>,
 }
 
 impl StartupNotifier {
-    pub(crate) fn new(pipe_name: String) -> Self {
-        Self {
-            pipe_name: OsStr::new(&pipe_name)
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect(),
+    pub(crate) fn connect(pipe_name: String) -> Result<Self, InjectorError> {
+        let pipe_name = OsStr::new(&pipe_name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let handle = unsafe {
+            CreateFileW(
+                pipe_name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(InjectorError::HostLaunchFailed {
+                operation: "connect startup result pipe",
+                source: last_os_error(),
+            });
         }
+
+        let pipe = Arc::new(ProcessHandle(handle));
+        let ready_for_ack = Arc::new(AtomicBool::new(false));
+        let (acknowledgement_sender, acknowledgement) = mpsc::sync_channel(1);
+        let watcher_pipe = Arc::clone(&pipe);
+        let watcher_ready_for_ack = Arc::clone(&ready_for_ack);
+        std::thread::Builder::new()
+            .name("dwm-lut-startup-channel".to_string())
+            .spawn(move || {
+                watch_startup_channel(watcher_pipe, watcher_ready_for_ack, acknowledgement_sender);
+            })
+            .map_err(|source| InjectorError::HostLaunchFailed {
+                operation: "start startup channel watcher",
+                source,
+            })?;
+
+        Ok(Self {
+            pipe,
+            ready_for_ack,
+            acknowledgement,
+        })
     }
 
     pub(crate) fn notify_success(self) -> Result<(), InjectorError> {
-        let handle = self.connect()?;
+        self.ready_for_ack.store(true, Ordering::Release);
         write_message_with_timeout(
-            handle.0,
+            self.pipe.0,
             STARTUP_RESULT_OK.as_bytes(),
             STARTUP_RESULT_TIMEOUT,
             "write startup result",
         )?;
-        let acknowledgement = read_message_with_timeout(
-            handle.0,
-            STARTUP_RESULT_ACK.len(),
-            STARTUP_RESULT_TIMEOUT,
-            "read startup result acknowledgement",
-        )?;
-        parse_startup_ack(&acknowledgement)
+        match self.acknowledgement.recv_timeout(STARTUP_RESULT_TIMEOUT) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(InjectorError::HostStartupFailed(
+                "read startup result acknowledgement timed out".to_string(),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(InjectorError::HostStartupFailed(
+                "startup channel watcher stopped before acknowledgement".to_string(),
+            )),
+        }
     }
 
     pub(crate) fn notify_failure(self, error: &InjectorError) -> Result<(), InjectorError> {
@@ -82,35 +123,37 @@ impl StartupNotifier {
                 "startup result exceeded maximum length".to_string(),
             ));
         }
-        let handle = self.connect()?;
         write_message_with_timeout(
-            handle.0,
+            self.pipe.0,
             &bytes,
             STARTUP_RESULT_TIMEOUT,
             "write startup result",
         )
     }
+}
 
-    fn connect(&self) -> Result<ProcessHandle, InjectorError> {
-        let handle = unsafe {
-            CreateFileW(
-                self.pipe_name.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                null(),
-                OPEN_EXISTING,
-                FILE_FLAG_OVERLAPPED,
-                null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(InjectorError::HostLaunchFailed {
-                operation: "connect startup result pipe",
-                source: last_os_error(),
-            });
+fn watch_startup_channel(
+    pipe: Arc<ProcessHandle>,
+    ready_for_ack: Arc<AtomicBool>,
+    acknowledgement: mpsc::SyncSender<Result<(), InjectorError>>,
+) {
+    let result = read_message_waiting(
+        pipe.0,
+        STARTUP_RESULT_ACK.len(),
+        "read startup result acknowledgement",
+    )
+    .and_then(|message| {
+        if !ready_for_ack.load(Ordering::Acquire) {
+            return Err(InjectorError::HostStartupFailed(
+                "startup result acknowledgement arrived before startup result".to_string(),
+            ));
         }
-        Ok(ProcessHandle(handle))
+        parse_startup_ack(&message)
+    });
+    if result.is_err() {
+        crate::panic_report::abort_startup();
     }
+    let _ = acknowledgement.send(result);
 }
 
 pub(super) struct StartupEvent {
@@ -149,6 +192,7 @@ impl StartupEvent {
         self.event.0
     }
 
+    #[cfg(test)]
     fn signal(&self, operation: &'static str) -> Result<(), InjectorError> {
         if unsafe { SetEvent(self.handle()) } == FALSE {
             return Err(InjectorError::HostLaunchFailed {
@@ -246,16 +290,32 @@ impl StartupResultPipe {
         mut self,
         process: &elevation::ElevatedProcess,
         panic_event: &StartupEvent,
-        abort_event: &StartupEvent,
     ) -> Result<(), InjectorError> {
         let deadline = Instant::now() + STARTUP_RESULT_TIMEOUT;
-        wait_for_startup_operation(
-            self.connect.event(),
-            panic_event,
-            abort_event,
-            process,
-            deadline,
-        )?;
+        let result = self.wait_inner(process, panic_event, deadline);
+        match result {
+            Ok(()) => Ok(()),
+            Err(StartupWaitFailure::Error(error)) => Err(error),
+            Err(StartupWaitFailure::Timeout) => {
+                if self.connect.is_pending() {
+                    self.connect.cancel_and_wait(self.pipe.0);
+                }
+                unsafe {
+                    DisconnectNamedPipe(self.pipe.0);
+                }
+                drop(self);
+                wait_after_startup_disconnect(process, panic_event)
+            }
+        }
+    }
+
+    fn wait_inner(
+        &mut self,
+        process: &elevation::ElevatedProcess,
+        panic_event: &StartupEvent,
+        deadline: Instant,
+    ) -> StartupWaitResult<()> {
+        wait_for_startup_operation(self.connect.event(), panic_event, process, deadline)?;
         if self.connect.is_pending() {
             self.connect
                 .result(self.pipe.0, "complete startup result pipe connection")?;
@@ -268,19 +328,35 @@ impl StartupResultPipe {
             return Err(InjectorError::HostLaunchFailed {
                 operation: "identify startup result pipe client",
                 source: last_os_error(),
-            });
+            }
+            .into());
         }
         if expected_pid == 0 || actual_pid != expected_pid {
             return Err(InjectorError::HostStartupFailed(
                 "startup result pipe client did not match the launched host process".to_string(),
-            ));
+            )
+            .into());
         }
 
-        let message = read_startup_result(&self.pipe, panic_event, abort_event, process, deadline)?;
+        let message = read_startup_result(&self.pipe, panic_event, process, deadline)?;
         panic_event.ensure_not_reported()?;
         parse_startup_result(&message)?;
-        write_startup_ack(&self.pipe, panic_event, abort_event, process, deadline)?;
-        panic_event.ensure_not_reported()
+        write_startup_ack(&self.pipe, panic_event, process, deadline)?;
+        panic_event.ensure_not_reported()?;
+        Ok(())
+    }
+}
+
+enum StartupWaitFailure {
+    Timeout,
+    Error(InjectorError),
+}
+
+type StartupWaitResult<T> = Result<T, StartupWaitFailure>;
+
+impl From<InjectorError> for StartupWaitFailure {
+    fn from(error: InjectorError) -> Self {
+        Self::Error(error)
     }
 }
 
@@ -353,38 +429,37 @@ fn startup_failure_kind(error: &InjectorError) -> &'static str {
 fn wait_for_startup_operation(
     operation_event: HANDLE,
     panic_event: &StartupEvent,
-    abort_event: &StartupEvent,
     process: &elevation::ElevatedProcess,
     deadline: Instant,
-) -> Result<(), InjectorError> {
+) -> StartupWaitResult<()> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return abort_after_startup_timeout(process, panic_event, abort_event);
+        return Err(StartupWaitFailure::Timeout);
     }
     let timeout = u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX);
     let handles = [panic_event.handle(), operation_event, process.handle()];
     let wait = unsafe { WaitForMultipleObjects(3, handles.as_ptr(), FALSE, timeout) };
     match wait {
-        WAIT_OBJECT_0 => Err(InjectorError::HostPanicAlreadyReported),
+        WAIT_OBJECT_0 => Err(InjectorError::HostPanicAlreadyReported.into()),
         value if value == WAIT_OBJECT_0 + 1 => Ok(()),
-        value if value == WAIT_OBJECT_0 + 2 => Err(host_exited_before_startup(process)),
-        WAIT_TIMEOUT => abort_after_startup_timeout(process, panic_event, abort_event),
+        value if value == WAIT_OBJECT_0 + 2 => Err(host_exited_before_startup(process).into()),
+        WAIT_TIMEOUT => Err(StartupWaitFailure::Timeout),
         WAIT_FAILED => Err(InjectorError::HostLaunchFailed {
             operation: "wait for host startup result",
             source: last_os_error(),
-        }),
+        }
+        .into()),
         value => Err(InjectorError::HostStartupFailed(format!(
             "unexpected host startup wait result {value:#x}"
-        ))),
+        ))
+        .into()),
     }
 }
 
-fn abort_after_startup_timeout(
+fn wait_after_startup_disconnect(
     process: &elevation::ElevatedProcess,
     panic_event: &StartupEvent,
-    abort_event: &StartupEvent,
 ) -> Result<(), InjectorError> {
-    abort_event.signal("request host abort after startup timeout")?;
     let timeout = u32::try_from(STARTUP_TERMINATION_TIMEOUT.as_millis()).unwrap_or(u32::MAX);
     let handles = [panic_event.handle(), process.handle()];
     match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), FALSE, timeout) } {
@@ -422,10 +497,9 @@ fn host_exited_before_startup(process: &elevation::ElevatedProcess) -> InjectorE
 fn read_startup_result(
     pipe: &ProcessHandle,
     panic_event: &StartupEvent,
-    abort_event: &StartupEvent,
     process: &elevation::ElevatedProcess,
     deadline: Instant,
-) -> Result<String, InjectorError> {
+) -> StartupWaitResult<String> {
     let mut bytes = vec![0u8; STARTUP_RESULT_MAX_BYTES];
     let mut operation = OverlappedOperation::new("create startup result read event")?;
     let mut read = 0u32;
@@ -443,25 +517,21 @@ fn read_startup_result(
         match error.raw_os_error() {
             Some(code) if code == ERROR_IO_PENDING as i32 => {
                 operation.mark_pending(pipe.0);
-                wait_for_startup_operation(
-                    operation.event(),
-                    panic_event,
-                    abort_event,
-                    process,
-                    deadline,
-                )?;
+                wait_for_startup_operation(operation.event(), panic_event, process, deadline)?;
                 read = operation.result(pipe.0, "read startup result")?;
             }
             Some(code) if code == ERROR_MORE_DATA as i32 => {
                 return Err(InjectorError::HostStartupFailed(
                     "startup result exceeded maximum length".to_string(),
-                ));
+                )
+                .into());
             }
             _ => {
                 return Err(InjectorError::HostLaunchFailed {
                     operation: "read startup result",
                     source: error,
-                });
+                }
+                .into());
             }
         }
     }
@@ -473,10 +543,9 @@ fn read_startup_result(
 fn write_startup_ack(
     pipe: &ProcessHandle,
     panic_event: &StartupEvent,
-    abort_event: &StartupEvent,
     process: &elevation::ElevatedProcess,
     deadline: Instant,
-) -> Result<(), InjectorError> {
+) -> StartupWaitResult<()> {
     let mut operation = OverlappedOperation::new("create startup acknowledgement write event")?;
     let mut written = 0u32;
     let bytes = STARTUP_RESULT_ACK.as_bytes();
@@ -495,19 +564,15 @@ fn write_startup_ack(
             return Err(InjectorError::HostLaunchFailed {
                 operation: "write startup result acknowledgement",
                 source: error,
-            });
+            }
+            .into());
         }
         operation.mark_pending(pipe.0);
-        wait_for_startup_operation(
-            operation.event(),
-            panic_event,
-            abort_event,
-            process,
-            deadline,
-        )?;
+        wait_for_startup_operation(operation.event(), panic_event, process, deadline)?;
         written = operation.result(pipe.0, "write startup result acknowledgement")?;
     }
-    verify_complete_write(bytes.len(), written, "startup result acknowledgement")
+    verify_complete_write(bytes.len(), written, "startup result acknowledgement")?;
+    Ok(())
 }
 
 fn write_message_with_timeout(
@@ -545,10 +610,9 @@ fn write_message_with_timeout(
     verify_complete_write(bytes.len(), written, "startup result")
 }
 
-fn read_message_with_timeout(
+fn read_message_waiting(
     handle: HANDLE,
     max_bytes: usize,
-    timeout: Duration,
     operation_name: &'static str,
 ) -> Result<String, InjectorError> {
     let mut bytes = vec![0u8; max_bytes];
@@ -572,8 +636,7 @@ fn read_message_with_timeout(
             });
         }
         operation.mark_pending(handle);
-        wait_for_event(operation.event(), timeout, operation_name)?;
-        read = operation.result(handle, operation_name)?;
+        read = operation.result_waiting(handle, operation_name)?;
     }
     bytes.truncate(read as usize);
     Ok(String::from_utf8_lossy(&bytes).into_owned())
@@ -657,9 +720,26 @@ impl OverlappedOperation {
     }
 
     fn result(&mut self, handle: HANDLE, operation: &'static str) -> Result<u32, InjectorError> {
+        self.result_with_wait(handle, operation, FALSE)
+    }
+
+    fn result_waiting(
+        &mut self,
+        handle: HANDLE,
+        operation: &'static str,
+    ) -> Result<u32, InjectorError> {
+        self.result_with_wait(handle, operation, TRUE)
+    }
+
+    fn result_with_wait(
+        &mut self,
+        handle: HANDLE,
+        operation: &'static str,
+        wait: i32,
+    ) -> Result<u32, InjectorError> {
         let mut transferred = 0u32;
         let ok = unsafe {
-            GetOverlappedResult(handle, self.overlapped.as_mut(), &mut transferred, FALSE)
+            GetOverlappedResult(handle, self.overlapped.as_mut(), &mut transferred, wait)
         };
         self.pending_handle = None;
         if ok == FALSE {
@@ -695,6 +775,10 @@ impl Drop for OverlappedOperation {
 }
 
 struct ProcessHandle(HANDLE);
+
+// Windows handles may be used from multiple threads. Arc ensures the handle is closed once.
+unsafe impl Send for ProcessHandle {}
+unsafe impl Sync for ProcessHandle {}
 
 impl Drop for ProcessHandle {
     fn drop(&mut self) {

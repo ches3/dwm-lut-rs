@@ -69,16 +69,14 @@ pub fn run_host(options: BackgroundOptions) -> Result<(), InjectorError> {
         dll_path,
         startup_result_pipe,
         panic_report_event,
-        startup_abort_event,
     } = options;
     let startup_reporting_configured = startup_result_pipe.is_some();
-    let mut startup_notifier = startup_result_pipe.map(StartupNotifier::new);
+    let mut startup_notifier = None;
     let startup_completed = Arc::new(AtomicBool::new(false));
-    let result = panic_report::configure(
-        panic_report_event.as_deref(),
-        startup_abort_event.as_deref(),
-    )
-    .and_then(|()| {
+    let result = panic_report::configure(panic_report_event.as_deref()).and_then(|()| {
+        startup_notifier = startup_result_pipe
+            .map(StartupNotifier::connect)
+            .transpose()?;
         run_host_inner(
             dll_path,
             &mut startup_notifier,
@@ -235,9 +233,9 @@ impl Drop for UiExitOnDrop {
     }
 }
 
-fn send_startup_notifier(
-    sender: mpsc::SyncSender<Option<StartupNotifier>>,
-    startup_notifier: &mut Option<StartupNotifier>,
+fn send_startup_notifier<T>(
+    sender: mpsc::SyncSender<Option<T>>,
+    startup_notifier: &mut Option<T>,
 ) -> Result<(), InjectorError> {
     if let Err(error) = sender.send(startup_notifier.take()) {
         *startup_notifier = error.0;
@@ -346,9 +344,7 @@ mod tests {
     fn notifier_transfer_failure_restores_startup_notifier() {
         let (sender, receiver) = mpsc::sync_channel(1);
         drop(receiver);
-        let mut notifier = Some(StartupNotifier::new(
-            r"\\.\pipe\dwm-lut-test-startup".to_string(),
-        ));
+        let mut notifier = Some("startup notifier");
 
         let error = send_startup_notifier(sender, &mut notifier)
             .expect_err("disconnected transfer must fail");

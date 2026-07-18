@@ -25,12 +25,10 @@ pub(crate) fn start_background_host(
     require_same_user_elevation()?;
     let startup_pipe = StartupResultPipe::new()?;
     let panic_event = StartupEvent::new("panic", "create panic report event")?;
-    let abort_event = StartupEvent::new("abort", "create startup abort event")?;
     let command_line = host_parameters(
         dll_path.as_deref(),
         Some(startup_pipe.name()),
         Some(panic_event.name()),
-        Some(abort_event.name()),
     );
     let process = elevation::run_as(executable, &command_line).map_err(|error| match error {
         elevation::RunAsError::Cancelled => InjectorError::HostElevationCancelled,
@@ -42,7 +40,7 @@ pub(crate) fn start_background_host(
             "elevated host launch returned no process handle".to_string(),
         ),
     })?;
-    startup_pipe.wait(&process, &panic_event, &abort_event)
+    startup_pipe.wait(&process, &panic_event)
 }
 
 fn require_same_user_elevation() -> Result<(), InjectorError> {
@@ -78,7 +76,6 @@ fn host_parameters(
     dll_path: Option<&Path>,
     startup_result_pipe: Option<&str>,
     panic_report_event: Option<&str>,
-    startup_abort_event: Option<&str>,
 ) -> Vec<u16> {
     let mut args = vec![OsString::from("--background")];
     if let Some(pipe_name) = startup_result_pipe {
@@ -87,10 +84,6 @@ fn host_parameters(
     }
     if let Some(event_name) = panic_report_event {
         args.push(OsString::from("--panic-report-event"));
-        args.push(OsString::from(event_name));
-    }
-    if let Some(event_name) = startup_abort_event {
-        args.push(OsString::from("--startup-abort-event"));
         args.push(OsString::from(event_name));
     }
     if let Some(dll_path) = dll_path {
@@ -207,13 +200,12 @@ mod tests {
             Some(Path::new(r"C:\hook dll\dwm_lut_hook.dll")),
             Some(r"\\.\pipe\dwm-lut-rs-startup-1234"),
             Some(r"Local\dwm-lut-rs-panic-1234"),
-            Some(r"Local\dwm-lut-rs-abort-1234"),
         );
 
         assert_eq!(
             command_line,
             wide(
-                r#"--background --startup-result-pipe \\.\pipe\dwm-lut-rs-startup-1234 --panic-report-event Local\dwm-lut-rs-panic-1234 --startup-abort-event Local\dwm-lut-rs-abort-1234 --dll "C:\hook dll\dwm_lut_hook.dll""#
+                r#"--background --startup-result-pipe \\.\pipe\dwm-lut-rs-startup-1234 --panic-report-event Local\dwm-lut-rs-panic-1234 --dll "C:\hook dll\dwm_lut_hook.dll""#
             )
         );
     }

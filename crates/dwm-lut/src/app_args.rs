@@ -14,7 +14,6 @@ pub struct BackgroundOptions {
     pub dll_path: Option<PathBuf>,
     pub startup_result_pipe: Option<String>,
     pub panic_report_event: Option<String>,
-    pub startup_abort_event: Option<String>,
 }
 
 pub fn parse_app_args() -> Result<AppMode, InjectorError> {
@@ -28,7 +27,6 @@ pub fn parse_app_args_from(
     let mut dll_path = None;
     let mut startup_result_pipe = None;
     let mut panic_report_event = None;
-    let mut startup_abort_event = None;
     let mut args = args.into_iter().map(Into::into);
     let _program = args.next();
 
@@ -73,17 +71,6 @@ pub fn parse_app_args_from(
                     "--panic-report-event may only be specified once".to_string(),
                 ));
             }
-            "--startup-abort-event" if startup_abort_event.is_none() => {
-                let value = args.next().ok_or_else(|| {
-                    InjectorError::Usage("--startup-abort-event requires a value".to_string())
-                })?;
-                startup_abort_event = Some(value.to_string_lossy().into_owned());
-            }
-            "--startup-abort-event" => {
-                return Err(InjectorError::Usage(
-                    "--startup-abort-event may only be specified once".to_string(),
-                ));
-            }
             other => {
                 return Err(InjectorError::Usage(format!(
                     "unknown application argument: {other}"
@@ -93,11 +80,7 @@ pub fn parse_app_args_from(
     }
 
     if !background {
-        if dll_path.is_some()
-            || startup_result_pipe.is_some()
-            || panic_report_event.is_some()
-            || startup_abort_event.is_some()
-        {
+        if dll_path.is_some() || startup_result_pipe.is_some() || panic_report_event.is_some() {
             return Err(InjectorError::Usage(
                 "internal background options require --background".to_string(),
             ));
@@ -105,18 +88,13 @@ pub fn parse_app_args_from(
         return Ok(AppMode::Launcher);
     }
 
-    let coordination_argument_count = [
-        startup_result_pipe.is_some(),
-        panic_report_event.is_some(),
-        startup_abort_event.is_some(),
-    ]
-    .into_iter()
-    .filter(|present| *present)
-    .count();
-    if coordination_argument_count != 0 && coordination_argument_count != 3 {
+    let coordination_argument_count = [startup_result_pipe.is_some(), panic_report_event.is_some()]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+    if coordination_argument_count != 0 && coordination_argument_count != 2 {
         return Err(InjectorError::Usage(
-            "--startup-result-pipe, --panic-report-event, and --startup-abort-event must be specified together"
-                .to_string(),
+            "--startup-result-pipe and --panic-report-event must be specified together".to_string(),
         ));
     }
 
@@ -124,7 +102,6 @@ pub fn parse_app_args_from(
         dll_path,
         startup_result_pipe,
         panic_report_event,
-        startup_abort_event,
     }))
 }
 
@@ -151,8 +128,6 @@ mod tests {
             r"\\.\pipe\startup",
             "--panic-report-event",
             r"Local\dwm-lut-rs-panic-test",
-            "--startup-abort-event",
-            r"Local\dwm-lut-rs-abort-test",
         ])
         .unwrap();
 
@@ -162,7 +137,6 @@ mod tests {
                 dll_path: Some(PathBuf::from("hook.dll")),
                 startup_result_pipe: Some(r"\\.\pipe\startup".to_string()),
                 panic_report_event: Some(r"Local\dwm-lut-rs-panic-test".to_string()),
-                startup_abort_event: Some(r"Local\dwm-lut-rs-abort-test".to_string()),
             })
         );
     }
@@ -198,8 +172,6 @@ mod tests {
             "--background",
             "--panic-report-event",
             r"Local\dwm-lut-rs-panic-test",
-            "--startup-abort-event",
-            r"Local\dwm-lut-rs-abort-test",
         ])
         .expect_err("panic event must require startup result pipe");
 
