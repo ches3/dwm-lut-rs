@@ -1,16 +1,27 @@
-use std::ffi::OsStr;
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::time::Duration;
 
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 
+use crate::control::protocol::{MAX_CONTROL_MESSAGE_BYTES, validate_message_len};
 use crate::error::InjectorError;
 
 pub(crate) mod client;
 pub(crate) mod protocol;
 pub(crate) mod server;
+
+pub(crate) fn build_runtime(
+    operation: &'static str,
+) -> Result<tokio::runtime::Runtime, InjectorError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|source| InjectorError::ControlPipe { operation, source })
+}
 
 pub(crate) fn current_pipe_name() -> Result<String, InjectorError> {
     let session_id = current_session_id()?;
@@ -31,13 +42,47 @@ fn current_session_id() -> Result<u32, InjectorError> {
     Ok(session_id)
 }
 
-pub(crate) fn wide_null(value: &str) -> Vec<u16> {
-    OsStr::new(value)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-
 pub(crate) fn last_os_error() -> io::Error {
     io::Error::from_raw_os_error(unsafe { GetLastError() } as i32)
+}
+
+async fn read_message<T>(
+    pipe: &mut T,
+    timeout: Duration,
+    operation: &'static str,
+) -> Result<Vec<u8>, InjectorError>
+where
+    T: AsyncRead + Unpin,
+{
+    let mut buffer = vec![0u8; MAX_CONTROL_MESSAGE_BYTES];
+    let read = tokio::time::timeout(timeout, pipe.read(&mut buffer))
+        .await
+        .map_err(|_| InjectorError::ControlTimeout { operation })?
+        .map_err(|source| InjectorError::ControlPipe { operation, source })?;
+    validate_message_len(read)?;
+    buffer.truncate(read);
+    Ok(buffer)
+}
+
+async fn write_message<T>(
+    pipe: &mut T,
+    bytes: &[u8],
+    timeout: Duration,
+    operation: &'static str,
+) -> Result<(), InjectorError>
+where
+    T: AsyncWrite + Unpin,
+{
+    validate_message_len(bytes.len())?;
+    let written = tokio::time::timeout(timeout, pipe.write(bytes))
+        .await
+        .map_err(|_| InjectorError::ControlTimeout { operation })?
+        .map_err(|source| InjectorError::ControlPipe { operation, source })?;
+    if written != bytes.len() {
+        return Err(InjectorError::ControlProtocol(format!(
+            "partial {operation}: wrote {written} of {} bytes",
+            bytes.len()
+        )));
+    }
+    Ok(())
 }

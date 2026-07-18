@@ -50,7 +50,7 @@ impl HostApplication {
 
     pub(crate) fn request_exit(self: &Arc<Self>) -> Result<(), HostCommandError> {
         let permit = self.controller.prepare_stop()?;
-        self.shutdown.request()?;
+        self.shutdown.request();
         permit.commit();
         Ok(())
     }
@@ -58,8 +58,7 @@ impl HostApplication {
     #[cfg(test)]
     pub(crate) fn test_instance() -> Arc<Self> {
         let controller = Arc::new(HostController::new(None));
-        let shutdown =
-            Arc::new(ServerShutdown::new().expect("test shutdown event should be created"));
+        let shutdown = Arc::new(ServerShutdown::new());
         let (ui, _commands) = UiHandle::new();
         Arc::new(Self::new(controller, shutdown, ui))
     }
@@ -107,7 +106,7 @@ impl HostApplication {
                             ControlStatus::Stopped,
                         ),
                         move || {
-                            shutdown.request()?;
+                            shutdown.request();
                             permit.commit();
                             ui.send(UiCommand::Exit)
                         },
@@ -237,7 +236,7 @@ mod tests {
         Receiver<UiCommand>,
     ) {
         let controller = Arc::new(HostController::new(None));
-        let shutdown = Arc::new(ServerShutdown::new().unwrap());
+        let shutdown = Arc::new(ServerShutdown::new());
         let (ui, commands) = UiHandle::new();
         (
             Arc::new(HostApplication::new(Arc::clone(&controller), shutdown, ui)),

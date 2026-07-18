@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::InjectorError;
 
-pub(crate) const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_CONTROL_MESSAGE_BYTES: usize = 4 * 1024;
 pub(crate) const CONTROL_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
