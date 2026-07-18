@@ -9,6 +9,7 @@ use crate::error::InjectorError;
 use crate::host::{HostCommandError, HostController, HostState, MutationCompletion};
 use crate::inject::{ApplyReport, DisableReport};
 use crate::monitor::{MonitorListing, list_monitor_listings};
+use crate::platform;
 
 use super::fonts::{FontError, FontUpdate, SystemFonts};
 use super::tray::{TrayAction, TrayState};
@@ -127,10 +128,16 @@ enum MonitorRefresh {
     Scheduled { at: Instant, retry_after: bool },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorPresentation {
+    Egui,
+    Native,
+}
+
 enum GuiMutationState {
     Idle,
-    AwaitingApplyResult(MutationCompletion<ApplyReport>),
-    AwaitingDisableResult(MutationCompletion<DisableReport>),
+    AwaitingApplyResult(MutationCompletion<ApplyReport>, ErrorPresentation),
+    AwaitingDisableResult(MutationCompletion<DisableReport>, ErrorPresentation),
 }
 
 impl GuiMutationState {
@@ -141,20 +148,20 @@ impl GuiMutationState {
     fn status_label(&self) -> Option<&'static str> {
         match self {
             Self::Idle => None,
-            Self::AwaitingApplyResult(_) => Some("Applying LUT configuration..."),
-            Self::AwaitingDisableResult(_) => Some("Disabling LUT..."),
+            Self::AwaitingApplyResult(_, _) => Some("Applying LUT configuration..."),
+            Self::AwaitingDisableResult(_, _) => Some("Disabling LUT..."),
         }
     }
 
-    fn try_take_result(&mut self) -> Option<Result<(), HostCommandError>> {
+    fn try_take_result(&mut self) -> Option<(Result<(), HostCommandError>, ErrorPresentation)> {
         match self {
             Self::Idle => None,
-            Self::AwaitingApplyResult(completion) => {
-                completion.try_take().map(|result| result.map(|_| ()))
-            }
-            Self::AwaitingDisableResult(completion) => {
-                completion.try_take().map(|result| result.map(|_| ()))
-            }
+            Self::AwaitingApplyResult(completion, presentation) => completion
+                .try_take()
+                .map(|result| (result.map(|_| ()), *presentation)),
+            Self::AwaitingDisableResult(completion, presentation) => completion
+                .try_take()
+                .map(|result| (result.map(|_| ()), *presentation)),
         }
     }
 }
@@ -233,6 +240,7 @@ impl DwmLutApp {
         if app.config_load_error().is_some() {
             resize_viewport_for_config_state(context, true);
         }
+        app.sync_tray_items();
         Ok(app)
     }
 
@@ -366,11 +374,12 @@ impl DwmLutApp {
         self.profile_dialog_error = None;
         self.clear_lut_browse();
         self.font_texts_dirty = true;
+        self.sync_tray_items();
     }
 
     pub(super) fn controls_disabled(&self) -> bool {
         self.mutation_state.is_awaiting_result()
-            || self.controller.state() == HostState::Mutating
+            || self.controller.state() != HostState::Idle
             || self.modal.is_some()
             || self.lut_browse.is_active()
     }
@@ -379,14 +388,24 @@ impl DwmLutApp {
         if !self.mutation_state.is_awaiting_result() {
             return;
         }
-        let Some(result) = self.mutation_state.try_take_result() else {
+        let Some((result, presentation)) = self.mutation_state.try_take_result() else {
             context.request_repaint_after(MUTATION_POLL_INTERVAL);
             return;
         };
         self.mutation_state = GuiMutationState::Idle;
-        match result {
-            Ok(()) => {}
-            Err(error) => self.show_error(error.to_string()),
+        if let Err(error) = result {
+            self.report_mutation_error(error.to_string(), presentation);
+        }
+    }
+
+    fn report_mutation_error(
+        &mut self,
+        message: impl Into<String>,
+        presentation: ErrorPresentation,
+    ) {
+        match presentation {
+            ErrorPresentation::Egui => self.show_error(message),
+            ErrorPresentation::Native => platform::show_error(&message.into()),
         }
     }
 
@@ -439,34 +458,66 @@ impl DwmLutApp {
     }
 
     pub(super) fn apply(&mut self, context: &egui::Context) {
-        if self.mutation_state.is_awaiting_result() {
-            return;
-        }
         let Some(editor) = self.editor() else {
             return;
         };
-        match self
-            .controller
-            .submit_apply(editor.path.clone(), Some(editor.selected_profile.clone()))
-        {
-            Ok(completion) => {
-                self.mutation_state = GuiMutationState::AwaitingApplyResult(completion);
-                context.request_repaint();
-            }
-            Err(error) => self.show_error(error.to_string()),
-        }
+        let path = editor.path.clone();
+        let profile = editor.selected_profile.clone();
+        self.submit_apply(context, path, profile, ErrorPresentation::Egui);
     }
 
     pub(super) fn disable(&mut self, context: &egui::Context) {
+        self.submit_disable(context, ErrorPresentation::Egui);
+    }
+
+    fn apply_from_tray(&mut self, context: &egui::Context, profile: String) {
+        let Some(editor) = self.editor() else {
+            let message = self
+                .config_load_error()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "Configuration is not loaded.".to_string());
+            platform::show_error(&message);
+            return;
+        };
+        let path = editor.path.clone();
+        self.submit_apply(context, path, profile, ErrorPresentation::Native);
+    }
+
+    fn disable_from_tray(&mut self, context: &egui::Context) {
+        self.submit_disable(context, ErrorPresentation::Native);
+    }
+
+    fn submit_apply(
+        &mut self,
+        context: &egui::Context,
+        path: PathBuf,
+        profile: String,
+        presentation: ErrorPresentation,
+    ) {
+        if self.mutation_state.is_awaiting_result() {
+            return;
+        }
+        match self.controller.submit_apply(path, Some(profile)) {
+            Ok(completion) => {
+                self.mutation_state =
+                    GuiMutationState::AwaitingApplyResult(completion, presentation);
+                context.request_repaint();
+            }
+            Err(error) => self.report_mutation_error(error.to_string(), presentation),
+        }
+    }
+
+    fn submit_disable(&mut self, context: &egui::Context, presentation: ErrorPresentation) {
         if self.mutation_state.is_awaiting_result() {
             return;
         }
         match self.controller.submit_disable() {
             Ok(completion) => {
-                self.mutation_state = GuiMutationState::AwaitingDisableResult(completion);
+                self.mutation_state =
+                    GuiMutationState::AwaitingDisableResult(completion, presentation);
                 context.request_repaint();
             }
-            Err(error) => self.show_error(error.to_string()),
+            Err(error) => self.report_mutation_error(error.to_string(), presentation),
         }
     }
 
@@ -491,6 +542,7 @@ impl DwmLutApp {
         loop {
             match self.ui_commands.try_recv() {
                 Ok(UiCommand::Show) => self.open_window(context),
+                Ok(UiCommand::HostStateChanged) => self.sync_tray_items(),
                 Ok(UiCommand::Exit) => self.close_app(context),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -500,16 +552,36 @@ impl DwmLutApp {
             }
         }
 
-        self.tray.set_exit_enabled(self.can_exit());
         while let Some(action) = self.tray.poll() {
             match action {
                 TrayAction::Open => self.open_window(context),
+                TrayAction::Apply(profile) => self.apply_from_tray(context, profile),
+                TrayAction::Disable => self.disable_from_tray(context),
                 TrayAction::Exit => {
-                    self.stop_host(context);
+                    if self.can_exit() {
+                        self.stop_host(context);
+                    }
                     break;
                 }
             }
         }
+    }
+
+    fn sync_tray_items(&self) {
+        let host_idle =
+            !self.mutation_state.is_awaiting_result() && self.controller.state() == HostState::Idle;
+        if let Some(editor) = self.editor() {
+            self.tray.refresh_apply_profiles(
+                editor.document.profiles.keys().map(String::as_str),
+                &editor.document.default_profile,
+            );
+            self.tray.set_apply_enabled(host_idle);
+        } else {
+            self.tray.refresh_apply_profiles(std::iter::empty(), "");
+            self.tray.set_apply_enabled(false);
+        }
+        self.tray.set_disable_enabled(host_idle);
+        self.tray.set_exit_enabled(host_idle);
     }
 
     fn open_window(&mut self, context: &egui::Context) {
@@ -529,6 +601,7 @@ impl DwmLutApp {
         if load_failed_before != load_failed_after {
             resize_viewport_for_config_state(context, load_failed_after);
         }
+        self.sync_tray_items();
         self.show_window(context);
     }
 
@@ -600,6 +673,7 @@ impl DwmLutApp {
             .expect("configuration remained loaded during synchronous edit")
             .document = document;
         self.font_texts_dirty = true;
+        self.sync_tray_items();
         Ok(result)
     }
 
@@ -899,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn awaiting_mutation_result_disables_exit() {
+    fn pending_or_active_host_mutation_disables_exit() {
         assert!(!exit_is_available(true, HostState::Idle));
         assert!(!exit_is_available(false, HostState::Mutating));
         assert!(!exit_is_available(false, HostState::Stopping));
@@ -908,11 +982,17 @@ mod tests {
 
     #[test]
     fn disconnected_mutation_completion_reports_executor_failure() {
-        let mut state = GuiMutationState::AwaitingApplyResult(MutationCompletion::disconnected());
+        let mut state = GuiMutationState::AwaitingApplyResult(
+            MutationCompletion::disconnected(),
+            ErrorPresentation::Egui,
+        );
 
         assert!(matches!(
             state.try_take_result(),
-            Some(Err(HostCommandError::MutationExecutorStopped))
+            Some((
+                Err(HostCommandError::MutationExecutorStopped),
+                ErrorPresentation::Egui
+            ))
         ));
     }
 }

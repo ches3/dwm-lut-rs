@@ -14,9 +14,10 @@ use crate::host::HostController;
 use crate::config::{ConfigColorMode, ConfigDocument};
 use error::GuiError;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UiCommand {
     Show,
+    HostStateChanged,
     Exit,
 }
 

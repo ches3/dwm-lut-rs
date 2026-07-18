@@ -208,13 +208,15 @@ mod tests {
 
     #[test]
     fn dropping_stop_dispatch_before_completion_rolls_back_state() {
-        let (handler, controller, _commands) = test_handler();
+        let (handler, controller, commands) = test_handler();
 
         let dispatch = handler.dispatch(ControlCommand::Stop);
         assert_eq!(controller.state(), HostState::Stopping);
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
         drop(dispatch);
 
         assert_eq!(controller.state(), HostState::Idle);
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
     }
 
     #[test]
@@ -226,6 +228,7 @@ mod tests {
         dispatch.complete().unwrap();
 
         assert_eq!(controller.state(), HostState::Stopping);
-        assert!(matches!(commands.recv().unwrap(), UiCommand::Exit));
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
+        assert_eq!(commands.recv().unwrap(), UiCommand::Exit);
     }
 }

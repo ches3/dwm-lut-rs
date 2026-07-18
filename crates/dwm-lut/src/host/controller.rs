@@ -150,11 +150,29 @@ impl Drop for MutationExecutor {
 
 struct MutationStateGuard {
     state: Arc<Mutex<HostState>>,
+    ui: Arc<UiHandle>,
+    armed: bool,
+}
+
+impl MutationStateGuard {
+    fn complete<T>(
+        mut self,
+        sender: mpsc::SyncSender<Result<T, HostCommandError>>,
+        result: Result<T, HostCommandError>,
+    ) {
+        *lock_state(&self.state) = HostState::Idle;
+        self.armed = false;
+        let _ = sender.send(result);
+        notify_state_changed(&self.ui);
+    }
 }
 
 impl Drop for MutationStateGuard {
     fn drop(&mut self) {
-        *lock_state(&self.state) = HostState::Idle;
+        if self.armed {
+            *lock_state(&self.state) = HostState::Idle;
+            notify_state_changed(&self.ui);
+        }
     }
 }
 
@@ -236,6 +254,7 @@ impl HostController {
             HostState::Stopping => return Err(HostCommandError::Stopping),
         }
         drop(state);
+        notify_state_changed(&self.ui);
         Ok(PreparedStop {
             state: Arc::clone(&self.state),
             shutdown: Arc::clone(&self.shutdown),
@@ -262,15 +281,17 @@ impl HostController {
                 HostState::Stopping => return Err(HostCommandError::Stopping),
             }
         }
+        notify_state_changed(&self.ui);
 
         let guard = MutationStateGuard {
             state: Arc::clone(&self.state),
+            ui: Arc::clone(&self.ui),
+            armed: true,
         };
         let (sender, receiver) = mpsc::sync_channel(1);
         self.executor.submit(Box::new(move || {
             let result = operation();
-            drop(guard);
-            let _ = sender.send(result);
+            guard.complete(sender, result);
         }))?;
         Ok(MutationCompletion::new(receiver))
     }
@@ -295,6 +316,10 @@ fn lock_state(state: &Mutex<HostState>) -> MutexGuard<'_, HostState> {
     }
 }
 
+fn notify_state_changed(ui: &UiHandle) {
+    let _ = ui.send(UiCommand::HostStateChanged);
+}
+
 pub(crate) struct PreparedStop {
     state: Arc<Mutex<HostState>>,
     shutdown: Arc<ServerShutdown>,
@@ -314,6 +339,7 @@ impl Drop for PreparedStop {
     fn drop(&mut self) {
         if !self.committed {
             *lock_state(&self.state) = HostState::Idle;
+            notify_state_changed(&self.ui);
         }
     }
 }
@@ -382,6 +408,26 @@ mod tests {
     }
 
     #[test]
+    fn idle_notification_follows_completion_delivery() {
+        let (controller, commands) = test_controller();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let mut completion = controller
+            .submit_test_mutation(move || {
+                release_receiver.recv().unwrap();
+                Ok(42)
+            })
+            .unwrap();
+
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
+        release_sender.send(()).unwrap();
+        assert_eq!(
+            commands.recv_timeout(Duration::from_secs(1)).unwrap(),
+            UiCommand::HostStateChanged
+        );
+        assert_eq!(completion.try_take().unwrap().unwrap(), 42);
+    }
+
+    #[test]
     fn submitted_mutation_reserves_busy_state_before_execution() {
         let (controller, _commands) = test_controller();
         let (release_sender, release_receiver) = mpsc::channel();
@@ -411,7 +457,8 @@ mod tests {
     fn stopping_controller_rejects_mutations_and_show_gui() {
         let (controller, commands) = test_controller();
         controller.prepare_stop().unwrap().commit().unwrap();
-        assert!(matches!(commands.recv().unwrap(), UiCommand::Exit));
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
+        assert_eq!(commands.recv().unwrap(), UiCommand::Exit);
 
         assert!(matches!(
             controller.submit_test_mutation(|| Ok(())),
@@ -426,7 +473,7 @@ mod tests {
     #[test]
     fn stopped_executor_rejects_mutation_and_releases_busy_state() {
         let shutdown = Arc::new(ServerShutdown::new());
-        let (ui, _commands) = UiHandle::new();
+        let (ui, commands) = UiHandle::new();
         let controller = HostController {
             host_dll_path: None,
             state: Arc::new(Mutex::new(HostState::Idle)),
@@ -440,6 +487,8 @@ mod tests {
             Err(HostCommandError::MutationExecutorStopped)
         ));
         assert_eq!(controller.state(), HostState::Idle);
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
     }
 
     #[test]
@@ -454,13 +503,15 @@ mod tests {
 
     #[test]
     fn dropping_prepared_stop_rolls_back_state() {
-        let (controller, _commands) = test_controller();
+        let (controller, commands) = test_controller();
 
         let prepared = controller.prepare_stop().unwrap();
         assert_eq!(controller.state(), HostState::Stopping);
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
         drop(prepared);
 
         assert_eq!(controller.state(), HostState::Idle);
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
     }
 
     #[test]
@@ -470,7 +521,8 @@ mod tests {
         controller.prepare_stop().unwrap().commit().unwrap();
 
         assert_eq!(controller.state(), HostState::Stopping);
-        assert!(matches!(commands.recv().unwrap(), UiCommand::Exit));
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
+        assert_eq!(commands.recv().unwrap(), UiCommand::Exit);
     }
 
     #[test]
@@ -486,8 +538,10 @@ mod tests {
 
         controller.show_gui().unwrap();
 
-        assert!(matches!(commands.recv().unwrap(), UiCommand::Show));
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
+        assert_eq!(commands.recv().unwrap(), UiCommand::Show);
         release_sender.send(()).unwrap();
         mutation.wait().unwrap();
+        assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);
     }
 }
