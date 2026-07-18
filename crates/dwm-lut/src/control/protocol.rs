@@ -5,14 +5,18 @@ use serde::{Deserialize, Serialize};
 use crate::error::InjectorError;
 
 pub(crate) const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
-pub(crate) const CONTROL_PROTOCOL_VERSION: u32 = 2;
-pub(crate) const PROTOCOL_MISMATCH_STATUS: &str = "protocol_mismatch";
+pub(crate) const CONTROL_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ControlRequest {
     pub(crate) protocol_version: u32,
     #[serde(flatten)]
     pub(crate) command: ControlCommand,
+}
+
+#[derive(Deserialize)]
+struct ControlRequestEnvelope {
+    protocol_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,7 +28,27 @@ pub(crate) enum ControlCommand {
     },
     Disable,
     Status,
+    ShowGui,
     Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ControlStatus {
+    Running,
+    Stopping,
+    Shown,
+    Stopped,
+    Busy,
+    Replaced,
+    Initialized,
+    Reinitialized,
+    Disabled,
+    NotInjected,
+    NotInitialized,
+    AlreadyShutdown,
+    ProtocolMismatch,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,25 +56,25 @@ pub(crate) struct ControlResponse {
     pub(crate) protocol_version: u32,
     pub(crate) ok: bool,
     pub(crate) message: String,
-    pub(crate) status: String,
+    pub(crate) status: ControlStatus,
 }
 
 impl ControlResponse {
-    pub(crate) fn ok(message: impl Into<String>, status: impl Into<String>) -> Self {
+    pub(crate) fn ok(message: impl Into<String>, status: ControlStatus) -> Self {
         Self {
             protocol_version: CONTROL_PROTOCOL_VERSION,
             ok: true,
             message: message.into(),
-            status: status.into(),
+            status,
         }
     }
 
-    pub(crate) fn error(message: impl Into<String>, status: impl Into<String>) -> Self {
+    pub(crate) fn error(message: impl Into<String>, status: ControlStatus) -> Self {
         Self {
             protocol_version: CONTROL_PROTOCOL_VERSION,
             ok: false,
             message: message.into(),
-            status: status.into(),
+            status,
         }
     }
 
@@ -60,7 +84,7 @@ impl ControlResponse {
                 "control protocol version mismatch: peer={}, local={}; restart the host instance",
                 peer_version, CONTROL_PROTOCOL_VERSION
             ),
-            PROTOCOL_MISMATCH_STATUS,
+            ControlStatus::ProtocolMismatch,
         )
     }
 }
@@ -71,6 +95,10 @@ pub(crate) fn encode_request(request: &ControlRequest) -> Result<Vec<u8>, Inject
 
 pub(crate) fn decode_request(bytes: &[u8]) -> Result<ControlRequest, InjectorError> {
     decode_json(bytes)
+}
+
+pub(crate) fn decode_request_protocol_version(bytes: &[u8]) -> Result<u32, InjectorError> {
+    decode_json::<ControlRequestEnvelope>(bytes).map(|request| request.protocol_version)
 }
 
 pub(crate) fn encode_response(response: &ControlResponse) -> Result<Vec<u8>, InjectorError> {
@@ -115,7 +143,7 @@ pub(crate) fn validate_response_protocol(
     response: ControlResponse,
 ) -> Result<ControlResponse, InjectorError> {
     if response.protocol_version == CONTROL_PROTOCOL_VERSION
-        || response.status == PROTOCOL_MISMATCH_STATUS
+        || response.status == ControlStatus::ProtocolMismatch
     {
         return Ok(response);
     }
@@ -148,7 +176,7 @@ mod tests {
 
     #[test]
     fn response_roundtrips_through_json() {
-        let response = ControlResponse::ok("host instance is running", "running");
+        let response = ControlResponse::ok("host instance is running", ControlStatus::Running);
 
         let encoded = encode_response(&response).expect("response should encode");
         let decoded = decode_response(&encoded).expect("response should decode");
@@ -157,15 +185,22 @@ mod tests {
     }
 
     #[test]
-    fn stop_request_roundtrips_through_json() {
-        let request = ControlRequest {
-            protocol_version: CONTROL_PROTOCOL_VERSION,
-            command: ControlCommand::Stop,
-        };
+    fn unit_commands_use_expected_wire_format() {
+        for (command, command_name) in [
+            (ControlCommand::Stop, "stop"),
+            (ControlCommand::ShowGui, "show_gui"),
+        ] {
+            let encoded = encode_request(&ControlRequest {
+                protocol_version: CONTROL_PROTOCOL_VERSION,
+                command,
+            })
+            .expect("request should encode");
+            let expected = format!(
+                r#"{{"protocol_version":{CONTROL_PROTOCOL_VERSION},"command":"{command_name}"}}"#
+            );
 
-        let encoded = encode_request(&request).expect("request should encode");
-        let decoded = decode_request(&encoded).expect("request should decode");
-        assert_eq!(decoded, request);
+            assert_eq!(encoded, expected.as_bytes());
+        }
     }
 
     #[test]
@@ -205,7 +240,7 @@ mod tests {
 
     #[test]
     fn normal_response_rejects_different_protocol_version() {
-        let mut response = ControlResponse::ok("done", "running");
+        let mut response = ControlResponse::ok("done", ControlStatus::Running);
         response.protocol_version = CONTROL_PROTOCOL_VERSION + 1;
         let error = validate_response_protocol(response)
             .expect_err("normal response from a different protocol version must fail");
@@ -222,8 +257,16 @@ mod tests {
             .expect("protocol mismatch response should remain displayable");
 
         assert!(!response.ok);
-        assert_eq!(response.status, PROTOCOL_MISMATCH_STATUS);
-        assert!(response.message.contains("peer=3"));
-        assert!(response.message.contains("local=2"));
+        assert_eq!(response.status, ControlStatus::ProtocolMismatch);
+        assert!(
+            response
+                .message
+                .contains(&format!("peer={}", CONTROL_PROTOCOL_VERSION + 1))
+        );
+        assert!(
+            response
+                .message
+                .contains(&format!("local={CONTROL_PROTOCOL_VERSION}"))
+        );
     }
 }

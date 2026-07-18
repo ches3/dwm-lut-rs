@@ -1,14 +1,13 @@
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
+use std::io;
 use std::os::windows::ffi::OsStrExt;
-use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_CANCELLED, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_PIPE_CONNECTED, FALSE,
-    GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, TRUE, WAIT_FAILED, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    CloseHandle, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_PIPE_CONNECTED, FALSE, GENERIC_READ,
+    GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, TRUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
@@ -21,77 +20,22 @@ use windows_sys::Win32::System::Pipes::{
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, GetExitCodeProcess, GetProcessId, SetEvent, WaitForMultipleObjects,
-};
-use windows_sys::Win32::UI::Shell::{
-    SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    WaitForSingleObject,
 };
 
-use crate::control::{SecurityDescriptor, UserSid};
+use crate::elevation;
 use crate::error::InjectorError;
-
-use super::{last_os_error, wide_null};
+use crate::security::{SecurityDescriptor, UserSid};
 
 const STARTUP_RESULT_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_RESULT_OK: &str = "ok\n";
 const STARTUP_RESULT_ACK: &str = "ack\n";
 const STARTUP_RESULT_ERROR_PREFIX: &str = "err\n";
 const STARTUP_RESULT_MAX_BYTES: usize = 16 * 1024;
 const STARTUP_FAILURE_KIND_ERROR: &str = "error";
 const STARTUP_FAILURE_KIND_HOST_ALREADY_RUNNING: &str = "host_already_running";
-const ARG_SEPARATOR: u16 = b' ' as u16;
-const BACKSLASH: u16 = b'\\' as u16;
-const DOUBLE_QUOTE: u16 = b'"' as u16;
-const TAB: u16 = b'\t' as u16;
-const NEWLINE: u16 = b'\n' as u16;
 static STARTUP_PIPE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn start_background_host(
-    executable: &std::path::Path,
-    dll_path: Option<PathBuf>,
-) -> Result<(), InjectorError> {
-    let startup_pipe = StartupResultPipe::new()?;
-    let mut command_line = host_parameters(dll_path.as_deref(), Some(startup_pipe.name()));
-    let executable = wide_null(executable.as_os_str());
-    command_line.push(0);
-    let runas = wide_null(OsStr::new("runas"));
-    let mut execute = SHELLEXECUTEINFOW {
-        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
-        hwnd: null_mut(),
-        lpVerb: runas.as_ptr(),
-        lpFile: executable.as_ptr(),
-        lpParameters: command_line.as_ptr(),
-        lpDirectory: null(),
-        nShow: 0,
-        hInstApp: null_mut(),
-        lpIDList: null_mut(),
-        lpClass: null(),
-        hkeyClass: null_mut(),
-        dwHotKey: 0,
-        Anonymous: Default::default(),
-        hProcess: null_mut(),
-    };
-
-    let ok = unsafe { ShellExecuteExW(&mut execute) };
-    if ok == FALSE {
-        let source = last_os_error();
-        if source.raw_os_error() == Some(ERROR_CANCELLED as i32) {
-            return Err(InjectorError::HostElevationCancelled);
-        }
-        return Err(InjectorError::HostLaunchFailed {
-            operation: "request elevation",
-            source,
-        });
-    }
-    if execute.hProcess.is_null() {
-        return Err(InjectorError::HostStartupFailed(
-            "elevated host launch returned no process handle".to_string(),
-        ));
-    }
-
-    let process = ProcessHandle(execute.hProcess);
-    startup_pipe.wait(&process)
-}
 
 pub(crate) struct StartupNotifier {
     pipe_name: Vec<u16>,
@@ -169,21 +113,82 @@ impl StartupNotifier {
     }
 }
 
-struct StartupResultPipe {
+pub(super) struct StartupEvent {
+    name: String,
+    event: ProcessHandle,
+}
+
+impl StartupEvent {
+    pub(super) fn new(kind: &str, operation: &'static str) -> Result<Self, InjectorError> {
+        let name = startup_event_name(kind);
+        let name_wide = OsStr::new(&name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let user_sid = UserSid::current_process()?;
+        let security_descriptor = SecurityDescriptor::read_write_for_user(&user_sid)?;
+        let security_attributes = security_descriptor.as_security_attributes();
+        let event = unsafe { CreateEventW(&security_attributes, TRUE, FALSE, name_wide.as_ptr()) };
+        if event.is_null() {
+            return Err(InjectorError::HostLaunchFailed {
+                operation,
+                source: last_os_error(),
+            });
+        }
+        Ok(Self {
+            name,
+            event: ProcessHandle(event),
+        })
+    }
+
+    pub(super) fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn handle(&self) -> HANDLE {
+        self.event.0
+    }
+
+    fn signal(&self, operation: &'static str) -> Result<(), InjectorError> {
+        if unsafe { SetEvent(self.handle()) } == FALSE {
+            return Err(InjectorError::HostLaunchFailed {
+                operation,
+                source: last_os_error(),
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_not_reported(&self) -> Result<(), InjectorError> {
+        match unsafe { WaitForSingleObject(self.handle(), 0) } {
+            WAIT_OBJECT_0 => Err(InjectorError::HostPanicAlreadyReported),
+            WAIT_TIMEOUT => Ok(()),
+            WAIT_FAILED => Err(InjectorError::HostLaunchFailed {
+                operation: "check panic report event",
+                source: last_os_error(),
+            }),
+            value => Err(InjectorError::HostStartupFailed(format!(
+                "unexpected panic report event wait result {value:#x}"
+            ))),
+        }
+    }
+}
+
+pub(super) struct StartupResultPipe {
     name: String,
     connect: OverlappedOperation,
     pipe: ProcessHandle,
 }
 
 impl StartupResultPipe {
-    fn new() -> Result<Self, InjectorError> {
+    pub(super) fn new() -> Result<Self, InjectorError> {
         let name = startup_pipe_name();
         let name_wide = OsStr::new(&name)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
         let user_sid = UserSid::current_process()?;
-        let security_descriptor = SecurityDescriptor::from_pipe_dacl(&user_sid)?;
+        let security_descriptor = SecurityDescriptor::read_write_for_user(&user_sid)?;
         let security_attributes = security_descriptor.as_security_attributes();
         let pipe = unsafe {
             CreateNamedPipeW(
@@ -233,19 +238,30 @@ impl StartupResultPipe {
         })
     }
 
-    fn name(&self) -> &str {
+    pub(super) fn name(&self) -> &str {
         &self.name
     }
 
-    fn wait(mut self, process: &ProcessHandle) -> Result<(), InjectorError> {
+    pub(super) fn wait(
+        mut self,
+        process: &elevation::ElevatedProcess,
+        panic_event: &StartupEvent,
+        abort_event: &StartupEvent,
+    ) -> Result<(), InjectorError> {
         let deadline = Instant::now() + STARTUP_RESULT_TIMEOUT;
-        wait_for_event_or_process(self.connect.event(), process, deadline)?;
+        wait_for_startup_operation(
+            self.connect.event(),
+            panic_event,
+            abort_event,
+            process,
+            deadline,
+        )?;
         if self.connect.is_pending() {
             self.connect
                 .result(self.pipe.0, "complete startup result pipe connection")?;
         }
 
-        let expected_pid = unsafe { GetProcessId(process.0) };
+        let expected_pid = unsafe { GetProcessId(process.handle()) };
         let mut actual_pid = 0;
         let ok = unsafe { GetNamedPipeClientProcessId(self.pipe.0, &mut actual_pid) };
         if ok == FALSE {
@@ -260,9 +276,11 @@ impl StartupResultPipe {
             ));
         }
 
-        let message = read_startup_result(&self.pipe, process, deadline)?;
+        let message = read_startup_result(&self.pipe, panic_event, abort_event, process, deadline)?;
+        panic_event.ensure_not_reported()?;
         parse_startup_result(&message)?;
-        write_startup_ack(&self.pipe, process, deadline)
+        write_startup_ack(&self.pipe, panic_event, abort_event, process, deadline)?;
+        panic_event.ensure_not_reported()
     }
 }
 
@@ -276,64 +294,14 @@ fn startup_pipe_name() -> String {
     format!(r"\\.\pipe\dwm-lut-rs-startup-{pid}-{nonce:032x}-{sequence:016x}")
 }
 
-fn host_parameters(
-    dll_path: Option<&std::path::Path>,
-    startup_result_pipe: Option<&str>,
-) -> Vec<u16> {
-    let mut args = Vec::new();
-    if let Some(pipe_name) = startup_result_pipe {
-        args.push(OsString::from("--startup-result-pipe"));
-        args.push(OsString::from(pipe_name));
-    }
-    if let Some(dll_path) = dll_path {
-        args.push(OsString::from("--dll"));
-        args.push(dll_path.as_os_str().to_owned());
-    }
-
-    command_line_from_args(args)
-}
-
-fn command_line_from_args(args: impl IntoIterator<Item = OsString>) -> Vec<u16> {
-    let mut command_line = Vec::new();
-    for arg in args {
-        if !command_line.is_empty() {
-            command_line.push(ARG_SEPARATOR);
-        }
-        command_line.extend(quote_windows_arg(arg.as_os_str()));
-    }
-    command_line
-}
-
-fn quote_windows_arg(arg: &OsStr) -> Vec<u16> {
-    let text = arg.encode_wide().collect::<Vec<_>>();
-    if !text.is_empty()
-        && !text
-            .iter()
-            .any(|&ch| matches!(ch, ARG_SEPARATOR | TAB | NEWLINE | DOUBLE_QUOTE))
-    {
-        return text;
-    }
-
-    let mut quoted = vec![DOUBLE_QUOTE];
-    let mut backslashes = 0usize;
-    for ch in text {
-        match ch {
-            BACKSLASH => backslashes += 1,
-            DOUBLE_QUOTE => {
-                quoted.extend(std::iter::repeat_n(BACKSLASH, backslashes * 2 + 1));
-                quoted.push(DOUBLE_QUOTE);
-                backslashes = 0;
-            }
-            _ => {
-                quoted.extend(std::iter::repeat_n(BACKSLASH, backslashes));
-                backslashes = 0;
-                quoted.push(ch);
-            }
-        }
-    }
-    quoted.extend(std::iter::repeat_n(BACKSLASH, backslashes * 2));
-    quoted.push(DOUBLE_QUOTE);
-    quoted
+fn startup_event_name(kind: &str) -> String {
+    let pid = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = STARTUP_PIPE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(r"Local\dwm-lut-rs-{kind}-{pid}-{nonce:032x}-{sequence:016x}")
 }
 
 fn parse_startup_result(message: &str) -> Result<(), InjectorError> {
@@ -382,26 +350,25 @@ fn startup_failure_kind(error: &InjectorError) -> &'static str {
     }
 }
 
-fn wait_for_event_or_process(
-    event: HANDLE,
-    process: &ProcessHandle,
+fn wait_for_startup_operation(
+    operation_event: HANDLE,
+    panic_event: &StartupEvent,
+    abort_event: &StartupEvent,
+    process: &elevation::ElevatedProcess,
     deadline: Instant,
 ) -> Result<(), InjectorError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return Err(InjectorError::HostStartupFailed(
-            "timed out waiting for host startup result".to_string(),
-        ));
+        return abort_after_startup_timeout(process, panic_event, abort_event);
     }
     let timeout = u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX);
-    let handles = [event, process.0];
-    let wait = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), FALSE, timeout) };
+    let handles = [panic_event.handle(), operation_event, process.handle()];
+    let wait = unsafe { WaitForMultipleObjects(3, handles.as_ptr(), FALSE, timeout) };
     match wait {
-        WAIT_OBJECT_0 => Ok(()),
-        value if value == WAIT_OBJECT_0 + 1 => Err(host_exited_before_startup(process)),
-        WAIT_TIMEOUT => Err(InjectorError::HostStartupFailed(
-            "timed out waiting for host startup result".to_string(),
-        )),
+        WAIT_OBJECT_0 => Err(InjectorError::HostPanicAlreadyReported),
+        value if value == WAIT_OBJECT_0 + 1 => Ok(()),
+        value if value == WAIT_OBJECT_0 + 2 => Err(host_exited_before_startup(process)),
+        WAIT_TIMEOUT => abort_after_startup_timeout(process, panic_event, abort_event),
         WAIT_FAILED => Err(InjectorError::HostLaunchFailed {
             operation: "wait for host startup result",
             source: last_os_error(),
@@ -412,9 +379,35 @@ fn wait_for_event_or_process(
     }
 }
 
-fn host_exited_before_startup(process: &ProcessHandle) -> InjectorError {
+fn abort_after_startup_timeout(
+    process: &elevation::ElevatedProcess,
+    panic_event: &StartupEvent,
+    abort_event: &StartupEvent,
+) -> Result<(), InjectorError> {
+    abort_event.signal("request host abort after startup timeout")?;
+    let timeout = u32::try_from(STARTUP_TERMINATION_TIMEOUT.as_millis()).unwrap_or(u32::MAX);
+    let handles = [panic_event.handle(), process.handle()];
+    match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), FALSE, timeout) } {
+        WAIT_OBJECT_0 => Err(InjectorError::HostPanicAlreadyReported),
+        value if value == WAIT_OBJECT_0 + 1 => Err(InjectorError::HostStartupFailed(
+            "timed out waiting for host startup result".to_string(),
+        )),
+        WAIT_TIMEOUT => Err(InjectorError::HostStartupFailed(
+            "host did not terminate after startup timeout".to_string(),
+        )),
+        WAIT_FAILED => Err(InjectorError::HostLaunchFailed {
+            operation: "wait for host termination after startup timeout",
+            source: last_os_error(),
+        }),
+        value => Err(InjectorError::HostStartupFailed(format!(
+            "unexpected host termination wait result {value:#x}"
+        ))),
+    }
+}
+
+fn host_exited_before_startup(process: &elevation::ElevatedProcess) -> InjectorError {
     let mut exit_code = 0;
-    let ok = unsafe { GetExitCodeProcess(process.0, &mut exit_code) };
+    let ok = unsafe { GetExitCodeProcess(process.handle(), &mut exit_code) };
     if ok == FALSE {
         return InjectorError::HostLaunchFailed {
             operation: "read host process exit code",
@@ -428,7 +421,9 @@ fn host_exited_before_startup(process: &ProcessHandle) -> InjectorError {
 
 fn read_startup_result(
     pipe: &ProcessHandle,
-    process: &ProcessHandle,
+    panic_event: &StartupEvent,
+    abort_event: &StartupEvent,
+    process: &elevation::ElevatedProcess,
     deadline: Instant,
 ) -> Result<String, InjectorError> {
     let mut bytes = vec![0u8; STARTUP_RESULT_MAX_BYTES];
@@ -448,7 +443,13 @@ fn read_startup_result(
         match error.raw_os_error() {
             Some(code) if code == ERROR_IO_PENDING as i32 => {
                 operation.mark_pending(pipe.0);
-                wait_for_event_or_process(operation.event(), process, deadline)?;
+                wait_for_startup_operation(
+                    operation.event(),
+                    panic_event,
+                    abort_event,
+                    process,
+                    deadline,
+                )?;
                 read = operation.result(pipe.0, "read startup result")?;
             }
             Some(code) if code == ERROR_MORE_DATA as i32 => {
@@ -471,7 +472,9 @@ fn read_startup_result(
 
 fn write_startup_ack(
     pipe: &ProcessHandle,
-    process: &ProcessHandle,
+    panic_event: &StartupEvent,
+    abort_event: &StartupEvent,
+    process: &elevation::ElevatedProcess,
     deadline: Instant,
 ) -> Result<(), InjectorError> {
     let mut operation = OverlappedOperation::new("create startup acknowledgement write event")?;
@@ -495,7 +498,13 @@ fn write_startup_ack(
             });
         }
         operation.mark_pending(pipe.0);
-        wait_for_event_or_process(operation.event(), process, deadline)?;
+        wait_for_startup_operation(
+            operation.event(),
+            panic_event,
+            abort_event,
+            process,
+            deadline,
+        )?;
         written = operation.result(pipe.0, "write startup result acknowledgement")?;
     }
     verify_complete_write(bytes.len(), written, "startup result acknowledgement")
@@ -697,79 +706,31 @@ impl Drop for ProcessHandle {
     }
 }
 
+fn last_os_error() -> io::Error {
+    let code = unsafe { windows_sys::Win32::Foundation::GetLastError() } as i32;
+    io::Error::from_raw_os_error(code)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::ffi::{OsStr, OsString};
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use std::path::Path;
-
     use crate::error::InjectorError;
 
-    use super::{
-        host_parameters, parse_startup_ack, parse_startup_result, quote_windows_arg,
-        startup_failure_kind,
-    };
-
-    fn wide(value: &str) -> Vec<u16> {
-        OsStr::new(value).encode_wide().collect()
-    }
+    use super::{StartupEvent, parse_startup_ack, parse_startup_result, startup_failure_kind};
 
     #[test]
-    fn leaves_plain_arguments_unquoted() {
-        assert_eq!(quote_windows_arg(OsStr::new("--dll")), wide("--dll"));
-    }
+    fn startup_event_latches_reported_state() {
+        let event = StartupEvent::new("panic-test", "create test panic event")
+            .expect("test event should be created");
 
-    #[test]
-    fn quotes_arguments_with_spaces() {
-        assert_eq!(
-            quote_windows_arg(OsStr::new(r"C:\hook dll\dwm_lut_hook.dll")),
-            wide(r#""C:\hook dll\dwm_lut_hook.dll""#)
-        );
-    }
+        event
+            .ensure_not_reported()
+            .expect("new event must not be signaled");
+        event.signal("signal test panic event").unwrap();
 
-    #[test]
-    fn escapes_quotes_and_trailing_backslashes() {
-        assert_eq!(
-            quote_windows_arg(OsStr::new(r#"C:\quoted "path"\"#)),
-            wide(r#""C:\quoted \"path\"\\""#)
-        );
-    }
-
-    #[test]
-    fn preserves_ill_formed_utf16_arguments() {
-        let arg =
-            OsString::from_wide(&[b'a' as u16, 0xD800, b' ' as u16, b'"' as u16, b'\\' as u16]);
-
-        assert_eq!(
-            quote_windows_arg(arg.as_os_str()),
-            vec![
-                b'"' as u16,
-                b'a' as u16,
-                0xD800,
-                b' ' as u16,
-                b'\\' as u16,
-                b'"' as u16,
-                b'\\' as u16,
-                b'\\' as u16,
-                b'"' as u16,
-            ]
-        );
-        assert!(!quote_windows_arg(arg.as_os_str()).contains(&0xFFFD));
-    }
-
-    #[test]
-    fn builds_host_parameters_with_dll_path() {
-        let command_line = host_parameters(
-            Some(Path::new(r"C:\hook dll\dwm_lut_hook.dll")),
-            Some(r"\\.\pipe\dwm-lut-rs-startup-1234"),
-        );
-
-        assert_eq!(
-            command_line,
-            wide(
-                r#"--startup-result-pipe \\.\pipe\dwm-lut-rs-startup-1234 --dll "C:\hook dll\dwm_lut_hook.dll""#
-            )
-        );
+        assert!(matches!(
+            event.ensure_not_reported(),
+            Err(InjectorError::HostPanicAlreadyReported)
+        ));
     }
 
     #[test]

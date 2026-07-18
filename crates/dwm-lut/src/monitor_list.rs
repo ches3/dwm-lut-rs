@@ -14,8 +14,7 @@ fn format_monitor_list(listings: &[MonitorListing]) -> String {
         return "No active monitors.".to_string();
     }
 
-    let mut rows: Vec<MonitorRow> = listings.iter().map(MonitorRow::from).collect();
-    rows.sort_by_key(|row| row.number);
+    let rows: Vec<MonitorRow> = listings.iter().map(MonitorRow::from).collect();
 
     let headers = ["#", "Name", "Model", "Position", "Resolution", "Path"];
     let mut widths = headers.map(str::len);
@@ -39,7 +38,6 @@ fn format_monitor_list(listings: &[MonitorListing]) -> String {
 }
 
 struct MonitorRow {
-    number: u32,
     number_text: String,
     name: String,
     model: String,
@@ -51,7 +49,6 @@ struct MonitorRow {
 impl From<&MonitorListing> for MonitorRow {
     fn from(listing: &MonitorListing) -> Self {
         Self {
-            number: listing.number,
             number_text: listing.number.to_string(),
             name: display_name(&listing.friendly_name).to_string(),
             model: listing.edid_pnp_id.clone(),
@@ -161,19 +158,8 @@ mod tests {
     }
 
     #[test]
-    fn formats_fixed_width_monitor_table_sorted_by_number() {
+    fn formats_fixed_width_monitor_table() {
         let monitors = [
-            listing(
-                2,
-                "",
-                "BNQ7F59",
-                DesktopPosition { x: 2560, y: 177 },
-                DesktopResolution {
-                    width: 1920,
-                    height: 1080,
-                },
-                r"\\?\DISPLAY#BNQ7F59#UID2",
-            ),
             listing(
                 1,
                 "P275MS PRO",
@@ -184,6 +170,17 @@ mod tests {
                     height: 1440,
                 },
                 r"\\?\DISPLAY#LHC91C1#UID1",
+            ),
+            listing(
+                2,
+                "",
+                "BNQ7F59",
+                DesktopPosition { x: 2560, y: 177 },
+                DesktopResolution {
+                    width: 1920,
+                    height: 1080,
+                },
+                r"\\?\DISPLAY#BNQ7F59#UID2",
             ),
         ];
 

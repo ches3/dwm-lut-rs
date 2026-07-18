@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub use dwm_lut_payload::{ColorMode, MonitorIdentity, MonitorTarget};
-use dwm_lut_payload::{HookPayload, PayloadAssignment, PayloadError, validate_payload};
-use serde::Deserialize;
+use dwm_lut_payload::{HookPayload, PayloadAssignment, validate_payload};
 
 use crate::backend::monitor::resolve_monitor_identity;
 use crate::lut::parse_lut;
+
+use super::document::{ConfigAssignmentDocument, parse_config_document_str};
+use super::{ColorMode, ConfigError, MonitorIdentity, MonitorTarget};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LutAssignment {
@@ -61,66 +61,6 @@ pub struct LoadedPayload {
     pub payload: HookPayload,
 }
 
-#[derive(Debug)]
-pub enum ConfigError {
-    Io(std::io::Error),
-    Parse {
-        line: Option<usize>,
-        message: String,
-    },
-    Unsupported(&'static str),
-    InvalidLut {
-        path: PathBuf,
-        source: PayloadError,
-    },
-    InvalidPayload(PayloadError),
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(err) => write!(f, "io error: {err}"),
-            Self::Parse {
-                line: Some(line),
-                message,
-            } => write!(f, "parse error at line {line}: {message}"),
-            Self::Parse {
-                line: None,
-                message,
-            } => write!(f, "parse error: {message}"),
-            Self::Unsupported(message) => write!(f, "unsupported: {message}"),
-            Self::InvalidLut { path, source } => {
-                write!(f, "invalid LUT {}: {source}", path.display())
-            }
-            Self::InvalidPayload(source) => write!(f, "invalid payload: {source}"),
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {}
-
-impl From<std::io::Error> for ConfigError {
-    fn from(value: std::io::Error) -> Self {
-        Self::Io(value)
-    }
-}
-
-impl ConfigError {
-    pub(crate) fn parse_at(line: usize, message: impl Into<String>) -> Self {
-        Self::Parse {
-            line: Some(line),
-            message: message.into(),
-        }
-    }
-
-    pub(crate) fn parse_message(message: impl Into<String>) -> Self {
-        Self::Parse {
-            line: None,
-            message: message.into(),
-        }
-    }
-}
-
 fn profile_map_key<'a, T>(profiles: &'a HashMap<String, T>, name: &str) -> Option<&'a str> {
     profiles
         .keys()
@@ -155,52 +95,6 @@ impl FileConfig {
             ))
         })?;
         Ok((key, profile.assignments.as_slice()))
-    }
-}
-
-fn reject_invalid_profile_name(name: &str, context: &str) -> Result<(), ConfigError> {
-    if name.trim().is_empty() {
-        return Err(ConfigError::parse_message(format!(
-            "{context} must not be empty"
-        )));
-    }
-    Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConfigDocument {
-    default_profile: String,
-    profiles: HashMap<String, ProfileDocument>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProfileDocument {
-    assignments: Vec<ConfigAssignmentDocument>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConfigAssignmentDocument {
-    monitor_device_path: String,
-    color_mode: ConfigColorMode,
-    lut_path: PathBuf,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ConfigColorMode {
-    Sdr,
-    Hdr,
-}
-
-impl From<ConfigColorMode> for ColorMode {
-    fn from(value: ConfigColorMode) -> Self {
-        match value {
-            ConfigColorMode::Sdr => Self::Sdr,
-            ConfigColorMode::Hdr => Self::Hdr,
-        }
     }
 }
 
@@ -240,36 +134,9 @@ pub fn config_to_payload(config: &LutConfig) -> Result<HookPayload, ConfigError>
 }
 
 pub fn parse_config_str(base_dir: &Path, contents: &str) -> Result<FileConfig, ConfigError> {
-    let document: ConfigDocument = serde_json::from_str(contents).map_err(|error| {
-        let line = match error.line() {
-            0 => None,
-            line => Some(line),
-        };
-
-        ConfigError::Parse {
-            line,
-            message: error.to_string(),
-        }
-    })?;
-
-    reject_invalid_profile_name(&document.default_profile, "default_profile")?;
-    let default_profile = document.default_profile.trim().to_owned();
-
-    if document.profiles.is_empty() {
-        return Err(ConfigError::parse_message("profiles must not be empty"));
-    }
-
+    let document = parse_config_document_str(contents)?;
     let mut profiles = HashMap::with_capacity(document.profiles.len());
-    let mut canonical_profile_names = HashSet::new();
     for (profile_name, profile_document) in document.profiles {
-        reject_invalid_profile_name(&profile_name, "profile name")?;
-        let profile_name = profile_name.trim().to_owned();
-        let canonical = profile_name.to_ascii_uppercase();
-        if !canonical_profile_names.insert(canonical) {
-            return Err(ConfigError::parse_message(format!(
-                "duplicate profile name: {profile_name}"
-            )));
-        }
         profiles.insert(
             profile_name,
             FileProfileConfig {
@@ -278,14 +145,8 @@ pub fn parse_config_str(base_dir: &Path, contents: &str) -> Result<FileConfig, C
         );
     }
 
-    if profile_map_key(&profiles, &default_profile).is_none() {
-        return Err(ConfigError::parse_message(format!(
-            "default_profile={default_profile} is not defined in profiles"
-        )));
-    }
-
     Ok(FileConfig {
-        default_profile,
+        default_profile: document.default_profile,
         profiles,
     })
 }
@@ -295,7 +156,6 @@ fn parse_profile_assignments(
     assignments: Vec<ConfigAssignmentDocument>,
 ) -> Result<Vec<FileAssignment>, ConfigError> {
     let mut parsed = Vec::with_capacity(assignments.len());
-    let mut assignment_keys = HashSet::new();
 
     for assignment in assignments {
         let lut_path = if assignment.lut_path.is_absolute() {
@@ -304,21 +164,9 @@ fn parse_profile_assignments(
             base_dir.join(assignment.lut_path)
         };
 
-        let color_mode = assignment.color_mode.into();
-        let assignment_key = (
-            assignment.monitor_device_path.to_ascii_uppercase(),
-            color_mode,
-        );
-        if !assignment_keys.insert(assignment_key) {
-            return Err(ConfigError::parse_message(format!(
-                "duplicate assignment for monitor_device_path={}, color_mode={color_mode:?}",
-                assignment.monitor_device_path
-            )));
-        }
-
         parsed.push(FileAssignment {
             monitor_device_path: assignment.monitor_device_path,
-            color_mode,
+            color_mode: assignment.color_mode.into(),
             lut_path,
         });
     }

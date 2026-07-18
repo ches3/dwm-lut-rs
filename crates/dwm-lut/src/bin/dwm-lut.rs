@@ -1,50 +1,67 @@
 #![windows_subsystem = "windows"]
 
+use std::panic::PanicHookInfo;
+
 fn main() {
-    let result = parse_host_args()
-        .and_then(|options| dwm_lut::run_host(options.dll_path, options.startup_result_pipe));
-    if let Err(err) = result {
-        std::process::exit(dwm_lut::report_host_startup_error(&err));
-    }
-}
-
-struct HostOptions {
-    dll_path: Option<std::path::PathBuf>,
-    startup_result_pipe: Option<String>,
-}
-
-fn parse_host_args() -> Result<HostOptions, dwm_lut::error::InjectorError> {
-    let mut dll_path = None;
-    let mut startup_result_pipe = None;
-    let mut args = std::env::args_os();
-    let _program = args.next();
-
-    while let Some(arg) = args.next() {
-        match arg.to_string_lossy().as_ref() {
-            "--dll" => {
-                let value = args.next().ok_or_else(|| {
-                    dwm_lut::error::InjectorError::Usage("--dll requires a value".to_string())
-                })?;
-                dll_path = Some(std::path::PathBuf::from(value));
+    install_panic_hook();
+    let exit_code = match dwm_lut::app_args::parse_app_args() {
+        Ok(dwm_lut::app_args::AppMode::Launcher) => match dwm_lut::run_app_launcher() {
+            Ok(()) => 0,
+            Err(dwm_lut::error::InjectorError::HostPanicAlreadyReported) => 1,
+            Err(error) => {
+                dwm_lut::show_error(&error.to_string());
+                1
             }
-            "--startup-result-pipe" => {
-                let value = args.next().ok_or_else(|| {
-                    dwm_lut::error::InjectorError::Usage(
-                        "--startup-result-pipe requires a value".to_string(),
-                    )
-                })?;
-                startup_result_pipe = Some(value.to_string_lossy().into_owned());
-            }
-            other => {
-                return Err(dwm_lut::error::InjectorError::Usage(format!(
-                    "unknown host argument: {other}"
-                )));
+        },
+        Ok(dwm_lut::app_args::AppMode::Background(options)) => {
+            match dwm_lut::run_background(options) {
+                Ok(()) => 0,
+                Err(_) => 1,
             }
         }
+        Err(error) => {
+            dwm_lut::show_error(&error.to_string());
+            1
+        }
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
+}
 
-    Ok(HostOptions {
-        dll_path,
-        startup_result_pipe,
-    })
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let action = dwm_lut::panic_report::begin_panic_report();
+        previous(info);
+        match action {
+            dwm_lut::panic_report::PanicReportAction::ShowDialog => {
+                dwm_lut::show_error(&format_panic_message(info));
+                std::process::exit(dwm_lut::panic_report::PANIC_EXIT_CODE);
+            }
+            dwm_lut::panic_report::PanicReportAction::SuppressDialog => {
+                std::process::exit(dwm_lut::panic_report::PANIC_EXIT_CODE);
+            }
+            dwm_lut::panic_report::PanicReportAction::AlreadyReported => {}
+        }
+    }));
+}
+
+fn format_panic_message(info: &PanicHookInfo<'_>) -> String {
+    let message = if let Some(message) = info.payload().downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = info.payload().downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "panic payload was not a string".to_string()
+    };
+    match info.location() {
+        Some(location) => format!(
+            "dwm-lut encountered an unexpected error.\n\nmessage: {message}\nlocation: {}:{}:{}",
+            location.file(),
+            location.line(),
+            location.column()
+        ),
+        None => format!("dwm-lut encountered an unexpected error.\n\nmessage: {message}"),
+    }
 }

@@ -22,6 +22,12 @@ pub(crate) fn local_app_data_directory(step: InjectionStep) -> Result<PathBuf, I
     Ok(KnownFolderPath { ptr: path }.to_path_buf())
 }
 
+pub(crate) fn default_config_path() -> Result<PathBuf, InjectorError> {
+    Ok(local_app_data_directory(InjectionStep::ResolveConfigPath)?
+        .join("dwm-lut-rs")
+        .join("config.json"))
+}
+
 struct KnownFolderPath {
     ptr: *mut u16,
 }

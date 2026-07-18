@@ -126,6 +126,10 @@ pub enum InjectorError {
         operation: &'static str,
         source: io::Error,
     },
+    SecurityOperationFailed {
+        operation: &'static str,
+        source: io::Error,
+    },
     ControlTimeout {
         operation: &'static str,
     },
@@ -137,8 +141,10 @@ pub enum InjectorError {
         operation: &'static str,
         source: io::Error,
     },
+    HostRequiresAdministratorUser,
     HostElevationCancelled,
     HostStartupFailed(String),
+    HostPanicAlreadyReported,
     StartupTaskElevationCancelled,
     StartupTaskRequiresAdministratorUser,
     StartupTaskLaunchFailed {
@@ -206,6 +212,9 @@ impl fmt::Display for InjectorError {
             Self::ControlPipe { operation, source } => {
                 write!(f, "control pipe {operation} failed: {source}")
             }
+            Self::SecurityOperationFailed { operation, source } => {
+                write!(f, "Windows security {operation} failed: {source}")
+            }
             Self::ControlTimeout { operation } => write!(f, "control pipe {operation} timed out"),
             Self::ControlProtocol(message) => write!(f, "control protocol failed: {message}"),
             Self::HostUnavailable => write!(
@@ -223,9 +232,16 @@ impl fmt::Display for InjectorError {
             Self::HostLaunchFailed { operation, source } => {
                 write!(f, "host background launch {operation} failed: {source}")
             }
+            Self::HostRequiresAdministratorUser => write!(
+                f,
+                "host launch requires signing in with an administrator account"
+            ),
             Self::HostElevationCancelled => write!(f, "host elevation was canceled"),
             Self::HostStartupFailed(message) => {
                 write!(f, "host background startup failed: {message}")
+            }
+            Self::HostPanicAlreadyReported => {
+                write!(f, "host background panic was already reported")
             }
             Self::StartupTaskElevationCancelled => {
                 write!(f, "startup task elevation was canceled")

@@ -68,7 +68,7 @@ pub(crate) fn list_monitor_listings() -> Result<Vec<MonitorListing>, InjectorErr
 
     let mut listings = Vec::new();
     for path in paths {
-        if path.flags & DISPLAYCONFIG_PATH_ACTIVE == 0 {
+        if !path_is_active_and_available(&path) {
             continue;
         }
 
@@ -110,6 +110,7 @@ pub(crate) fn list_monitor_listings() -> Result<Vec<MonitorListing>, InjectorErr
         });
     }
 
+    listings.sort_by_key(|monitor| monitor.number);
     Ok(listings)
 }
 
@@ -120,7 +121,7 @@ fn enumerate_active_monitors() -> Result<Vec<ActiveMonitor>, ConfigError> {
 
     let mut monitors = Vec::new();
     for path in paths {
-        if path.flags & DISPLAYCONFIG_PATH_ACTIVE == 0 {
+        if !path_is_active_and_available(&path) {
             continue;
         }
 
@@ -138,6 +139,10 @@ fn enumerate_active_monitors() -> Result<Vec<ActiveMonitor>, ConfigError> {
     }
 
     Ok(monitors)
+}
+
+fn path_is_active_and_available(path: &DISPLAYCONFIG_PATH_INFO) -> bool {
+    path.flags & DISPLAYCONFIG_PATH_ACTIVE != 0 && path.targetInfo.targetAvailable != 0
 }
 
 fn active_monitor_identity(path: &DISPLAYCONFIG_PATH_INFO) -> MonitorIdentity {
@@ -257,7 +262,7 @@ fn display_number_from_gdi_name(gdi_device_name: &str) -> Option<u32> {
         .and_then(|number| number.parse().ok())
 }
 
-fn extract_edid_pnp_id(monitor_device_path: &str) -> Option<&str> {
+pub(crate) fn extract_edid_pnp_id(monitor_device_path: &str) -> Option<&str> {
     let mut parts = monitor_device_path.split('#');
     match (parts.next(), parts.next()) {
         (Some(prefix), Some(model)) if prefix.eq_ignore_ascii_case(r"\\?\DISPLAY") => Some(model),
@@ -279,5 +284,26 @@ fn luid_to_adapter_luid(luid: LUID) -> AdapterLuid {
     AdapterLuid {
         high_part: luid.HighPart,
         low_part: luid.LowPart,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitor_path_must_be_active_and_available() {
+        let mut path = DISPLAYCONFIG_PATH_INFO {
+            flags: DISPLAYCONFIG_PATH_ACTIVE,
+            ..Default::default()
+        };
+
+        assert!(!path_is_active_and_available(&path));
+
+        path.targetInfo.targetAvailable = 1;
+        assert!(path_is_active_and_available(&path));
+
+        path.flags = 0;
+        assert!(!path_is_active_and_available(&path));
     }
 }

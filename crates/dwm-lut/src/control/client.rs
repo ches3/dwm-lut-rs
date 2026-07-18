@@ -25,7 +25,7 @@ use crate::control::{current_pipe_name, last_os_error, wide_null};
 use crate::error::InjectorError;
 
 const WAIT_PIPE_TIMEOUT_MS: u32 = 2_000;
-const RESPONSE_READ_TIMEOUT_MS: u32 = 120_000;
+const RESPONSE_READ_TIMEOUT_MS: u32 = 10_000;
 const HOST_SHUTDOWN_TIMEOUT_MS: u32 = 5_000;
 
 pub(crate) fn send_request(request: &ControlRequest) -> Result<ControlResponse, InjectorError> {
@@ -36,10 +36,7 @@ pub(crate) fn send_request(request: &ControlRequest) -> Result<ControlResponse, 
     } else {
         None
     };
-    let request = encode_request(request)?;
-    pipe.write_message(&request)?;
-    let response = pipe.read_message()?;
-    let response = validate_response_protocol(decode_response(&response)?)?;
+    let response = pipe.exchange(request)?;
     if response.ok
         && let Some(host_process) = host_process
     {
@@ -139,6 +136,13 @@ impl PipeHandle {
         HostProcessHandle::new(handle)
     }
 
+    fn exchange(&self, request: &ControlRequest) -> Result<ControlResponse, InjectorError> {
+        let request = encode_request(request)?;
+        self.write_message(&request)?;
+        let response = self.read_message()?;
+        validate_response_protocol(decode_response(&response)?)
+    }
+
     fn write_message(&self, bytes: &[u8]) -> Result<(), InjectorError> {
         validate_message_len(bytes.len())?;
         let len = u32::try_from(bytes.len()).map_err(|_| {
@@ -213,7 +217,9 @@ impl PipeHandle {
     }
 }
 
-struct HostProcessHandle(HANDLE);
+struct HostProcessHandle {
+    handle: HANDLE,
+}
 
 impl HostProcessHandle {
     fn new(handle: HANDLE) -> Result<Self, InjectorError> {
@@ -223,11 +229,15 @@ impl HostProcessHandle {
                 source: last_os_error(),
             });
         }
-        Ok(Self(handle))
+        Ok(Self { handle })
     }
 
     fn wait_for_exit(&self) -> Result<(), InjectorError> {
-        match unsafe { WaitForSingleObject(self.0, HOST_SHUTDOWN_TIMEOUT_MS) } {
+        self.wait_for_exit_with_timeout(HOST_SHUTDOWN_TIMEOUT_MS)
+    }
+
+    fn wait_for_exit_with_timeout(&self, timeout_ms: u32) -> Result<(), InjectorError> {
+        match unsafe { WaitForSingleObject(self.handle, timeout_ms) } {
             WAIT_OBJECT_0 => Ok(()),
             WAIT_TIMEOUT => Err(InjectorError::ControlTimeout {
                 operation: "wait for host shutdown",
@@ -242,9 +252,9 @@ impl HostProcessHandle {
 
 impl Drop for HostProcessHandle {
     fn drop(&mut self) {
-        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+        if !self.handle.is_null() && self.handle != INVALID_HANDLE_VALUE {
             unsafe {
-                windows_sys::Win32::Foundation::CloseHandle(self.0);
+                windows_sys::Win32::Foundation::CloseHandle(self.handle);
             }
         }
     }

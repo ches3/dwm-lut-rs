@@ -1,4 +1,3 @@
-mod background;
 mod export;
 mod module;
 mod process;
@@ -11,7 +10,6 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;
 
 use crate::error::{InjectionStep, InjectorError};
 
-pub(crate) use background::{StartupNotifier, start_background_host};
 pub(crate) use export::{resolve_remote_export_address, resolve_remote_module_export_address};
 pub(crate) use module::{
     NamedRemoteModule, RemoteModule, find_remote_module, find_remote_modules_by_name,

@@ -1,71 +1,7 @@
-use crate::backend::{
-    self, ApplyOutcome, ApplyReport, ApplyRequest, DisableOutcome, DisableReport,
-};
-use crate::control::protocol::{
-    CONTROL_PROTOCOL_VERSION, ControlCommand, ControlRequest, ControlResponse,
-};
-use crate::error::{InjectionStep, InjectorError, ShutdownStatus};
 use std::path::PathBuf;
 
-pub(crate) fn handle_command(
-    command: ControlCommand,
-    host_dll_path: Option<PathBuf>,
-) -> ControlResponse {
-    match command {
-        ControlCommand::Apply {
-            config_path,
-            profile,
-        } => response_from_result(apply(ApplyRequest {
-            dll_path: host_dll_path,
-            config_path,
-            profile,
-        })),
-        ControlCommand::Disable => response_from_result(disable()),
-        ControlCommand::Status => ControlResponse::ok("host instance is running", "running"),
-        ControlCommand::Stop => ControlResponse::ok("stopped dwm-lut host instance", "stopped"),
-    }
-}
-
-pub(crate) fn apply(request: ApplyRequest) -> Result<ControlResponse, InjectorError> {
-    backend::apply(request).map(|report| match report.outcome {
-        ApplyOutcome::Replaced => ControlResponse::ok(apply_message(&report), "replaced"),
-        ApplyOutcome::Initialized => ControlResponse::ok(apply_message(&report), "initialized"),
-        ApplyOutcome::Reinitialized => ControlResponse::ok(apply_message(&report), "reinitialized"),
-    })
-}
-
-pub(crate) fn disable() -> Result<ControlResponse, InjectorError> {
-    backend::disable().and_then(|report| match report.outcome {
-        DisableOutcome::NotInjected => Ok(ControlResponse::ok(
-            disable_message(&report),
-            "not_injected",
-        )),
-        DisableOutcome::ShutDown(ShutdownStatus::Success) => {
-            Ok(ControlResponse::ok(disable_message(&report), "disabled"))
-        }
-        DisableOutcome::ShutDown(ShutdownStatus::NotInitialized) => Ok(ControlResponse::ok(
-            disable_message(&report),
-            "not_initialized",
-        )),
-        DisableOutcome::ShutDown(ShutdownStatus::AlreadyShutDown) => Ok(ControlResponse::ok(
-            disable_message(&report),
-            "already_shutdown",
-        )),
-        DisableOutcome::ShutDown(status) => Err(InjectorError::HookShutdownFailed(status)),
-    })
-}
-
-pub(crate) fn response_from_result(
-    result: Result<ControlResponse, InjectorError>,
-) -> ControlResponse {
-    match result {
-        Ok(response) => response,
-        Err(InjectorError::HostBusy) => {
-            ControlResponse::error(InjectorError::HostBusy.to_string(), "busy")
-        }
-        Err(error) => ControlResponse::error(error.to_string(), "error"),
-    }
-}
+use crate::control::protocol::{CONTROL_PROTOCOL_VERSION, ControlCommand, ControlRequest};
+use crate::error::{InjectionStep, InjectorError};
 
 pub(crate) fn request_from_cli(
     command: crate::cli::CliCommand,
@@ -92,19 +28,10 @@ pub(crate) fn request_from_cli(
 }
 
 fn resolve_apply_config_path(config_path: Option<PathBuf>) -> Result<PathBuf, InjectorError> {
-    if let Some(config_path) = config_path {
-        return absolute_cli_path(config_path);
+    match config_path {
+        Some(config_path) => absolute_cli_path(config_path),
+        None => crate::paths::default_config_path(),
     }
-
-    default_config_path()
-}
-
-fn default_config_path() -> Result<PathBuf, InjectorError> {
-    Ok(
-        crate::paths::local_app_data_directory(InjectionStep::ResolveConfigPath)?
-            .join("dwm-lut-rs")
-            .join("config.json"),
-    )
 }
 
 pub(crate) fn resolve_host_dll_path(
@@ -143,54 +70,6 @@ fn absolute_cli_path(path: PathBuf) -> Result<PathBuf, InjectorError> {
     Ok(cwd.join(path))
 }
 
-fn apply_message(report: &ApplyReport) -> String {
-    match report.outcome {
-        ApplyOutcome::Replaced => format!(
-            "replaced assignments in dwm.exe (pid={pid}) from {} (profile={})",
-            report.config_path.display(),
-            report.profile_name,
-            pid = report.pid,
-        ),
-        ApplyOutcome::Initialized => format!(
-            "initialized dwm.exe (pid={pid}) with {} staged from {} and {} (profile={})",
-            report.staged_dll_path.display(),
-            report.input_dll_path.display(),
-            report.config_path.display(),
-            report.profile_name,
-            pid = report.pid,
-        ),
-        ApplyOutcome::Reinitialized => format!(
-            "reinitialized dwm.exe (pid={pid}) with {} staged from {} and {} (profile={})",
-            report.staged_dll_path.display(),
-            report.input_dll_path.display(),
-            report.config_path.display(),
-            report.profile_name,
-            pid = report.pid,
-        ),
-    }
-}
-
-fn disable_message(report: &DisableReport) -> String {
-    match report.outcome {
-        DisableOutcome::NotInjected => format!(
-            "disable skipped: hook DLL is not injected into dwm.exe (pid={})",
-            report.pid
-        ),
-        DisableOutcome::ShutDown(ShutdownStatus::Success) => {
-            format!("disabled dwm.exe hook (pid={})", report.pid)
-        }
-        DisableOutcome::ShutDown(ShutdownStatus::NotInitialized) => format!(
-            "disable skipped: hook DLL is loaded but not initialized in dwm.exe (pid={})",
-            report.pid
-        ),
-        DisableOutcome::ShutDown(ShutdownStatus::AlreadyShutDown) => format!(
-            "disable skipped: hook DLL is already shut down in dwm.exe (pid={})",
-            report.pid
-        ),
-        DisableOutcome::ShutDown(status) => format!("hook shutdown failed: {status}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -201,62 +80,6 @@ mod tests {
     use crate::control::protocol::ControlCommand;
 
     use super::*;
-
-    fn apply_report(outcome: ApplyOutcome) -> ApplyReport {
-        ApplyReport {
-            outcome,
-            pid: 4242,
-            input_dll_path: PathBuf::from(r"C:\tools\dwm_lut_hook.dll"),
-            staged_dll_path: PathBuf::from(
-                r"C:\Users\test\AppData\Local\dwm-lut-rs\hook\dwm_lut_hook-11111111111111111111111111111111.dll",
-            ),
-            config_path: PathBuf::from(r"C:\profiles\config.json"),
-            profile_name: "desktop".to_string(),
-        }
-    }
-
-    #[test]
-    fn apply_report_message_describes_replace_outcome() {
-        let message = apply_message(&apply_report(ApplyOutcome::Replaced));
-
-        assert_eq!(
-            message,
-            r"replaced assignments in dwm.exe (pid=4242) from C:\profiles\config.json (profile=desktop)"
-        );
-    }
-
-    #[test]
-    fn disable_report_message_describes_not_initialized() {
-        let message = disable_message(&DisableReport {
-            outcome: DisableOutcome::ShutDown(ShutdownStatus::NotInitialized),
-            pid: 4242,
-        });
-
-        assert_eq!(
-            message,
-            "disable skipped: hook DLL is loaded but not initialized in dwm.exe (pid=4242)"
-        );
-    }
-
-    #[test]
-    fn response_from_error_keeps_display_message() {
-        let response = response_from_result(Err(InjectorError::HostUnavailable));
-
-        assert!(!response.ok);
-        assert_eq!(response.protocol_version, CONTROL_PROTOCOL_VERSION);
-        assert_eq!(response.status, "error");
-        assert!(response.message.contains("host instance is not running"));
-    }
-
-    #[test]
-    fn response_from_host_busy_uses_busy_status() {
-        let response = response_from_result(Err(InjectorError::HostBusy));
-
-        assert!(!response.ok);
-        assert_eq!(response.protocol_version, CONTROL_PROTOCOL_VERSION);
-        assert_eq!(response.status, "busy");
-        assert!(response.message.contains("host instance is busy"));
-    }
 
     #[test]
     fn request_from_cli_attaches_protocol_version() {
@@ -275,7 +98,6 @@ mod tests {
             .expect("host stop should map to control request");
 
         assert_eq!(request.command, ControlCommand::Stop);
-        assert_eq!(request.protocol_version, CONTROL_PROTOCOL_VERSION);
     }
 
     #[test]
@@ -289,7 +111,6 @@ mod tests {
 
         match request.command {
             ControlCommand::Apply { config_path, .. } => {
-                assert!(config_path.is_absolute());
                 assert_eq!(
                     config_path,
                     std::env::current_dir().unwrap().join("config.json")
@@ -310,7 +131,7 @@ mod tests {
 
         match request.command {
             ControlCommand::Apply { config_path, .. } => {
-                assert_eq!(config_path, default_config_path().unwrap());
+                assert_eq!(config_path, crate::paths::default_config_path().unwrap());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -332,7 +153,6 @@ mod tests {
             .expect("explicit hook DLL should remain configured");
 
         assert_eq!(resolved, relative_path.canonicalize().unwrap());
-
         let _ = fs::remove_file(relative_path);
     }
 
@@ -341,12 +161,12 @@ mod tests {
         let error = resolve_host_dll_path(Some(PathBuf::from(r"C:\missing\hook.dll")))
             .expect_err("missing hook DLL must be rejected");
 
-        match error {
-            InjectorError::MissingFile { kind, path } => {
-                assert_eq!(kind, "hook DLL");
-                assert_eq!(path, PathBuf::from(r"C:\missing\hook.dll"));
+        assert!(matches!(
+            error,
+            InjectorError::MissingFile {
+                kind: "hook DLL",
+                ..
             }
-            other => panic!("unexpected error: {other}"),
-        }
+        ));
     }
 }
