@@ -1,8 +1,6 @@
 use std::ffi::c_void;
-use std::mem::{size_of, transmute};
-use std::ptr;
+use std::mem::size_of;
 
-use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VERTEX_BUFFER,
     D3D11_BUFFER_DESC, D3D11_COMPARISON_NEVER, D3D11_FILTER_MIN_MAG_MIP_POINT, D3D11_FLOAT32_MAX,
@@ -16,26 +14,14 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_SAMPLE_DESC,
 };
 use windows::core::{Interface, PCSTR};
-use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 use super::Vertex;
 use crate::lut_pipeline::{BackBufferFormat, ShaderConstantsCBuffer};
 
-pub(super) type Hresult = i32;
-pub(super) type D3DCompileApi = unsafe extern "system" fn(
-    src_data: *const c_void,
-    src_data_size: usize,
-    source_name: *const u8,
-    defines: *const c_void,
-    include: *mut c_void,
-    entrypoint: *const u8,
-    target: *const u8,
-    flags1: u32,
-    flags2: u32,
-    code: *mut *mut c_void,
-    error_msgs: *mut *mut c_void,
-) -> Hresult;
+pub(super) const LUT_VERTEX_SHADER_BYTECODE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/lut_pipeline_vs.cso"));
+pub(super) const LUT_PIXEL_SHADER_BYTECODE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/lut_pipeline_ps.cso"));
 
 unsafe extern "system" {
     pub(super) fn dwm_lut_get_back_buffer_25h2(
@@ -43,22 +29,6 @@ unsafe extern "system" {
         container_vtable_index: usize,
         resource_vtable_index: usize,
     ) -> *mut c_void;
-}
-
-pub(super) struct D3DCompiler {
-    module: HMODULE,
-    pub(super) compile: D3DCompileApi,
-}
-
-// SAFETY: HMODULE identifies a process-wide loaded module and may be moved between threads.
-unsafe impl Send for D3DCompiler {}
-
-impl Drop for D3DCompiler {
-    fn drop(&mut self) {
-        unsafe {
-            FreeLibrary(self.module);
-        }
-    }
 }
 
 pub(super) unsafe fn take_owned_interface<T: Interface>(raw: *mut c_void) -> Option<T> {
@@ -71,9 +41,8 @@ pub(super) unsafe fn take_owned_interface<T: Interface>(raw: *mut c_void) -> Opt
 
 pub(super) fn create_vertex_shader(
     device: &ID3D11Device,
-    blob: &ID3DBlob,
+    bytecode: &[u8],
 ) -> Option<ID3D11VertexShader> {
-    let bytecode = blob_bytes(blob)?;
     let mut shader = None;
     unsafe {
         device
@@ -85,9 +54,8 @@ pub(super) fn create_vertex_shader(
 
 pub(super) fn create_pixel_shader(
     device: &ID3D11Device,
-    blob: &ID3DBlob,
+    bytecode: &[u8],
 ) -> Option<ID3D11PixelShader> {
-    let bytecode = blob_bytes(blob)?;
     let mut shader = None;
     unsafe {
         device
@@ -99,7 +67,7 @@ pub(super) fn create_pixel_shader(
 
 pub(super) fn create_input_layout(
     device: &ID3D11Device,
-    blob: &ID3DBlob,
+    vertex_shader_bytecode: &[u8],
 ) -> Option<ID3D11InputLayout> {
     const POSITION: PCSTR = PCSTR(c"POSITION".as_ptr().cast());
     const TEXCOORD: PCSTR = PCSTR(c"TEXCOORD".as_ptr().cast());
@@ -126,7 +94,7 @@ pub(super) fn create_input_layout(
     let mut layout = None;
     unsafe {
         device
-            .CreateInputLayout(&elements, blob_bytes(blob)?, Some(&mut layout))
+            .CreateInputLayout(&elements, vertex_shader_bytecode, Some(&mut layout))
             .ok()?;
     }
     layout
@@ -295,69 +263,4 @@ where
             .ok()?;
     }
     srv
-}
-
-pub(super) unsafe fn load_compiler() -> Option<D3DCompiler> {
-    let wide: Vec<u16> = "d3dcompiler_47.dll"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let module = unsafe { LoadLibraryW(wide.as_ptr()) };
-    if module.is_null() {
-        return None;
-    }
-    let proc = unsafe { GetProcAddress(module, c"D3DCompile".as_ptr().cast()) };
-    let Some(proc) = proc else {
-        unsafe { FreeLibrary(module) };
-        return None;
-    };
-    Some(D3DCompiler {
-        module,
-        compile: unsafe { transmute::<unsafe extern "system" fn() -> isize, D3DCompileApi>(proc) },
-    })
-}
-
-pub(super) unsafe fn compile_shader(
-    compile: D3DCompileApi,
-    source: &str,
-    entry: &str,
-    profile: &str,
-) -> Option<ID3DBlob> {
-    let entry = nul_bytes(entry);
-    let profile = nul_bytes(profile);
-    let mut blob = ptr::null_mut();
-    let mut errors = ptr::null_mut();
-    let hr = unsafe {
-        compile(
-            source.as_ptr().cast(),
-            source.len(),
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            entry.as_ptr(),
-            profile.as_ptr(),
-            0,
-            0,
-            &mut blob,
-            &mut errors,
-        )
-    };
-    let _errors = unsafe { take_owned_interface::<ID3DBlob>(errors) };
-    if hr < 0 {
-        return None;
-    }
-    unsafe { take_owned_interface(blob) }
-}
-
-fn blob_bytes(blob: &ID3DBlob) -> Option<&[u8]> {
-    let size = unsafe { blob.GetBufferSize() };
-    let pointer = unsafe { blob.GetBufferPointer() }.cast::<u8>();
-    if pointer.is_null() {
-        return None;
-    }
-    Some(unsafe { std::slice::from_raw_parts(pointer, size) })
-}
-
-fn nul_bytes(value: &str) -> Vec<u8> {
-    value.bytes().chain(std::iter::once(0)).collect()
 }

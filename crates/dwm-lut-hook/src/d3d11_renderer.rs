@@ -295,8 +295,7 @@ pub(crate) use test_stub::*;
 mod tests {
     use super::*;
     use crate::lut_pipeline::{
-        BackBufferFormat, DXGI_FORMAT_R16G16B16A16_FLOAT, LoadedLut, LutMetadata, LutShaderProgram,
-        ShaderTexture3D,
+        BackBufferFormat, DXGI_FORMAT_R16G16B16A16_FLOAT, LoadedLut, LutMetadata, ShaderTexture3D,
     };
     use dwm_lut_payload::{AdapterLuid, ColorMode, MonitorIdentity, MonitorTarget};
     use std::cell::RefCell;
@@ -334,7 +333,6 @@ mod tests {
 
         LutPipeline {
             luts: vec![loaded_lut(ColorMode::Sdr), loaded_lut(ColorMode::Hdr)],
-            shader: LutShaderProgram::embedded(),
         }
     }
 
@@ -772,7 +770,6 @@ mod tests {
                 loaded_lut("PRIMARY", primary, ColorMode::Sdr),
                 loaded_lut("RIGHT", right, ColorMode::Sdr),
             ],
-            shader: LutShaderProgram::embedded(),
         };
 
         let plan = prepare_gpu_draw_plan(

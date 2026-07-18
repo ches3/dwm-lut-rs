@@ -17,3 +17,4 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 
 [build-dependencies]
 cc = "1.2.62"
+windows = { version = "0.62.2", features = ["Win32_Graphics_Direct3D_Fxc"] }

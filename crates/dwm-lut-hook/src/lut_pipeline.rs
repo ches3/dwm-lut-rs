@@ -1,16 +1,10 @@
-use std::sync::LazyLock;
-
 use dwm_lut_payload::{ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadLut};
 
-use crate::blue_noise::{blue_noise_threshold, render_blue_noise_hlsl};
+use crate::blue_noise::{BLUE_NOISE_64X64, BLUE_NOISE_SIZE};
 
 pub const DXGI_FORMAT_R16G16B16A16_FLOAT: u32 = 10;
 pub const DXGI_FORMAT_B8G8R8A8_UNORM: u32 = 87;
 const SDR_DITHER_GAMMA: f32 = 2.2;
-const LUT_PIPELINE_SHADER_TEMPLATE: &str = include_str!("../shaders/lut_pipeline.hlsl");
-static LUT_PIPELINE_SHADER_SOURCE: LazyLock<String> =
-    LazyLock::new(build_lut_pipeline_shader_source);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackBufferFormat {
     Bgra8Unorm,
@@ -101,37 +95,9 @@ pub struct LutMetadata {
     pub domain_max: [f32; 3],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LutShaderProgram {
-    pub source: &'static str,
-    pub vertex_entry: &'static str,
-    pub pixel_entry: &'static str,
-    pub vertex_profile: &'static str,
-    pub pixel_profile: &'static str,
-}
-
-impl LutShaderProgram {
-    pub fn embedded() -> Self {
-        Self {
-            source: LUT_PIPELINE_SHADER_SOURCE.as_str(),
-            vertex_entry: "VS",
-            pixel_entry: "PS",
-            vertex_profile: "vs_5_0",
-            pixel_profile: "ps_5_0",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct LutPipeline {
     pub luts: Vec<LoadedLut>,
-    pub shader: LutShaderProgram,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LutPipelineSummary {
-    pub lut_count: usize,
-    pub shader_profile: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -159,17 +125,7 @@ impl LutPipeline {
             });
         }
 
-        Self {
-            luts,
-            shader: LutShaderProgram::embedded(),
-        }
-    }
-
-    pub fn summary(&self) -> LutPipelineSummary {
-        LutPipelineSummary {
-            lut_count: self.luts.len(),
-            shader_profile: self.shader.pixel_profile,
-        }
+        Self { luts }
     }
 
     pub fn select_lut_index_for_monitor_identity(
@@ -335,16 +291,17 @@ pub fn apply_sdr_dither(rgb: [f32; 3], pixel_x: usize, pixel_y: usize) -> [f32; 
     ]
 }
 
+fn blue_noise_threshold(pixel_x: usize, pixel_y: usize) -> f32 {
+    let value = BLUE_NOISE_64X64[pixel_y % BLUE_NOISE_SIZE][pixel_x % BLUE_NOISE_SIZE] as f32;
+    (value + 0.5) / 256.0
+}
+
 pub fn scrgb_to_pq(rgb: [f32; 3]) -> [f32; 3] {
     linear_bt2100_to_pq(multiply_matrix(SCRGB_TO_BT2100, rgb))
 }
 
 pub fn pq_to_scrgb(rgb: [f32; 3]) -> [f32; 3] {
     multiply_matrix(BT2100_TO_SCRGB, pq_to_linear_bt2100(rgb))
-}
-
-fn build_lut_pipeline_shader_source() -> String {
-    LUT_PIPELINE_SHADER_TEMPLATE.replace("__BLUE_NOISE_64X64__", &render_blue_noise_hlsl())
 }
 
 fn normalize_sample(cube: &PayloadLut, rgb: [f32; 3]) -> [f32; 3] {
@@ -733,18 +690,6 @@ mod tests {
 
         assert_eq!(plan.shader_constants.domain_min, [-1.0, 0.0, 0.0, 0.0]);
         assert_eq!(plan.shader_constants.domain_max, [1.0, 1.0, 1.0, 0.0]);
-        assert!(runtime.shader.source.contains("domain_min"));
-        assert!(runtime.shader.source.contains("NormalizeAxis"));
-        assert!(runtime.shader.source.contains("NormalizeSample"));
-        assert!(runtime.shader.source.contains("BlueNoiseThreshold"));
-        assert!(runtime.shader.source.contains("ApplySdrDither"));
-        assert!(runtime.shader.source.contains("ScrgbToPq"));
-        assert!(runtime.shader.source.contains("PqToScrgb"));
-        assert!(runtime.shader.source.contains("scrgb_to_bt2100"));
-        assert!(runtime.shader.source.contains("bt2100_to_scrgb"));
-        assert!(runtime.shader.source.contains("blue_noise_64x64"));
-        assert!(runtime.shader.source.contains("max_value - min_value"));
-        assert!(!runtime.shader.source.contains("safe_range"));
     }
 
     #[test]

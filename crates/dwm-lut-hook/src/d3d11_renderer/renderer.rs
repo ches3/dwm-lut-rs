@@ -72,7 +72,6 @@ impl<K: Copy + PartialEq> PerOverlayDiagnosticLogLimiter<K> {
 }
 
 struct D3D11Renderer {
-    compiler: Option<D3DCompiler>,
     devices: BTreeMap<super::ResourceKey, DeviceResources>,
     #[cfg(debug_assertions)]
     frame_diagnostics: PerOverlayDiagnosticLogLimiter<FrameDiagnosticKey>,
@@ -98,7 +97,6 @@ struct RenderFrame<'a> {
 impl D3D11Renderer {
     fn new() -> Self {
         Self {
-            compiler: None,
             devices: BTreeMap::new(),
             #[cfg(debug_assertions)]
             frame_diagnostics: PerOverlayDiagnosticLogLimiter::default(),
@@ -236,16 +234,14 @@ impl D3D11Renderer {
             width: desc.Width,
             height: desc.Height,
         };
-        let result = unsafe {
-            self.render_with_device(
-                present_context.overlay_swap_chain,
-                present_context.monitor_identity,
-                present_context.hardware_protected,
-                frame,
-                pipeline,
-                draw_plan,
-            )
-        };
+        let result = self.render_with_device(
+            present_context.overlay_swap_chain,
+            present_context.monitor_identity,
+            present_context.hardware_protected,
+            frame,
+            pipeline,
+            draw_plan,
+        );
         #[cfg(debug_assertions)]
         if should_log_success_frame {
             debug_log!(
@@ -305,7 +301,7 @@ impl D3D11Renderer {
         unsafe { take_owned_interface(texture) }
     }
 
-    unsafe fn render_with_device(
+    fn render_with_device(
         &mut self,
         overlay_swap_chain: usize,
         #[cfg_attr(not(debug_assertions), allow(unused_variables))] monitor_identity: Option<
@@ -323,30 +319,15 @@ impl D3D11Renderer {
             width: frame.width,
             height: frame.height,
         };
-        let compile = match self.compiler() {
-            Some(compiler) => compiler.compile,
-            None => {
-                debug_log!(
-                    "event=renderer_early_return reason=compiler_unavailable overlay_swap_chain=0x{:x} device=0x{:x}",
-                    overlay_swap_chain,
-                    device_key
-                );
-                return super::RenderPresentLutResult::planned(
-                    draw_plan.format,
-                    draw_plan.lut_index,
-                );
-            }
-        };
-
         let recreate = self
             .devices
             .get(&resource_key)
             .is_none_or(|resources| resources.lut_count != pipeline.luts.len());
         if recreate {
             self.devices.remove(&resource_key);
-            let Some(resources) = (unsafe {
-                DeviceResources::create(frame.device, frame.width, frame.height, pipeline, compile)
-            }) else {
+            let Some(resources) =
+                DeviceResources::create(frame.device, frame.width, frame.height, pipeline)
+            else {
                 debug_log!(
                     "event=renderer_early_return reason=device_resources_create_failed overlay_swap_chain=0x{:x} device=0x{:x} width={} height={} lut_count={}",
                     overlay_swap_chain,
@@ -430,7 +411,7 @@ impl D3D11Renderer {
             &draw_plan.dirty_rects,
         );
 
-        let result = unsafe { resources.draw(frame, &draw_plan) };
+        let result = resources.draw(frame, &draw_plan);
         #[cfg(debug_assertions)]
         crate::route_trace::record_protected_lut_resource_candidate(
             overlay_swap_chain,
@@ -460,17 +441,9 @@ impl D3D11Renderer {
         }
     }
 
-    fn compiler(&mut self) -> Option<&D3DCompiler> {
-        if self.compiler.is_none() {
-            self.compiler = unsafe { load_compiler() };
-        }
-        self.compiler.as_ref()
-    }
-
     fn clear_resources(&mut self) -> usize {
         let device_count = self.devices.len();
         self.devices.clear();
-        self.compiler = None;
         #[cfg(debug_assertions)]
         {
             self.frame_diagnostics = PerOverlayDiagnosticLogLimiter::default();
@@ -544,34 +517,15 @@ impl CopyTextureResource {
 }
 
 impl DeviceResources {
-    unsafe fn create(
+    fn create(
         device: &ID3D11Device,
         width: u32,
         height: u32,
         pipeline: &LutPipeline,
-        compile: D3DCompileApi,
     ) -> Option<Self> {
-        let shader = &pipeline.shader;
-        let vertex_blob = unsafe {
-            compile_shader(
-                compile,
-                shader.source,
-                shader.vertex_entry,
-                shader.vertex_profile,
-            )
-        }?;
-        let pixel_blob = unsafe {
-            compile_shader(
-                compile,
-                shader.source,
-                shader.pixel_entry,
-                shader.pixel_profile,
-            )
-        }?;
-
-        let vertex_shader = create_vertex_shader(device, &vertex_blob)?;
-        let pixel_shader = create_pixel_shader(device, &pixel_blob)?;
-        let input_layout = create_input_layout(device, &vertex_blob)?;
+        let vertex_shader = create_vertex_shader(device, LUT_VERTEX_SHADER_BYTECODE)?;
+        let pixel_shader = create_pixel_shader(device, LUT_PIXEL_SHADER_BYTECODE)?;
+        let input_layout = create_input_layout(device, LUT_VERTEX_SHADER_BYTECODE)?;
         let vertex_buffer = create_vertex_buffer(device)?;
         let sampler = create_sampler(device)?;
         let constant_buffer = create_constant_buffer(device)?;
@@ -597,7 +551,7 @@ impl DeviceResources {
         })
     }
 
-    unsafe fn draw(&mut self, frame: RenderFrame<'_>, draw_plan: &super::GpuDrawPlan) -> bool {
+    fn draw(&mut self, frame: RenderFrame<'_>, draw_plan: &super::GpuDrawPlan) -> bool {
         let Some((copy_texture, copy_srv)) = self
             .copy_textures
             .for_format(frame.device, frame.width, frame.height, draw_plan.format)
@@ -758,7 +712,7 @@ impl PipelineBindings {
     }
 }
 
-unsafe fn bind_pipeline(
+fn bind_pipeline(
     context: &ID3D11DeviceContext,
     resources: &DeviceResources,
     bindings: &PipelineBindings,

@@ -383,7 +383,7 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
     let lut_pipeline = LutPipeline::from_payload(&payload);
     debug_log!(
         "event=replace_assignments_pipeline_prepared lut_count={}",
-        lut_pipeline.summary().lut_count
+        lut_pipeline.luts.len()
     );
 
     #[cfg_attr(not(debug_assertions), allow(unused_variables))]
@@ -509,7 +509,7 @@ where
     let lut_pipeline = LutPipeline::from_payload(&payload);
     debug_log!(
         "event=lut_pipeline_prepared lut_count={}",
-        lut_pipeline.summary().lut_count
+        lut_pipeline.luts.len()
     );
 
     let profile = HookProfile::for_build(build_profile);

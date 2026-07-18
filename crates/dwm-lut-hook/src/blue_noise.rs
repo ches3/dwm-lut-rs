@@ -1,5 +1,3 @@
-use std::fmt::Write as _;
-
 pub const BLUE_NOISE_SIZE: usize = 64;
 
 pub const BLUE_NOISE_64X64: [[u8; BLUE_NOISE_SIZE]; BLUE_NOISE_SIZE] = [
@@ -452,31 +450,3 @@ pub const BLUE_NOISE_64X64: [[u8; BLUE_NOISE_SIZE]; BLUE_NOISE_SIZE] = [
         0x47, 0xfb, 0x1d, 0x85,
     ],
 ];
-
-pub fn blue_noise_threshold(pixel_x: usize, pixel_y: usize) -> f32 {
-    let value = BLUE_NOISE_64X64[pixel_y % BLUE_NOISE_SIZE][pixel_x % BLUE_NOISE_SIZE] as f32;
-    (value + 0.5) / 256.0
-}
-
-pub fn render_blue_noise_hlsl() -> String {
-    let mut source = String::new();
-
-    for (row_index, row) in BLUE_NOISE_64X64.iter().enumerate() {
-        source.push_str("    ");
-        for (column_index, value) in row.iter().enumerate() {
-            if column_index > 0 {
-                source.push_str(", ");
-            }
-
-            let _ = write!(&mut source, "({value}.0 + 0.5) / 256.0");
-        }
-
-        if row_index + 1 == BLUE_NOISE_SIZE {
-            source.push('\n');
-        } else {
-            source.push_str(",\n");
-        }
-    }
-
-    source
-}
