@@ -690,6 +690,7 @@ dependencies = [
  "cc",
  "dwm-lut-payload",
  "minhook-sys",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

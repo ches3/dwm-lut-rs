@@ -22,17 +22,6 @@ struct Box3D {
     back: u32,
 }
 
-struct D3D11VtableIndex;
-
-impl D3D11VtableIndex {
-    const DEVICE_CHILD_GET_DEVICE: usize = 3;
-    const TEXTURE2D_GET_DESC: usize = 10;
-    const DEVICE_CREATE_RENDER_TARGET_VIEW: usize = 9;
-    const DEVICE_GET_IMMEDIATE_CONTEXT: usize = 40;
-    const CONTEXT_COPY_SUBRESOURCE_REGION: usize = 46;
-    const CONTEXT_UPDATE_SUBRESOURCE: usize = 48;
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct GpuDrawPlan {
     format: BackBufferFormat,
@@ -425,16 +414,6 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn d3d11_abi_indices_cover_render_path_external_calls() {
-        assert_eq!(D3D11VtableIndex::DEVICE_CHILD_GET_DEVICE, 3);
-        assert_eq!(D3D11VtableIndex::TEXTURE2D_GET_DESC, 10);
-        assert_eq!(D3D11VtableIndex::DEVICE_CREATE_RENDER_TARGET_VIEW, 9);
-        assert_eq!(D3D11VtableIndex::DEVICE_GET_IMMEDIATE_CONTEXT, 40);
-        assert_eq!(D3D11VtableIndex::CONTEXT_COPY_SUBRESOURCE_REGION, 46);
-        assert_eq!(D3D11VtableIndex::CONTEXT_UPDATE_SUBRESOURCE, 48);
     }
 
     #[test]

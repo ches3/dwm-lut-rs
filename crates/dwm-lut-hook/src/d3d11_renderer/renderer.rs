@@ -1,8 +1,17 @@
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::mem::size_of;
-use std::ptr;
 use std::sync::{Mutex, OnceLock};
+
+use windows::Win32::Foundation::RECT;
+use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_BOX, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, D3D11_TEXTURE2D_DESC, D3D11_VIEWPORT,
+    ID3D11Buffer, ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader,
+    ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D,
+    ID3D11VertexShader,
+};
+use windows::core::Interface;
 
 use super::Vertex;
 use super::context_state::{ContextState, unbind_pipeline};
@@ -69,8 +78,6 @@ struct D3D11Renderer {
     frame_diagnostics: PerOverlayDiagnosticLogLimiter<FrameDiagnosticKey>,
 }
 
-unsafe impl Send for D3D11Renderer {}
-
 #[derive(Clone, Copy)]
 struct PresentRenderContext {
     overlay_swap_chain: usize,
@@ -80,10 +87,10 @@ struct PresentRenderContext {
 }
 
 #[derive(Clone, Copy)]
-struct RenderFrame {
-    device: ComPtr,
-    context: ComPtr,
-    back_buffer: ComPtr,
+struct RenderFrame<'a> {
+    device: &'a ID3D11Device,
+    context: &'a ID3D11DeviceContext,
+    back_buffer: &'a ID3D11Texture2D,
     width: u32,
     height: u32,
 }
@@ -118,53 +125,28 @@ impl D3D11Renderer {
             return super::RenderPresentLutResult::default();
         };
 
-        let mut device: ComPtr = ptr::null_mut();
-        unsafe {
-            d3d11_device_child_get_device(back_buffer, &mut device);
-        }
-        if device.is_null() {
+        let Ok(device) = (unsafe { back_buffer.GetDevice() }) else {
             debug_log!(
-                "event=renderer_early_return reason=device_null overlay_swap_chain=0x{:x} back_buffer=0x{:x}",
+                "event=renderer_early_return reason=device_get_failed overlay_swap_chain=0x{:x} back_buffer=0x{:x}",
                 present_context.overlay_swap_chain,
-                back_buffer as usize
+                back_buffer.as_raw() as usize
             );
-            unsafe { release(back_buffer) };
             return super::RenderPresentLutResult::default();
-        }
-
-        let mut context: ComPtr = ptr::null_mut();
-        unsafe {
-            d3d11_device_get_immediate_context(device, &mut context);
-        }
-        if context.is_null() {
-            debug_log!(
-                "event=renderer_early_return reason=context_null overlay_swap_chain=0x{:x} back_buffer=0x{:x} device=0x{:x}",
-                present_context.overlay_swap_chain,
-                back_buffer as usize,
-                device as usize
-            );
-            unsafe {
-                release(device);
-                release(back_buffer);
-            }
-            return super::RenderPresentLutResult::default();
-        }
-
-        let mut desc = Texture2DDesc {
-            width: 0,
-            height: 0,
-            mip_levels: 0,
-            array_size: 0,
-            format: 0,
-            sample_count: 0,
-            sample_quality: 0,
-            usage: 0,
-            bind_flags: 0,
-            cpu_access_flags: 0,
-            misc_flags: 0,
         };
+
+        let Ok(context) = (unsafe { device.GetImmediateContext() }) else {
+            debug_log!(
+                "event=renderer_early_return reason=context_get_failed overlay_swap_chain=0x{:x} back_buffer=0x{:x} device=0x{:x}",
+                present_context.overlay_swap_chain,
+                back_buffer.as_raw() as usize,
+                device.as_raw() as usize
+            );
+            return super::RenderPresentLutResult::default();
+        };
+
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
-            d3d11_texture2d_get_desc(back_buffer, &mut desc);
+            back_buffer.GetDesc(&mut desc);
         }
         #[cfg(debug_assertions)]
         let frame_adapter_luid = present_context
@@ -186,10 +168,10 @@ impl D3D11Renderer {
             debug_log!(
                 "event=back_buffer_desc overlay_swap_chain=0x{:x} back_buffer=0x{:x} dxgi_format={} width={} height={} target_id={:?}",
                 present_context.overlay_swap_chain,
-                back_buffer as usize,
-                desc.format,
-                desc.width,
-                desc.height,
+                back_buffer.as_raw() as usize,
+                desc.Format.0,
+                desc.Width,
+                desc.Height,
                 frame_target_id
             );
         }
@@ -198,9 +180,9 @@ impl D3D11Renderer {
             pipeline,
             present_context.monitor_identity,
             clip_box,
-            desc.format,
-            desc.width,
-            desc.height,
+            desc.Format.0 as u32,
+            desc.Width,
+            desc.Height,
             dirty_rects,
         ) {
             Ok(draw_plan) => draw_plan,
@@ -210,21 +192,16 @@ impl D3D11Renderer {
                     "event=lut_draw_skip reason={} overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} dirty_rect_count={}",
                     _reason.as_str(),
                     present_context.overlay_swap_chain,
-                    back_buffer as usize,
+                    back_buffer.as_raw() as usize,
                     frame_adapter_luid,
                     frame_target_id,
                     clip_box.left,
                     clip_box.top,
-                    desc.format,
-                    desc.width,
-                    desc.height,
+                    desc.Format.0,
+                    desc.Width,
+                    desc.Height,
                     dirty_rects.len()
                 );
-                unsafe {
-                    release(back_buffer);
-                    release(context);
-                    release(device);
-                }
                 return super::RenderPresentLutResult::default();
             }
         };
@@ -233,14 +210,14 @@ impl D3D11Renderer {
             debug_log!(
                 "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} lut_index={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?}",
                 present_context.overlay_swap_chain,
-                back_buffer as usize,
+                back_buffer.as_raw() as usize,
                 frame_adapter_luid,
                 frame_target_id,
                 clip_box.left,
                 clip_box.top,
-                desc.format,
-                desc.width,
-                desc.height,
+                desc.Format.0,
+                desc.Width,
+                desc.Height,
                 draw_plan.lut_index,
                 dirty_rects.len(),
                 draw_plan.dirty_rects.len(),
@@ -253,11 +230,11 @@ impl D3D11Renderer {
         let first_draw_rect = draw_plan.dirty_rects.first().copied();
 
         let frame = RenderFrame {
-            device,
-            context,
-            back_buffer,
-            width: desc.width,
-            height: desc.height,
+            device: &device,
+            context: &context,
+            back_buffer: &back_buffer,
+            width: desc.Width,
+            height: desc.Height,
         };
         let result = unsafe {
             self.render_with_device(
@@ -278,12 +255,12 @@ impl D3D11Renderer {
                 present_context
                     .monitor_identity
                     .map(|identity| identity.target_id),
-                back_buffer as usize,
-                device as usize,
-                context as usize,
+                back_buffer.as_raw() as usize,
+                device.as_raw() as usize,
+                context.as_raw() as usize,
                 result.dxgi_format,
-                desc.width,
-                desc.height,
+                desc.Width,
+                desc.Height,
                 result.lut_index,
                 result.lut_applied,
                 dirty_rects.len(),
@@ -292,11 +269,6 @@ impl D3D11Renderer {
                 result.present_dirty_rect
             );
         }
-        unsafe {
-            release(back_buffer);
-            release(context);
-            release(device);
-        }
         result
     }
 
@@ -304,16 +276,16 @@ impl D3D11Renderer {
     fn should_log_success_frame(
         &mut self,
         overlay_swap_chain: usize,
-        desc: Texture2DDesc,
+        desc: D3D11_TEXTURE2D_DESC,
         target_id: Option<u32>,
     ) -> bool {
         self.frame_diagnostics.should_log(
             overlay_swap_chain,
             FrameDiagnosticKey {
-                dxgi_format: desc.format,
+                dxgi_format: desc.Format.0 as u32,
                 target_id,
-                width: desc.width,
-                height: desc.height,
+                width: desc.Width,
+                height: desc.Height,
             },
         )
     }
@@ -322,15 +294,15 @@ impl D3D11Renderer {
         &mut self,
         overlay_swap_chain: usize,
         swap_chain_path: SwapChainPathHypothesis,
-    ) -> Option<ComPtr> {
+    ) -> Option<ID3D11Texture2D> {
         let texture = unsafe {
             dwm_lut_get_back_buffer_25h2(
-                overlay_swap_chain as ComPtr,
+                overlay_swap_chain as *mut c_void,
                 swap_chain_path.container_vtable_index,
                 swap_chain_path.resource_vtable_index,
             )
         };
-        (!texture.is_null()).then_some(texture)
+        unsafe { take_owned_interface(texture) }
     }
 
     unsafe fn render_with_device(
@@ -340,11 +312,11 @@ impl D3D11Renderer {
             MonitorIdentity,
         >,
         #[cfg_attr(not(debug_assertions), allow(unused_variables))] hardware_protected: bool,
-        frame: RenderFrame,
+        frame: RenderFrame<'_>,
         pipeline: &LutPipeline,
         mut draw_plan: super::GpuDrawPlan,
     ) -> super::RenderPresentLutResult {
-        let device_key = frame.device as usize;
+        let device_key = frame.device.as_raw() as usize;
         let resource_key = super::ResourceKey {
             device: device_key,
             overlay_swap_chain,
@@ -373,14 +345,7 @@ impl D3D11Renderer {
         if recreate {
             self.devices.remove(&resource_key);
             let Some(resources) = (unsafe {
-                DeviceResources::create(
-                    frame.device,
-                    frame.context,
-                    frame.width,
-                    frame.height,
-                    pipeline,
-                    compile,
-                )
+                DeviceResources::create(frame.device, frame.width, frame.height, pipeline, compile)
             }) else {
                 debug_log!(
                     "event=renderer_early_return reason=device_resources_create_failed overlay_swap_chain=0x{:x} device=0x{:x} width={} height={} lut_count={}",
@@ -439,7 +404,7 @@ impl D3D11Renderer {
                 "event=lut_full_redraw device=0x{:x} overlay_swap_chain=0x{:x} back_buffer=0x{:x} width={} height={} format={:?} lut_index={} resources_recreated={} copy_texture_created={} previous_state={:?} dirty_rect_count={}",
                 device_key,
                 overlay_swap_chain,
-                frame.back_buffer as usize,
+                frame.back_buffer.as_raw() as usize,
                 frame.width,
                 frame.height,
                 draw_plan.format,
@@ -471,9 +436,9 @@ impl D3D11Renderer {
             overlay_swap_chain,
             monitor_identity,
             hardware_protected,
-            frame.back_buffer as usize,
-            frame.device as usize,
-            frame.context as usize,
+            frame.back_buffer.as_raw() as usize,
+            frame.device.as_raw() as usize,
+            frame.context.as_raw() as usize,
             Some(super::dxgi_format_for_copy_texture(draw_plan.format)),
             Some(frame.width),
             Some(frame.height),
@@ -518,19 +483,16 @@ struct DeviceResources {
     width: u32,
     height: u32,
     lut_count: usize,
-    vertex_shader: ComPtr,
-    pixel_shader: ComPtr,
-    input_layout: ComPtr,
-    vertex_buffer: ComPtr,
-    sampler: ComPtr,
-    constant_buffer: ComPtr,
+    vertex_shader: ID3D11VertexShader,
+    pixel_shader: ID3D11PixelShader,
+    input_layout: ID3D11InputLayout,
+    vertex_buffer: ID3D11Buffer,
+    sampler: ID3D11SamplerState,
+    constant_buffer: ID3D11Buffer,
     copy_textures: CopyTextureResources,
-    lut_textures: Vec<ComPtr>,
-    lut_srvs: Vec<ComPtr>,
+    lut_srvs: Vec<ID3D11ShaderResourceView>,
     draw_states: BTreeMap<super::RenderTargetKey, super::RenderTargetState>,
 }
-
-unsafe impl Send for DeviceResources {}
 
 #[derive(Default)]
 struct CopyTextureResources {
@@ -539,11 +501,9 @@ struct CopyTextureResources {
 }
 
 struct CopyTextureResource {
-    texture: ComPtr,
-    srv: ComPtr,
+    texture: ID3D11Texture2D,
+    srv: ID3D11ShaderResourceView,
 }
-
-unsafe impl Send for CopyTextureResources {}
 
 impl CopyTextureResources {
     fn has_format(&self, format: BackBufferFormat) -> bool {
@@ -553,9 +513,9 @@ impl CopyTextureResources {
         }
     }
 
-    unsafe fn for_format(
+    fn for_format(
         &mut self,
-        device: ComPtr,
+        device: &ID3D11Device,
         width: u32,
         height: u32,
         format: BackBufferFormat,
@@ -565,40 +525,27 @@ impl CopyTextureResources {
             BackBufferFormat::Rgba16Float => &mut self.hdr,
         };
         if slot.is_none() {
-            *slot = Some(unsafe { CopyTextureResource::create(device, width, height, format) }?);
+            *slot = Some(CopyTextureResource::create(device, width, height, format)?);
         }
         slot.as_ref()
     }
 }
 
 impl CopyTextureResource {
-    unsafe fn create(
-        device: ComPtr,
+    fn create(
+        device: &ID3D11Device,
         width: u32,
         height: u32,
         format: BackBufferFormat,
     ) -> Option<Self> {
-        let (texture, srv) = unsafe { create_copy_texture(device, width, height, format) }?;
-        Some(Self {
-            texture: texture.into_raw(),
-            srv: srv.into_raw(),
-        })
-    }
-}
-
-impl Drop for CopyTextureResource {
-    fn drop(&mut self) {
-        unsafe {
-            release(self.srv);
-            release(self.texture);
-        }
+        let (texture, srv) = create_copy_texture(device, width, height, format)?;
+        Some(Self { texture, srv })
     }
 }
 
 impl DeviceResources {
     unsafe fn create(
-        device: ComPtr,
-        context: ComPtr,
+        device: &ID3D11Device,
         width: u32,
         height: u32,
         pipeline: &LutPipeline,
@@ -622,80 +569,69 @@ impl DeviceResources {
             )
         }?;
 
-        let vertex_shader = unsafe { create_vertex_shader(device, &vertex_blob) }?;
-        let vertex_shader = OwnedCom::new(vertex_shader);
-        let pixel_shader = OwnedCom::new(unsafe { create_pixel_shader(device, &pixel_blob) }?);
-        let input_layout = OwnedCom::new(unsafe { create_input_layout(device, &vertex_blob) }?);
-        let vertex_buffer = OwnedCom::new(unsafe { create_vertex_buffer(device) }?);
-        let sampler = OwnedCom::new(unsafe { create_sampler(device) }?);
-        let constant_buffer = OwnedCom::new(unsafe { create_constant_buffer(device) }?);
-        let mut lut_textures = Vec::with_capacity(pipeline.luts.len());
+        let vertex_shader = create_vertex_shader(device, &vertex_blob)?;
+        let pixel_shader = create_pixel_shader(device, &pixel_blob)?;
+        let input_layout = create_input_layout(device, &vertex_blob)?;
+        let vertex_buffer = create_vertex_buffer(device)?;
+        let sampler = create_sampler(device)?;
+        let constant_buffer = create_constant_buffer(device)?;
         let mut lut_srvs = Vec::with_capacity(pipeline.luts.len());
         for lut in &pipeline.luts {
-            let (texture, srv) = (unsafe { create_lut_texture(device, lut) })?;
-            lut_textures.push(texture);
+            let (_texture, srv) = create_lut_texture(device, lut)?;
             lut_srvs.push(srv);
         }
 
-        let _ = context;
         Some(Self {
             width,
             height,
             lut_count: pipeline.luts.len(),
-            vertex_shader: vertex_shader.into_raw(),
-            pixel_shader: pixel_shader.into_raw(),
-            input_layout: input_layout.into_raw(),
-            vertex_buffer: vertex_buffer.into_raw(),
-            sampler: sampler.into_raw(),
-            constant_buffer: constant_buffer.into_raw(),
+            vertex_shader,
+            pixel_shader,
+            input_layout,
+            vertex_buffer,
+            sampler,
+            constant_buffer,
             copy_textures: CopyTextureResources::default(),
-            lut_textures: lut_textures.into_iter().map(OwnedCom::into_raw).collect(),
-            lut_srvs: lut_srvs.into_iter().map(OwnedCom::into_raw).collect(),
+            lut_srvs,
             draw_states: BTreeMap::new(),
         })
     }
 
-    unsafe fn draw(&mut self, frame: RenderFrame, draw_plan: &super::GpuDrawPlan) -> bool {
-        let Some((copy_texture, copy_srv)) = (unsafe {
-            self.copy_textures
-                .for_format(frame.device, frame.width, frame.height, draw_plan.format)
-                .map(|resource| (resource.texture, resource.srv))
-        }) else {
+    unsafe fn draw(&mut self, frame: RenderFrame<'_>, draw_plan: &super::GpuDrawPlan) -> bool {
+        let Some((copy_texture, copy_srv)) = self
+            .copy_textures
+            .for_format(frame.device, frame.width, frame.height, draw_plan.format)
+            .map(|resource| (resource.texture.clone(), resource.srv.clone()))
+        else {
             debug_log!(
                 "event=renderer_early_return reason=copy_texture_create_failed device=0x{:x} back_buffer=0x{:x} width={} height={} format={:?}",
-                frame.device as usize,
-                frame.back_buffer as usize,
+                frame.device.as_raw() as usize,
+                frame.back_buffer.as_raw() as usize,
                 frame.width,
                 frame.height,
                 draw_plan.format
             );
             return false;
         };
-        let mut rtv: ComPtr = ptr::null_mut();
-        if unsafe {
-            d3d11_device_create_render_target_view_from_context(
-                frame.context,
-                frame.back_buffer,
-                &mut rtv,
-            )
-        } < S_OK
-            || rtv.is_null()
-        {
+        let Some(rtv) = create_render_target_view(frame.device, frame.back_buffer) else {
             debug_log!(
                 "event=renderer_early_return reason=render_target_view_create_failed device=0x{:x} back_buffer=0x{:x}",
-                frame.device as usize,
-                frame.back_buffer as usize
+                frame.device.as_raw() as usize,
+                frame.back_buffer.as_raw() as usize
             );
             return false;
-        }
-        let drew_any = super::with_restored_state(
-            || unsafe { ContextState::capture(frame.context) },
+        };
+        let bindings =
+            PipelineBindings::new(self, &rtv, &copy_srv, &self.lut_srvs[draw_plan.lut_index]);
+        super::with_restored_state(
+            || ContextState::capture(frame.context),
             || {
                 unsafe {
-                    d3d11_context_update_subresource(
-                        frame.context,
-                        self.constant_buffer,
-                        &draw_plan.constants as *const ShaderConstantsCBuffer as *const c_void,
+                    frame.context.UpdateSubresource(
+                        &self.constant_buffer,
+                        0,
+                        None,
+                        (&draw_plan.constants as *const ShaderConstantsCBuffer).cast(),
                         0,
                         0,
                     );
@@ -705,47 +641,47 @@ impl DeviceResources {
                 for rect in &draw_plan.dirty_rects {
                     let rect = *rect;
                     let box3d = super::copy_box_for_rect(rect);
+                    let source_box = D3D11_BOX {
+                        left: box3d.left,
+                        top: box3d.top,
+                        front: box3d.front,
+                        right: box3d.right,
+                        bottom: box3d.bottom,
+                        back: box3d.back,
+                    };
                     unsafe {
-                        d3d11_context_copy_subresource_region(
-                            frame.context,
-                            copy_texture,
+                        frame.context.CopySubresourceRegion(
+                            &copy_texture,
+                            0,
                             rect.left as u32,
                             rect.top as u32,
+                            0,
                             frame.back_buffer,
-                            &box3d,
+                            0,
+                            Some(&source_box),
                         );
                     }
 
                     let vertices = super::vertices_for_rect(rect, frame.width, frame.height);
                     unsafe {
-                        bind_pipeline(
-                            frame.context,
-                            self,
-                            rtv,
-                            copy_srv,
-                            self.lut_srvs[draw_plan.lut_index],
-                        );
-                        d3d11_context_update_subresource(
-                            frame.context,
-                            self.vertex_buffer,
+                        bind_pipeline(frame.context, self, &bindings);
+                        frame.context.UpdateSubresource(
+                            &self.vertex_buffer,
+                            0,
+                            None,
                             vertices.as_ptr().cast(),
                             0,
                             0,
                         );
-                        d3d11_context_draw(frame.context, 4, 0);
+                        frame.context.Draw(4, 0);
                         unbind_pipeline(frame.context);
                     }
                     drew_any = true;
                 }
                 drew_any
             },
-            |saved_state| unsafe { saved_state.restore(frame.context) },
-        );
-
-        unsafe {
-            release(rtv);
-        }
-        drew_any
+            |saved_state| saved_state.restore(frame.context),
+        )
     }
 }
 
@@ -754,25 +690,6 @@ fn format_monitor_identity(identity: Option<MonitorIdentity>) -> String {
     identity
         .map(|identity| format!("{}:{}", identity.adapter_luid, identity.target_id))
         .unwrap_or_else(|| "none".to_owned())
-}
-
-impl Drop for DeviceResources {
-    fn drop(&mut self) {
-        unsafe {
-            for srv in self.lut_srvs.drain(..) {
-                release(srv);
-            }
-            for texture in self.lut_textures.drain(..) {
-                release(texture);
-            }
-            release(self.constant_buffer);
-            release(self.sampler);
-            release(self.vertex_buffer);
-            release(self.input_layout);
-            release(self.pixel_shader);
-            release(self.vertex_shader);
-        }
-    }
 }
 
 pub(crate) unsafe fn render_present_lut(
@@ -813,54 +730,76 @@ pub(crate) fn shutdown_renderer_resources() -> usize {
     renderer.clear_resources()
 }
 
+struct PipelineBindings {
+    vertex_buffers: [Option<ID3D11Buffer>; 1],
+    srvs: [Option<ID3D11ShaderResourceView>; 2],
+    samplers: [Option<ID3D11SamplerState>; 1],
+    constant_buffers: [Option<ID3D11Buffer>; 1],
+    render_targets:
+        [Option<ID3D11RenderTargetView>; D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT as usize],
+}
+
+impl PipelineBindings {
+    fn new(
+        resources: &DeviceResources,
+        rtv: &ID3D11RenderTargetView,
+        copy_srv: &ID3D11ShaderResourceView,
+        lut_srv: &ID3D11ShaderResourceView,
+    ) -> Self {
+        let mut render_targets = std::array::from_fn(|_| None);
+        render_targets[0] = Some(rtv.clone());
+        Self {
+            vertex_buffers: [Some(resources.vertex_buffer.clone())],
+            srvs: [Some(copy_srv.clone()), Some(lut_srv.clone())],
+            samplers: [Some(resources.sampler.clone())],
+            constant_buffers: [Some(resources.constant_buffer.clone())],
+            render_targets,
+        }
+    }
+}
+
 unsafe fn bind_pipeline(
-    context: ComPtr,
+    context: &ID3D11DeviceContext,
     resources: &DeviceResources,
-    rtv: ComPtr,
-    copy_srv: ComPtr,
-    lut_srv: ComPtr,
+    bindings: &PipelineBindings,
 ) {
     let stride = size_of::<Vertex>() as u32;
     let offset = 0u32;
-    let vertex_buffers = [resources.vertex_buffer];
-    let srvs = [copy_srv, lut_srv];
-    let samplers = [resources.sampler];
-    let constant_buffers = [resources.constant_buffer];
-    let mut rtvs = [ptr::null_mut(); D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
-    rtvs[0] = rtv;
     let blend_factor = [0.0; 4];
-    let empty_scissors: [DirtyRect; 0] = [];
-    let viewport = Viewport {
-        top_left_x: 0.0,
-        top_left_y: 0.0,
-        width: resources.width as f32,
-        height: resources.height as f32,
-        min_depth: 0.0,
-        max_depth: 1.0,
+    let empty_scissors: [RECT; 0] = [];
+    let viewport = D3D11_VIEWPORT {
+        TopLeftX: 0.0,
+        TopLeftY: 0.0,
+        Width: resources.width as f32,
+        Height: resources.height as f32,
+        MinDepth: 0.0,
+        MaxDepth: 1.0,
     };
 
     unsafe {
-        d3d11_context_ia_set_input_layout(context, resources.input_layout);
-        d3d11_context_ia_set_vertex_buffers(context, vertex_buffers.as_ptr(), &stride, &offset);
-        d3d11_context_ia_set_primitive_topology(context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-        d3d11_context_vs_set_shader(context, resources.vertex_shader, ptr::null(), 0);
-        d3d11_context_gs_set_shader(context, ptr::null_mut(), ptr::null(), 0);
-        d3d11_context_hs_set_shader(context, ptr::null_mut(), ptr::null(), 0);
-        d3d11_context_ds_set_shader(context, ptr::null_mut(), ptr::null(), 0);
-        d3d11_context_ps_set_shader(context, resources.pixel_shader, ptr::null(), 0);
-        d3d11_context_ps_set_shader_resources(context, srvs.as_ptr(), srvs.len() as u32);
-        d3d11_context_ps_set_samplers(context, samplers.as_ptr());
-        d3d11_context_vs_set_constant_buffers(context, constant_buffers.as_ptr());
-        d3d11_context_ps_set_constant_buffers(context, constant_buffers.as_ptr());
-        d3d11_context_om_set_render_targets(
-            context,
-            D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT as u32,
-            rtvs.as_ptr(),
+        context.IASetInputLayout(&resources.input_layout);
+        context.IASetVertexBuffers(
+            0,
+            bindings.vertex_buffers.len() as u32,
+            Some(bindings.vertex_buffers.as_ptr()),
+            Some(&stride),
+            Some(&offset),
         );
-        d3d11_context_om_set_blend_state(context, ptr::null_mut(), blend_factor.as_ptr(), u32::MAX);
-        d3d11_context_om_set_depth_stencil_state(context, ptr::null_mut(), 0);
-        d3d11_context_rs_set_state(context, ptr::null_mut());
-        d3d11_context_rs_set_viewports(context, &viewport);
-        d3d11_context_rs_set_scissor_rects(context, empty_scissors.as_ptr(), 0);
+        context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        context.VSSetShader(&resources.vertex_shader, None);
+        context.GSSetShader(None, None);
+        context.HSSetShader(None, None);
+        context.DSSetShader(None, None);
+        context.PSSetShader(&resources.pixel_shader, None);
+        context.PSSetShaderResources(0, Some(&bindings.srvs));
+        context.PSSetSamplers(0, Some(&bindings.samplers));
+        context.VSSetConstantBuffers(0, Some(&bindings.constant_buffers));
+        context.PSSetConstantBuffers(0, Some(&bindings.constant_buffers));
+        context.OMSetRenderTargets(Some(&bindings.render_targets), None);
+        context.OMSetBlendState(None, Some(&blend_factor), u32::MAX);
+        context.OMSetDepthStencilState(None, 0);
+        context.RSSetState(None);
+        context.RSSetViewports(Some(&[viewport]));
+        context.RSSetScissorRects(Some(&empty_scissors));
     }
 }
