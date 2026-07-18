@@ -5,9 +5,8 @@ use std::time::{Duration, Instant};
 
 use crate::app_args::BackgroundOptions;
 use crate::backend;
-use crate::cli::CliCommand;
 use crate::control;
-use crate::control::protocol::ControlStatus;
+use crate::control::protocol::{ControlCommand, ControlRequest, ControlStatus};
 use crate::control::server::ServerShutdown;
 use crate::elevation;
 use crate::error::InjectorError;
@@ -17,7 +16,7 @@ use crate::host::{
     HostApplication, HostController, HostInstanceClaim, HostInstanceGuard, HostInstanceWaiter,
 };
 use crate::panic_report;
-use crate::{native_dialog, runtime};
+use crate::{launcher, native_dialog};
 
 const HOST_INSTANCE_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_INSTANCE_WAIT_SLICE: Duration = Duration::from_millis(100);
@@ -111,7 +110,7 @@ fn run_host_inner(
 ) -> Result<(), InjectorError> {
     let _host_guard = acquire_host_instance()?;
     backend::ensure_host_privileges()?;
-    let dll_path = runtime::resolve_host_dll_path(dll_path)?;
+    let dll_path = launcher::resolve_host_dll_path(dll_path)?;
     let controller = Arc::new(HostController::new(dll_path));
     let shutdown = Arc::new(ServerShutdown::new());
     let (ui_handle, ui_commands) = gui::UiHandle::new();
@@ -304,9 +303,7 @@ enum ExistingHostState {
 }
 
 fn existing_host_state() -> Result<ExistingHostState, InjectorError> {
-    let request = runtime::request_from_cli(CliCommand::Status)?
-        .expect("status command must map to a control request");
-    let response = control::client::send_request(&request)?;
+    let response = control::client::send_request(&ControlRequest::new(ControlCommand::Status))?;
     if !response.ok {
         return Err(InjectorError::ControlProtocol(response.message));
     }

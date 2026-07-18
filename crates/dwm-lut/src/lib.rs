@@ -15,7 +15,6 @@ mod native_dialog;
 #[doc(hidden)]
 pub mod panic_report;
 mod paths;
-mod runtime;
 mod security;
 mod startup;
 

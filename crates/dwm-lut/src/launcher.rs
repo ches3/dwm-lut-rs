@@ -2,11 +2,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::control::client;
-use crate::control::protocol::{
-    CONTROL_PROTOCOL_VERSION, ControlCommand, ControlRequest, ControlStatus,
-};
-use crate::error::InjectorError;
+use crate::control::protocol::{ControlCommand, ControlRequest, ControlStatus};
+use crate::error::{InjectionStep, InjectorError};
 use crate::host::launch;
+use crate::paths;
 
 const HOST_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_WAIT_SLICE: Duration = Duration::from_millis(100);
@@ -48,10 +47,7 @@ enum ShowGuiOutcome {
 }
 
 fn show_host_gui() -> Result<ShowGuiOutcome, InjectorError> {
-    let response = client::send_request(&ControlRequest {
-        protocol_version: CONTROL_PROTOCOL_VERSION,
-        command: ControlCommand::ShowGui,
-    })?;
+    let response = client::send_request(&ControlRequest::new(ControlCommand::ShowGui))?;
     if response.ok {
         Ok(ShowGuiOutcome::Shown)
     } else if response.status == ControlStatus::Stopping {
@@ -78,7 +74,7 @@ pub(crate) fn resolve_host_executable_path(
     host_path: Option<PathBuf>,
 ) -> Result<PathBuf, InjectorError> {
     let host_path = match host_path {
-        Some(path) => absolute_path(path)?,
+        Some(path) => paths::absolute_path(path)?,
         None => default_host_executable_path()?,
     };
     if !host_path.is_file() {
@@ -90,19 +86,32 @@ pub(crate) fn resolve_host_executable_path(
     Ok(host_path)
 }
 
-fn host_executable_name() -> &'static Path {
-    Path::new("dwm-lut.exe")
+pub(crate) fn resolve_host_dll_path(
+    dll_path: Option<PathBuf>,
+) -> Result<Option<PathBuf>, InjectorError> {
+    let Some(dll_path) = dll_path else {
+        return Ok(None);
+    };
+
+    let dll_path = paths::absolute_path(dll_path)?;
+    if !dll_path.is_file() {
+        return Err(InjectorError::MissingFile {
+            kind: "hook DLL",
+            path: dll_path,
+        });
+    }
+
+    dll_path
+        .canonicalize()
+        .map(Some)
+        .map_err(|source| InjectorError::StepFailed {
+            step: InjectionStep::ResolveLocalHookDll,
+            source,
+        })
 }
 
-fn absolute_path(path: PathBuf) -> Result<PathBuf, InjectorError> {
-    if path.is_absolute() {
-        return Ok(path);
-    }
-    let cwd = std::env::current_dir().map_err(|source| InjectorError::ControlPipe {
-        operation: "resolve current directory",
-        source,
-    })?;
-    Ok(cwd.join(path))
+fn host_executable_name() -> &'static Path {
+    Path::new("dwm-lut.exe")
 }
 
 #[cfg(test)]
@@ -146,5 +155,38 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn resolve_host_dll_path_canonicalizes_existing_relative_path() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let relative_path =
+            PathBuf::from("target").join(format!("dwm-lut-run-dll-test-{unique}.dll"));
+        fs::create_dir_all("target").expect("target directory should be available");
+        fs::write(&relative_path, b"hook").expect("test hook DLL should be written");
+
+        let resolved = resolve_host_dll_path(Some(relative_path.clone()))
+            .expect("existing hook DLL should resolve")
+            .expect("explicit hook DLL should remain configured");
+
+        assert_eq!(resolved, relative_path.canonicalize().unwrap());
+        let _ = fs::remove_file(relative_path);
+    }
+
+    #[test]
+    fn resolve_host_dll_path_rejects_missing_file_at_startup() {
+        let error = resolve_host_dll_path(Some(PathBuf::from(r"C:\missing\hook.dll")))
+            .expect_err("missing hook DLL must be rejected");
+
+        assert!(matches!(
+            error,
+            InjectorError::MissingFile {
+                kind: "hook DLL",
+                ..
+            }
+        ));
     }
 }

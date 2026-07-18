@@ -14,6 +14,15 @@ pub(crate) struct ControlRequest {
     pub(crate) command: ControlCommand,
 }
 
+impl ControlRequest {
+    pub(crate) fn new(command: ControlCommand) -> Self {
+        Self {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            command,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct ControlRequestEnvelope {
     protocol_version: u32,
@@ -159,14 +168,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_attaches_protocol_version() {
+        let request = ControlRequest::new(ControlCommand::Status);
+
+        assert_eq!(request.command, ControlCommand::Status);
+        assert_eq!(request.protocol_version, CONTROL_PROTOCOL_VERSION);
+    }
+
+    #[test]
     fn request_roundtrips_through_json() {
-        let request = ControlRequest {
-            protocol_version: CONTROL_PROTOCOL_VERSION,
-            command: ControlCommand::Apply {
-                config_path: PathBuf::from(r"C:\profiles\config.json"),
-                profile: Some("desktop".to_string()),
-            },
-        };
+        let request = ControlRequest::new(ControlCommand::Apply {
+            config_path: PathBuf::from(r"C:\profiles\config.json"),
+            profile: Some("desktop".to_string()),
+        });
 
         let encoded = encode_request(&request).expect("request should encode");
         let decoded = decode_request(&encoded).expect("request should decode");
@@ -190,11 +204,8 @@ mod tests {
             (ControlCommand::Stop, "stop"),
             (ControlCommand::ShowGui, "show_gui"),
         ] {
-            let encoded = encode_request(&ControlRequest {
-                protocol_version: CONTROL_PROTOCOL_VERSION,
-                command,
-            })
-            .expect("request should encode");
+            let encoded =
+                encode_request(&ControlRequest::new(command)).expect("request should encode");
             let expected = format!(
                 r#"{{"protocol_version":{CONTROL_PROTOCOL_VERSION},"command":"{command_name}"}}"#
             );

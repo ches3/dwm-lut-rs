@@ -28,6 +28,25 @@ pub(crate) fn default_config_path() -> Result<PathBuf, InjectorError> {
         .join("config.json"))
 }
 
+pub(crate) fn absolute_path(path: PathBuf) -> Result<PathBuf, InjectorError> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+
+    let cwd = std::env::current_dir().map_err(|source| InjectorError::ControlPipe {
+        operation: "resolve current directory",
+        source,
+    })?;
+    Ok(cwd.join(path))
+}
+
+pub(crate) fn resolve_config_path(config_path: Option<PathBuf>) -> Result<PathBuf, InjectorError> {
+    match config_path {
+        Some(config_path) => absolute_path(config_path),
+        None => default_config_path(),
+    }
+}
+
 struct KnownFolderPath {
     ptr: *mut u16,
 }
@@ -51,5 +70,28 @@ impl Drop for KnownFolderPath {
                 CoTaskMemFree(self.ptr.cast());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_config_path_uses_current_directory_for_relative_path() {
+        let resolved = resolve_config_path(Some(PathBuf::from("config.json")))
+            .expect("relative config path should resolve");
+
+        assert_eq!(
+            resolved,
+            std::env::current_dir().unwrap().join("config.json")
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_uses_default_config() {
+        let resolved = resolve_config_path(None).expect("default config path should resolve");
+
+        assert_eq!(resolved, default_config_path().unwrap());
     }
 }

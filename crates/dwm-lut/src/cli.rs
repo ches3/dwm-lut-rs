@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 use crate::control;
+use crate::control::protocol::{ControlCommand, ControlRequest};
 use crate::error::InjectorError;
 use crate::host::launch;
-use crate::{launcher, monitor_list, runtime, startup};
+use crate::{launcher, monitor_list, paths, startup};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ApplyOptions {
@@ -140,8 +141,11 @@ impl From<CommandArgs> for CliCommand {
 
 pub fn run_cli(command: CliCommand) -> Result<(), InjectorError> {
     match command {
-        CliCommand::Apply(options) => run_control_command(CliCommand::Apply(options)),
-        CliCommand::Disable => run_control_command(CliCommand::Disable),
+        CliCommand::Apply(options) => run_control_command(ControlCommand::Apply {
+            config_path: paths::resolve_config_path(options.config_path)?,
+            profile: options.profile,
+        }),
+        CliCommand::Disable => run_control_command(ControlCommand::Disable),
         CliCommand::HostStart(options) => {
             let host_exe = launcher::resolve_host_executable_path(options.host_path)?;
             let message =
@@ -149,14 +153,14 @@ pub fn run_cli(command: CliCommand) -> Result<(), InjectorError> {
             println!("{message}");
             Ok(())
         }
-        CliCommand::HostStop => run_control_command(CliCommand::HostStop),
+        CliCommand::HostStop => run_control_command(ControlCommand::Stop),
         CliCommand::Install => {
             startup::install()?;
             println!("installed dwm-lut startup task");
             Ok(())
         }
         CliCommand::Monitors => monitor_list::run_monitors(),
-        CliCommand::Status => run_control_command(CliCommand::Status),
+        CliCommand::Status => run_control_command(ControlCommand::Status),
         CliCommand::Uninstall => {
             startup::uninstall()?;
             println!("uninstalled dwm-lut startup task");
@@ -173,8 +177,8 @@ pub fn report_cli_error(error: &InjectorError) -> i32 {
     }
 }
 
-fn run_control_command(command: CliCommand) -> Result<(), InjectorError> {
-    let request = runtime::request_from_cli(command)?.expect("command must map to control request");
+fn run_control_command(command: ControlCommand) -> Result<(), InjectorError> {
+    let request = ControlRequest::new(command);
     let response = control::client::send_request(&request)?;
     if !response.ok {
         eprintln!("{}", response.message);
