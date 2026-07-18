@@ -1,5 +1,6 @@
 #[cfg(debug_assertions)]
 use std::collections::BTreeMap;
+#[cfg(not(test))]
 use std::ffi::c_void;
 #[cfg(not(test))]
 use std::mem::MaybeUninit;
@@ -12,6 +13,18 @@ use crate::profile::HookProfile;
 use crate::route_trace;
 use crate::{ClipBox, DirtyRect, state};
 use dwm_lut_payload::{AdapterLuid, MonitorIdentity};
+#[cfg(not(test))]
+use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+#[cfg(test)]
+use windows::Win32::System::Memory::PAGE_EXECUTE;
+#[cfg(not(test))]
+use windows::Win32::System::Memory::VirtualQuery;
+use windows::Win32::System::Memory::{
+    MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+    PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
+};
+#[cfg(not(test))]
+use windows::Win32::System::Threading::GetCurrentProcess;
 
 use super::detours;
 
@@ -149,46 +162,6 @@ fn should_log_present_detour_enter(overlay_swap_chain: usize, hardware_protected
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct MemoryBasicInformation {
-    base_address: *mut c_void,
-    allocation_base: *mut c_void,
-    allocation_protect: u32,
-    partition_id: u16,
-    region_size: usize,
-    state: u32,
-    protect: u32,
-    type_: u32,
-}
-
-#[cfg(not(test))]
-unsafe extern "system" {
-    fn GetCurrentProcess() -> *mut c_void;
-    fn ReadProcessMemory(
-        hProcess: *mut c_void,
-        lpBaseAddress: *const c_void,
-        lpBuffer: *mut c_void,
-        nSize: usize,
-        lpNumberOfBytesRead: *mut usize,
-    ) -> i32;
-    fn VirtualQuery(
-        lpAddress: *const c_void,
-        lpBuffer: *mut MemoryBasicInformation,
-        dwLength: usize,
-    ) -> usize;
-}
-
-const MEM_COMMIT: u32 = 0x1000;
-const PAGE_READONLY: u32 = 0x02;
-const PAGE_READWRITE: u32 = 0x04;
-const PAGE_WRITECOPY: u32 = 0x08;
-#[cfg(test)]
-const PAGE_EXECUTE: u32 = 0x10;
-const PAGE_EXECUTE_READ: u32 = 0x20;
-const PAGE_EXECUTE_READWRITE: u32 = 0x40;
-const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
-const PAGE_GUARD: u32 = 0x100;
 const PAGE_PROTECTION_MASK: u32 = 0xff;
 
 unsafe fn collect_present_inputs(
@@ -357,16 +330,16 @@ unsafe fn read_memory<T: Copy>(address: usize) -> Result<T, PresentInputError> {
     {
         let mut value = MaybeUninit::<T>::uninit();
         let mut bytes_read = 0usize;
-        let success = unsafe {
+        let result = unsafe {
             ReadProcessMemory(
                 GetCurrentProcess(),
                 address as *const c_void,
                 value.as_mut_ptr().cast(),
                 size_of::<T>(),
-                &mut bytes_read,
+                Some(&mut bytes_read),
             )
         };
-        if success == 0 || bytes_read != size_of::<T>() {
+        if result.is_err() || bytes_read != size_of::<T>() {
             return Err(PresentInputError::UnreadableMemory);
         }
         Ok(unsafe { value.assume_init() })
@@ -403,8 +376,8 @@ fn is_readable_range_in_process(mut address: usize, end: usize) -> bool {
             return false;
         }
 
-        let region_start = info.base_address as usize;
-        let Some(region_end) = region_start.checked_add(info.region_size.saturating_sub(1)) else {
+        let region_start = info.BaseAddress as usize;
+        let Some(region_end) = region_start.checked_add(info.RegionSize.saturating_sub(1)) else {
             return false;
         };
         if region_end >= end {
@@ -420,40 +393,31 @@ fn is_readable_range_in_process(mut address: usize, end: usize) -> bool {
 }
 
 #[cfg(not(test))]
-fn query_memory(address: usize) -> Option<MemoryBasicInformation> {
-    let mut info = MemoryBasicInformation {
-        base_address: ptr::null_mut(),
-        allocation_base: ptr::null_mut(),
-        allocation_protect: 0,
-        partition_id: 0,
-        region_size: 0,
-        state: 0,
-        protect: 0,
-        type_: 0,
-    };
+fn query_memory(address: usize) -> Option<MEMORY_BASIC_INFORMATION> {
+    let mut info = MEMORY_BASIC_INFORMATION::default();
     let written = unsafe {
         VirtualQuery(
-            address as *const c_void,
+            Some(address as *const c_void),
             &mut info,
-            size_of::<MemoryBasicInformation>(),
+            size_of::<MEMORY_BASIC_INFORMATION>(),
         )
     };
     (written != 0).then_some(info)
 }
 
-fn is_readable_memory_region(info: &MemoryBasicInformation) -> bool {
-    if info.state != MEM_COMMIT || (info.protect & PAGE_GUARD) != 0 {
+fn is_readable_memory_region(info: &MEMORY_BASIC_INFORMATION) -> bool {
+    if info.State != MEM_COMMIT || (info.Protect.0 & PAGE_GUARD.0) != 0 {
         return false;
     }
 
     matches!(
-        info.protect & PAGE_PROTECTION_MASK,
-        PAGE_READONLY
-            | PAGE_READWRITE
-            | PAGE_WRITECOPY
-            | PAGE_EXECUTE_READ
-            | PAGE_EXECUTE_READWRITE
-            | PAGE_EXECUTE_WRITECOPY
+        info.Protect.0 & PAGE_PROTECTION_MASK,
+        value if value == PAGE_READONLY.0
+            || value == PAGE_READWRITE.0
+            || value == PAGE_WRITECOPY.0
+            || value == PAGE_EXECUTE_READ.0
+            || value == PAGE_EXECUTE_READWRITE.0
+            || value == PAGE_EXECUTE_WRITECOPY.0
     )
 }
 
@@ -1041,22 +1005,18 @@ mod tests {
 
     #[test]
     fn memory_region_readability_requires_read_protection() {
-        let readable = super::MemoryBasicInformation {
-            base_address: std::ptr::null_mut(),
-            allocation_base: std::ptr::null_mut(),
-            allocation_protect: 0,
-            partition_id: 0,
-            region_size: 4096,
-            state: super::MEM_COMMIT,
-            protect: super::PAGE_READONLY,
-            type_: 0,
+        let readable = windows::Win32::System::Memory::MEMORY_BASIC_INFORMATION {
+            RegionSize: 4096,
+            State: super::MEM_COMMIT,
+            Protect: super::PAGE_READONLY,
+            ..Default::default()
         };
-        let execute_only = super::MemoryBasicInformation {
-            protect: super::PAGE_EXECUTE,
+        let execute_only = windows::Win32::System::Memory::MEMORY_BASIC_INFORMATION {
+            Protect: super::PAGE_EXECUTE,
             ..readable
         };
-        let guarded = super::MemoryBasicInformation {
-            protect: super::PAGE_READWRITE | super::PAGE_GUARD,
+        let guarded = windows::Win32::System::Memory::MEMORY_BASIC_INFORMATION {
+            Protect: super::PAGE_READWRITE | super::PAGE_GUARD,
             ..readable
         };
 
