@@ -1,7 +1,6 @@
 pub mod app_args;
 mod backend;
 pub mod cli;
-mod cli_runner;
 mod config;
 mod control;
 mod elevation;
@@ -20,7 +19,7 @@ mod runtime;
 mod security;
 mod startup;
 
-pub use cli_runner::{report_cli_error, run_cli};
+pub use cli::{report_cli_error, run_cli};
 pub use host_runner::{run_background, run_host};
 pub use launcher::run_app_launcher;
 pub use native_dialog::show_error;
