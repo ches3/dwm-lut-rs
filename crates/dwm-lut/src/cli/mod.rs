@@ -1,3 +1,6 @@
+mod monitors;
+mod startup_task;
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -7,7 +10,7 @@ use crate::control;
 use crate::control::protocol::{ControlCommand, ControlRequest};
 use crate::error::InjectorError;
 use crate::host::launch;
-use crate::{launcher, monitor_list, paths, startup};
+use crate::paths;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ApplyOptions {
@@ -147,7 +150,7 @@ pub fn run_cli(command: CliCommand) -> Result<(), InjectorError> {
         }),
         CliCommand::Disable => run_control_command(ControlCommand::Disable),
         CliCommand::HostStart(options) => {
-            let host_exe = launcher::resolve_host_executable_path(options.host_path)?;
+            let host_exe = crate::entry::launcher::resolve_host_executable_path(options.host_path)?;
             let message =
                 host_start_message(launch::start_background_host(&host_exe, options.dll_path))?;
             println!("{message}");
@@ -155,14 +158,14 @@ pub fn run_cli(command: CliCommand) -> Result<(), InjectorError> {
         }
         CliCommand::HostStop => run_control_command(ControlCommand::Stop),
         CliCommand::Install => {
-            startup::install()?;
+            startup_task::install()?;
             println!("installed dwm-lut startup task");
             Ok(())
         }
-        CliCommand::Monitors => monitor_list::run_monitors(),
+        CliCommand::Monitors => monitors::run_monitors(),
         CliCommand::Status => run_control_command(ControlCommand::Status),
         CliCommand::Uninstall => {
-            startup::uninstall()?;
+            startup_task::uninstall()?;
             println!("uninstalled dwm-lut startup task");
             Ok(())
         }

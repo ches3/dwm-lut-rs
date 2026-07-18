@@ -2,8 +2,8 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::backend::{self, ApplyReport, ApplyRequest, DisableOutcome, DisableReport};
 use crate::error::{InjectorError, ShutdownStatus};
+use crate::inject::{self, ApplyReport, ApplyRequest, DisableOutcome, DisableReport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostState {
@@ -65,7 +65,7 @@ impl HostController {
     ) -> Result<ApplyReport, HostCommandError> {
         let _mutation = self.try_lock_mutation()?;
         self.ensure_running()?;
-        Ok(backend::apply(ApplyRequest {
+        Ok(inject::apply(ApplyRequest {
             dll_path: self.host_dll_path.clone(),
             config_path,
             profile,
@@ -75,7 +75,7 @@ impl HostController {
     pub(crate) fn disable(&self) -> Result<DisableReport, HostCommandError> {
         let _mutation = self.try_lock_mutation()?;
         self.ensure_running()?;
-        let report = backend::disable()?;
+        let report = inject::disable()?;
         match report.outcome {
             DisableOutcome::NotInjected
             | DisableOutcome::ShutDown(ShutdownStatus::Success)

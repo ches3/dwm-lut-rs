@@ -4,8 +4,8 @@ use std::panic::PanicHookInfo;
 
 fn main() {
     install_panic_hook();
-    let exit_code = match dwm_lut::app_args::parse_app_args() {
-        Ok(dwm_lut::app_args::AppMode::Launcher) => match dwm_lut::run_app_launcher() {
+    let exit_code = match dwm_lut::entry::parse_app_args() {
+        Ok(dwm_lut::entry::AppMode::Launcher) => match dwm_lut::run_app_launcher() {
             Ok(()) => 0,
             Err(dwm_lut::error::InjectorError::HostPanicAlreadyReported) => 1,
             Err(error) => {
@@ -13,7 +13,7 @@ fn main() {
                 1
             }
         },
-        Ok(dwm_lut::app_args::AppMode::Background(options)) => {
+        Ok(dwm_lut::entry::AppMode::Background(options)) => {
             match dwm_lut::run_background(options) {
                 Ok(()) => 0,
                 Err(_) => 1,

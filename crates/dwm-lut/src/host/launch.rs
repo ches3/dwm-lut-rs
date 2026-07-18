@@ -4,13 +4,11 @@ use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Security::{TOKEN_ELEVATION_TYPE, TokenElevationTypeLimited};
 
-use crate::elevation;
 use crate::error::InjectorError;
+use crate::platform::elevation;
 
-mod startup_ipc;
-
-pub(crate) use startup_ipc::StartupNotifier;
-use startup_ipc::{StartupEvent, StartupResultPipe};
+pub(crate) use super::startup_ipc::StartupNotifier;
+use super::startup_ipc::{StartupEvent, StartupResultPipe};
 
 const ARG_SEPARATOR: u16 = b' ' as u16;
 const BACKSLASH: u16 = b'\\' as u16;

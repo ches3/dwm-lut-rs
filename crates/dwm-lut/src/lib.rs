@@ -1,24 +1,19 @@
-pub mod app_args;
-mod backend;
 pub mod cli;
 mod config;
 mod control;
-mod elevation;
+pub mod entry;
 pub mod error;
 mod gui;
 mod host;
-mod host_runner;
-mod launcher;
+mod inject;
 mod lut;
-mod monitor_list;
-mod native_dialog;
+mod monitor;
 #[doc(hidden)]
 pub mod panic_report;
 mod paths;
-mod security;
-mod startup;
+mod platform;
 
 pub use cli::{report_cli_error, run_cli};
-pub use host_runner::{run_background, run_host};
-pub use launcher::run_app_launcher;
-pub use native_dialog::show_error;
+pub use entry::run_app_launcher;
+pub use host::{run_background, run_host};
+pub use platform::show_error;

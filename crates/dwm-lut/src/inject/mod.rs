@@ -1,5 +1,4 @@
 mod injector;
-pub(crate) mod monitor;
 mod staging;
 mod win32;
 
@@ -9,9 +8,6 @@ use crate::config;
 use crate::error::{InjectionStep, InjectorError};
 
 pub(crate) use injector::{ApplyOutcome, DisableOutcome};
-pub(crate) use monitor::{
-    DesktopPosition, DesktopResolution, MonitorListing, list_monitor_listings,
-};
 
 pub(crate) struct ApplyRequest {
     pub(crate) dll_path: Option<PathBuf>,

@@ -5,10 +5,10 @@ use eframe::egui;
 use super::{
     DwmLutApp, LutBrowseRequest, ModalState, ProfileDialog, resize_viewport_for_config_state,
 };
-use crate::backend::MonitorListing;
 use crate::config::ConfigAssignmentDocument;
 use crate::gui::ConfigColorMode;
 use crate::gui::worker::Operation;
+use crate::monitor::MonitorListing;
 
 fn panel_frame(style: &egui::Style, inner_margin: egui::Margin) -> egui::Frame {
     egui::Frame::new()
@@ -505,7 +505,7 @@ fn disconnected_monitor_paths(
 }
 
 fn disconnected_monitor_title(device_path: &str) -> String {
-    crate::backend::monitor::extract_edid_pnp_id(device_path)
+    crate::monitor::extract_edid_pnp_id(device_path)
         .unwrap_or(device_path)
         .to_string()
 }

@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::backend::{ApplyOutcome, ApplyReport, DisableOutcome, DisableReport};
 use crate::control::protocol::{ControlCommand, ControlResponse, ControlStatus};
 use crate::control::server::{ControlDispatch, ControlHandler, ServerShutdown};
 use crate::error::{InjectorError, ShutdownStatus};
 use crate::gui::{UiCommand, UiHandle};
+use crate::inject::{ApplyOutcome, ApplyReport, DisableOutcome, DisableReport};
 
 use super::controller::{HostCommandError, HostController, HostState};
 

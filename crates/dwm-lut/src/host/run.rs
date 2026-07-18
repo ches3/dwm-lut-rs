@@ -3,20 +3,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use crate::app_args::BackgroundOptions;
-use crate::backend;
 use crate::control;
 use crate::control::protocol::{ControlCommand, ControlRequest, ControlStatus};
 use crate::control::server::ServerShutdown;
-use crate::elevation;
+use crate::entry::BackgroundOptions;
 use crate::error::InjectorError;
 use crate::gui;
 use crate::host::launch::StartupNotifier;
 use crate::host::{
     HostApplication, HostController, HostInstanceClaim, HostInstanceGuard, HostInstanceWaiter,
 };
+use crate::inject;
 use crate::panic_report;
-use crate::{launcher, native_dialog};
+use crate::platform::dialog;
+use crate::platform::elevation;
 
 const HOST_INSTANCE_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_INSTANCE_WAIT_SLICE: Duration = Duration::from_millis(100);
@@ -96,7 +96,7 @@ pub fn run_host(options: BackgroundOptions) -> Result<(), InjectorError> {
                     let _ = notifier.notify_failure(error);
                 }
             }
-            HostErrorAction::ShowDialog => native_dialog::show_error(&error.to_string()),
+            HostErrorAction::ShowDialog => dialog::show_error(&error.to_string()),
             HostErrorAction::Suppress => {}
         }
     }
@@ -109,8 +109,8 @@ fn run_host_inner(
     startup_completed: Arc<AtomicBool>,
 ) -> Result<(), InjectorError> {
     let _host_guard = acquire_host_instance()?;
-    backend::ensure_host_privileges()?;
-    let dll_path = launcher::resolve_host_dll_path(dll_path)?;
+    inject::ensure_host_privileges()?;
+    let dll_path = crate::entry::launcher::resolve_host_dll_path(dll_path)?;
     let controller = Arc::new(HostController::new(dll_path));
     let shutdown = Arc::new(ServerShutdown::new());
     let (ui_handle, ui_commands) = gui::UiHandle::new();
@@ -220,7 +220,7 @@ fn select_host_result(
 
 fn show_background_error(error: &InjectorError) {
     if !matches!(error, InjectorError::HostPanicAlreadyReported) {
-        native_dialog::show_error(&error.to_string());
+        dialog::show_error(&error.to_string());
     }
 }
 

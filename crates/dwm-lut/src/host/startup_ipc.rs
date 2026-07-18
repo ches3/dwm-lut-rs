@@ -25,9 +25,9 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject,
 };
 
-use crate::elevation;
 use crate::error::InjectorError;
-use crate::security::{SecurityDescriptor, UserSid};
+use crate::platform::elevation;
+use crate::platform::security::{SecurityDescriptor, UserSid};
 
 const STARTUP_RESULT_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);

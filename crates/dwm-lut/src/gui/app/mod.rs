@@ -5,9 +5,9 @@ use std::time::Instant;
 
 use eframe::egui;
 
-use crate::backend::{MonitorListing, list_monitor_listings};
 use crate::error::InjectorError;
 use crate::host::{HostApplication, HostState};
+use crate::monitor::{MonitorListing, list_monitor_listings};
 
 use super::fonts::{FontError, FontUpdate, SystemFonts};
 use super::tray::{TrayAction, TrayState};

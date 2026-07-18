@@ -4,14 +4,14 @@ use std::path::PathBuf;
 use dwm_lut_payload::PayloadError;
 
 mod document;
-mod runtime;
+mod resolve;
 
 pub(crate) use document::{
     ConfigAssignmentDocument, ConfigColorMode, ConfigDocument, load_config_document,
     save_config_document,
 };
 pub use dwm_lut_payload::{ColorMode, MonitorIdentity, MonitorTarget};
-pub(crate) use runtime::load_payload;
+pub(crate) use resolve::load_payload;
 
 #[derive(Debug)]
 pub enum ConfigError {

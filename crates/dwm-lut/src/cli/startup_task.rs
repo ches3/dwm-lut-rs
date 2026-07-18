@@ -18,9 +18,9 @@ use windows::core::{BSTR, Interface};
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, FALSE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 
-use crate::elevation;
 use crate::error::InjectorError;
-use crate::security::UserSid;
+use crate::platform::elevation;
+use crate::platform::security::UserSid;
 
 const TASK_NAME_PREFIX: &str = "dwm-lut-rs-";
 const HOST_EXE_NAME: &str = "dwm-lut.exe";

@@ -10,7 +10,7 @@ use crate::control::protocol::{
 };
 use crate::control::{build_runtime, current_pipe_name, read_message, write_message};
 use crate::error::InjectorError;
-use crate::security::{SecurityDescriptor, UserSid};
+use crate::platform::security::{SecurityDescriptor, UserSid};
 
 mod pipe;
 
@@ -221,7 +221,7 @@ mod tests {
         MAX_CONTROL_MESSAGE_BYTES, decode_response, encode_request,
     };
     use crate::control::{read_message, write_message};
-    use crate::security::{SecurityDescriptor, UserSid};
+    use crate::platform::security::{SecurityDescriptor, UserSid};
 
     use super::pipe::{connect, create_pipe};
     use super::{

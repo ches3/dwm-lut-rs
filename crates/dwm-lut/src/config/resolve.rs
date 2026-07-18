@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use dwm_lut_payload::{HookPayload, PayloadAssignment, validate_payload};
 
-use crate::backend::monitor::resolve_monitor_identity;
 use crate::lut::parse_lut;
+use crate::monitor::resolve_monitor_identity;
 
 use super::document::{ConfigAssignmentDocument, parse_config_document_str};
 use super::{ColorMode, ConfigError, MonitorIdentity, MonitorTarget};

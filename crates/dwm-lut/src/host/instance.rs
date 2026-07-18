@@ -11,7 +11,7 @@ use windows_sys::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForS
 
 use crate::control::current_pipe_name;
 use crate::error::InjectorError;
-use crate::security::{SecurityDescriptor, UserSid};
+use crate::platform::security::{SecurityDescriptor, UserSid};
 
 pub(crate) enum HostInstanceClaim {
     Acquired(HostInstanceGuard),

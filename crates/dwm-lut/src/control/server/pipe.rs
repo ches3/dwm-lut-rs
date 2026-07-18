@@ -6,7 +6,7 @@ use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIP
 
 use crate::control::protocol::MAX_CONTROL_MESSAGE_BYTES;
 use crate::error::InjectorError;
-use crate::security::SecurityDescriptor;
+use crate::platform::security::SecurityDescriptor;
 
 pub(crate) struct ServerShutdown {
     requested: watch::Sender<bool>,
