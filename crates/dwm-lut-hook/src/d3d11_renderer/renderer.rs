@@ -292,7 +292,7 @@ impl D3D11Renderer {
         swap_chain_path: SwapChainPathHypothesis,
     ) -> Option<ID3D11Texture2D> {
         let texture = unsafe {
-            dwm_lut_get_back_buffer_25h2(
+            dwm_lut_get_back_buffer(
                 overlay_swap_chain as *mut c_void,
                 swap_chain_path.container_vtable_index,
                 swap_chain_path.resource_vtable_index,

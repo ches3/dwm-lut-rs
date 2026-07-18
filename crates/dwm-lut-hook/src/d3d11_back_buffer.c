@@ -9,13 +9,13 @@ typedef struct DwmLutGuid {
     uint8_t data4[8];
 } DwmLutGuid;
 
-typedef struct DwmLutBackBuffer25H2Diagnostic {
+typedef struct DwmLutBackBufferDiagnostic {
     uint32_t stage;
     HRESULT hresult;
     void *container;
     void *resource;
     void *texture;
-} DwmLutBackBuffer25H2Diagnostic;
+} DwmLutBackBufferDiagnostic;
 
 enum {
     DWM_LUT_BACK_BUFFER_STAGE_ENTRY = 1,
@@ -30,11 +30,11 @@ enum {
     DWM_LUT_BACK_BUFFER_STAGE_EXCEPTION = 10,
 };
 
-void *dwm_lut_get_back_buffer_25h2_diagnostic(
+void *dwm_lut_get_back_buffer_diagnostic(
     void *overlay_swap_chain,
     uintptr_t container_vtable_index,
     uintptr_t resource_vtable_index,
-    DwmLutBackBuffer25H2Diagnostic *diagnostic);
+    DwmLutBackBufferDiagnostic *diagnostic);
 
 static const DwmLutGuid IID_ID3D11_TEXTURE2D = {
     0x6f15aaf2,
@@ -43,7 +43,7 @@ static const DwmLutGuid IID_ID3D11_TEXTURE2D = {
     {0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c},
 };
 
-void *dwm_lut_get_back_buffer_25h2(
+void *dwm_lut_get_back_buffer(
     void *overlay_swap_chain,
     uintptr_t container_vtable_index,
     uintptr_t resource_vtable_index) {
@@ -94,11 +94,11 @@ void *dwm_lut_get_back_buffer_25h2(
     }
 }
 
-void *dwm_lut_get_back_buffer_25h2_diagnostic(
+void *dwm_lut_get_back_buffer_diagnostic(
     void *overlay_swap_chain,
     uintptr_t container_vtable_index,
     uintptr_t resource_vtable_index,
-    DwmLutBackBuffer25H2Diagnostic *diagnostic) {
+    DwmLutBackBufferDiagnostic *diagnostic) {
     if (diagnostic) {
         diagnostic->stage = DWM_LUT_BACK_BUFFER_STAGE_ENTRY;
         diagnostic->hresult = 0;

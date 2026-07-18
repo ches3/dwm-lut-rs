@@ -24,7 +24,7 @@ pub(super) const LUT_PIXEL_SHADER_BYTECODE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/lut_pipeline_ps.cso"));
 
 unsafe extern "system" {
-    pub(super) fn dwm_lut_get_back_buffer_25h2(
+    pub(super) fn dwm_lut_get_back_buffer(
         overlay_swap_chain: *mut c_void,
         container_vtable_index: usize,
         resource_vtable_index: usize,
