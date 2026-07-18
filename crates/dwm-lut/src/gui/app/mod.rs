@@ -1,17 +1,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
 use crate::error::InjectorError;
-use crate::host::{HostApplication, HostState};
+use crate::host::{HostCommandError, HostController, HostState, MutationCompletion};
+use crate::inject::{ApplyReport, DisableReport};
 use crate::monitor::{MonitorListing, list_monitor_listings};
 
 use super::fonts::{FontError, FontUpdate, SystemFonts};
 use super::tray::{TrayAction, TrayState};
-use super::worker::{Operation, Worker};
 use super::{ConfigColorMode, ConfigDocument, GuiError, UiCommand, UiHandle};
 
 mod config_editor;
@@ -27,8 +27,8 @@ use monitor_events::{
     SETTLE_DELAY as MONITOR_CHANGE_SETTLE_DELAY,
 };
 
-pub(super) fn run_host(
-    application: Arc<HostApplication>,
+pub(super) fn run(
+    controller: Arc<HostController>,
     ui_handle: Arc<UiHandle>,
     ui_commands: Receiver<UiCommand>,
     ready: Sender<()>,
@@ -61,7 +61,7 @@ pub(super) fn run_host(
             let app = DwmLutApp::new(
                 context,
                 monitor_changes,
-                application,
+                controller,
                 ui_commands,
                 app_icon.as_ref(),
             )?;
@@ -78,6 +78,7 @@ const MAIN_VIEWPORT_SIZE: [f32; 2] = [800.0, 580.0];
 const MAIN_VIEWPORT_MIN_SIZE: [f32; 2] = [720.0, 480.0];
 const LOAD_ERROR_VIEWPORT_SIZE: [f32; 2] = [600.0, 300.0];
 const LOAD_ERROR_VIEWPORT_MIN_SIZE: [f32; 2] = [500.0, 240.0];
+const MUTATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 pub(super) fn resize_viewport_for_config_state(context: &egui::Context, load_failed: bool) {
     let (size, min_size) = if load_failed {
         (LOAD_ERROR_VIEWPORT_SIZE, LOAD_ERROR_VIEWPORT_MIN_SIZE)
@@ -99,7 +100,7 @@ pub(super) struct DwmLutApp {
     pub(super) monitor_error: Option<String>,
     pub(super) error_dialog: Option<String>,
     pub(super) profile_dialog_error: Option<String>,
-    pub(super) worker: Worker,
+    mutation_state: GuiMutationState,
     modal: Option<ModalState>,
     profile_dialog_generation: u64,
     lut_browse: LutBrowseState,
@@ -108,7 +109,7 @@ pub(super) struct DwmLutApp {
     _monitor_change_listener: MonitorChangeListener,
     monitor_changes: Arc<MonitorChangeSignal>,
     monitor_refresh: MonitorRefresh,
-    application: Arc<HostApplication>,
+    controller: Arc<HostController>,
     ui_commands: Receiver<UiCommand>,
     tray: TrayState,
     window_visible: bool,
@@ -126,11 +127,43 @@ enum MonitorRefresh {
     Scheduled { at: Instant, retry_after: bool },
 }
 
+enum GuiMutationState {
+    Idle,
+    AwaitingApplyResult(MutationCompletion<ApplyReport>),
+    AwaitingDisableResult(MutationCompletion<DisableReport>),
+}
+
+impl GuiMutationState {
+    fn is_awaiting_result(&self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+
+    fn status_label(&self) -> Option<&'static str> {
+        match self {
+            Self::Idle => None,
+            Self::AwaitingApplyResult(_) => Some("Applying LUT configuration..."),
+            Self::AwaitingDisableResult(_) => Some("Disabling LUT..."),
+        }
+    }
+
+    fn try_take_result(&mut self) -> Option<Result<(), HostCommandError>> {
+        match self {
+            Self::Idle => None,
+            Self::AwaitingApplyResult(completion) => {
+                completion.try_take().map(|result| result.map(|_| ()))
+            }
+            Self::AwaitingDisableResult(completion) => {
+                completion.try_take().map(|result| result.map(|_| ()))
+            }
+        }
+    }
+}
+
 impl DwmLutApp {
     fn new(
         creation_context: &eframe::CreationContext<'_>,
         monitor_changes: Arc<MonitorChangeSignal>,
-        application: Arc<HostApplication>,
+        controller: Arc<HostController>,
         ui_commands: Receiver<UiCommand>,
         app_icon: &egui::IconData,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -182,7 +215,7 @@ impl DwmLutApp {
             monitor_error,
             error_dialog: None,
             profile_dialog_error: None,
-            worker: Worker::new(Arc::clone(&application)),
+            mutation_state: GuiMutationState::Idle,
             modal: None,
             profile_dialog_generation: 0,
             lut_browse: LutBrowseState::Idle,
@@ -191,7 +224,7 @@ impl DwmLutApp {
             _monitor_change_listener: monitor_change_listener,
             monitor_changes,
             monitor_refresh: MonitorRefresh::Idle,
-            application,
+            controller,
             ui_commands,
             tray,
             window_visible: false,
@@ -335,14 +368,22 @@ impl DwmLutApp {
         self.font_texts_dirty = true;
     }
 
-    pub(super) fn ui_blocked(&self) -> bool {
-        self.worker.is_busy() || self.modal.is_some() || self.lut_browse.is_active()
+    pub(super) fn controls_disabled(&self) -> bool {
+        self.mutation_state.is_awaiting_result()
+            || self.controller.state() == HostState::Mutating
+            || self.modal.is_some()
+            || self.lut_browse.is_active()
     }
 
-    pub(super) fn poll_worker(&mut self) {
-        let Some(result) = self.worker.poll() else {
+    pub(super) fn poll_mutation_result(&mut self, context: &egui::Context) {
+        if !self.mutation_state.is_awaiting_result() {
+            return;
+        }
+        let Some(result) = self.mutation_state.try_take_result() else {
+            context.request_repaint_after(MUTATION_POLL_INTERVAL);
             return;
         };
+        self.mutation_state = GuiMutationState::Idle;
         match result {
             Ok(()) => {}
             Err(error) => self.show_error(error.to_string()),
@@ -398,16 +439,39 @@ impl DwmLutApp {
     }
 
     pub(super) fn apply(&mut self, context: &egui::Context) {
+        if self.mutation_state.is_awaiting_result() {
+            return;
+        }
         let Some(editor) = self.editor() else {
             return;
         };
-        self.worker.spawn(
-            Operation::Apply {
-                path: editor.path.clone(),
-                profile: editor.selected_profile.clone(),
-            },
-            context.clone(),
-        );
+        match self
+            .controller
+            .submit_apply(editor.path.clone(), Some(editor.selected_profile.clone()))
+        {
+            Ok(completion) => {
+                self.mutation_state = GuiMutationState::AwaitingApplyResult(completion);
+                context.request_repaint();
+            }
+            Err(error) => self.show_error(error.to_string()),
+        }
+    }
+
+    pub(super) fn disable(&mut self, context: &egui::Context) {
+        if self.mutation_state.is_awaiting_result() {
+            return;
+        }
+        match self.controller.submit_disable() {
+            Ok(completion) => {
+                self.mutation_state = GuiMutationState::AwaitingDisableResult(completion);
+                context.request_repaint();
+            }
+            Err(error) => self.show_error(error.to_string()),
+        }
+    }
+
+    pub(super) fn mutation_status_label(&self) -> Option<&'static str> {
+        self.mutation_state.status_label()
     }
 
     pub(super) fn handle_close_request(&mut self, context: &egui::Context) {
@@ -441,7 +505,7 @@ impl DwmLutApp {
             match action {
                 TrayAction::Open => self.open_window(context),
                 TrayAction::Exit => {
-                    self.exit_host(context);
+                    self.stop_host(context);
                     break;
                 }
             }
@@ -501,19 +565,16 @@ impl DwmLutApp {
 
     pub(super) fn can_exit(&self) -> bool {
         exit_is_available(
-            self.worker.is_busy(),
-            self.application.is_busy(),
-            self.application.state(),
+            self.mutation_state.is_awaiting_result(),
+            self.controller.state(),
         )
     }
 
-    pub(super) fn exit_host(&mut self, context: &egui::Context) {
-        if let Err(error) = Arc::clone(&self.application).request_exit() {
+    pub(super) fn stop_host(&mut self, context: &egui::Context) {
+        if let Err(error) = self.controller.stop() {
             self.show_error(error.to_string());
             self.show_window(context);
-            return;
         }
-        self.close_app(context);
     }
 
     fn close_app(&mut self, context: &egui::Context) {
@@ -658,8 +719,8 @@ fn close_disposition(close_requested: bool, exit_requested: bool) -> CloseDispos
     }
 }
 
-fn exit_is_available(worker_busy: bool, application_busy: bool, state: HostState) -> bool {
-    !worker_busy && !application_busy && state == HostState::Running
+fn exit_is_available(awaiting_mutation_result: bool, state: HostState) -> bool {
+    !awaiting_mutation_result && state == HostState::Idle
 }
 
 pub(super) enum ProfileDialog {
@@ -687,9 +748,8 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::config::{load_config_document, save_config_document};
-
     use super::*;
+    use crate::config::{load_config_document, save_config_document};
 
     fn temp_config_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -839,8 +899,20 @@ mod tests {
     }
 
     #[test]
-    fn pending_gui_worker_disables_exit() {
-        assert!(!exit_is_available(true, false, HostState::Running));
-        assert!(exit_is_available(false, false, HostState::Running));
+    fn awaiting_mutation_result_disables_exit() {
+        assert!(!exit_is_available(true, HostState::Idle));
+        assert!(!exit_is_available(false, HostState::Mutating));
+        assert!(!exit_is_available(false, HostState::Stopping));
+        assert!(exit_is_available(false, HostState::Idle));
+    }
+
+    #[test]
+    fn disconnected_mutation_completion_reports_executor_failure() {
+        let mut state = GuiMutationState::AwaitingApplyResult(MutationCompletion::disconnected());
+
+        assert!(matches!(
+            state.try_take_result(),
+            Some(Err(HostCommandError::MutationExecutorStopped))
+        ));
     }
 }

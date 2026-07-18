@@ -7,7 +7,6 @@ use super::{
 };
 use crate::config::ConfigAssignmentDocument;
 use crate::gui::ConfigColorMode;
-use crate::gui::worker::Operation;
 use crate::monitor::MonitorListing;
 
 fn panel_frame(style: &egui::Style, inner_margin: egui::Margin) -> egui::Frame {
@@ -49,7 +48,7 @@ impl eframe::App for DwmLutApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
-        self.poll_worker();
+        self.poll_mutation_result(&context);
         self.poll_host_events(&context);
         self.poll_lut_browse();
         self.poll_monitor_changes(&context);
@@ -57,17 +56,22 @@ impl eframe::App for DwmLutApp {
         if let Err(error) = self.refresh_system_fonts(&context) {
             self.show_error(format!("Font fallback failed: {error}"));
         }
-        let ui_blocked = self.ui_blocked();
+        let controls_disabled = self.controls_disabled();
         let panel_margin = egui::Margin::symmetric(12, 10);
 
         if self.config_load_error().is_some() {
-            self.show_load_failed_panel(ui, &context, ui_blocked, egui::Margin::symmetric(20, 16));
+            self.show_load_failed_panel(
+                ui,
+                &context,
+                controls_disabled,
+                egui::Margin::symmetric(20, 16),
+            );
             self.show_error_dialog(&context);
             return;
         }
 
-        self.show_footer(ui, &context, ui_blocked, panel_margin);
-        self.show_main_panel(ui, ui_blocked, panel_margin);
+        self.show_footer(ui, &context, controls_disabled, panel_margin);
+        self.show_main_panel(ui, controls_disabled, panel_margin);
         self.show_profile_dialog(&context);
         self.show_delete_confirm_dialog(&context);
         self.show_error_dialog(&context);
@@ -80,7 +84,7 @@ impl DwmLutApp {
         &mut self,
         ui: &mut egui::Ui,
         context: &egui::Context,
-        ui_blocked: bool,
+        controls_disabled: bool,
         panel_margin: egui::Margin,
     ) {
         egui::Panel::bottom("footer")
@@ -90,18 +94,18 @@ impl DwmLutApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!ui_blocked, egui::Button::new("Apply"))
+                        .add_enabled(!controls_disabled, egui::Button::new("Apply"))
                         .clicked()
                     {
                         self.apply(context);
                     }
                     if ui
-                        .add_enabled(!ui_blocked, egui::Button::new("Disable"))
+                        .add_enabled(!controls_disabled, egui::Button::new("Disable"))
                         .clicked()
                     {
-                        self.worker.spawn(Operation::Disable, context.clone());
+                        self.disable(context);
                     }
-                    if let Some(label) = self.worker.pending_label() {
+                    if let Some(label) = self.mutation_status_label() {
                         ui.spinner();
                         ui.label(label);
                     }
@@ -109,13 +113,18 @@ impl DwmLutApp {
             });
     }
 
-    fn show_main_panel(&mut self, ui: &mut egui::Ui, ui_blocked: bool, panel_margin: egui::Margin) {
+    fn show_main_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        controls_disabled: bool,
+        panel_margin: egui::Margin,
+    ) {
         egui::CentralPanel::default()
             .frame(panel_frame(ui.style(), panel_margin))
             .show(ui, |ui| {
-                self.show_profile_controls(ui, ui_blocked);
+                self.show_profile_controls(ui, controls_disabled);
                 ui.add_space(4.0);
-                self.show_monitor_list(ui, ui_blocked);
+                self.show_monitor_list(ui, controls_disabled);
             });
     }
 
@@ -123,7 +132,7 @@ impl DwmLutApp {
         &mut self,
         ui: &mut egui::Ui,
         context: &egui::Context,
-        ui_blocked: bool,
+        controls_disabled: bool,
         panel_margin: egui::Margin,
     ) {
         let error = self
@@ -140,7 +149,7 @@ impl DwmLutApp {
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!ui_blocked, egui::Button::new("Reload"))
+                        .add_enabled(!controls_disabled, egui::Button::new("Reload"))
                         .clicked()
                     {
                         self.retry_config();
@@ -152,9 +161,9 @@ impl DwmLutApp {
                         .add_enabled(self.can_exit(), egui::Button::new("Exit"))
                         .clicked()
                     {
-                        self.exit_host(context);
+                        self.stop_host(context);
                     }
-                    if let Some(label) = self.worker.pending_label() {
+                    if let Some(label) = self.mutation_status_label() {
                         ui.spinner();
                         ui.label(label);
                     }
@@ -162,14 +171,14 @@ impl DwmLutApp {
             });
     }
 
-    fn show_profile_controls(&mut self, ui: &mut egui::Ui, ui_blocked: bool) {
+    fn show_profile_controls(&mut self, ui: &mut egui::Ui, controls_disabled: bool) {
         let config = self
             .config()
             .expect("profile controls require a loaded config");
         let profile_names = config.profiles.keys().cloned().collect::<Vec<_>>();
         let default_profile = config.default_profile.clone();
         let selected_profile = self.selected_profile().to_string();
-        ui.add_enabled_ui(!ui_blocked, |ui| {
+        ui.add_enabled_ui(!controls_disabled, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Profile");
                 ui.horizontal(|ui| {
@@ -223,7 +232,7 @@ impl DwmLutApp {
         });
     }
 
-    fn show_monitor_list(&mut self, ui: &mut egui::Ui, ui_blocked: bool) {
+    fn show_monitor_list(&mut self, ui: &mut egui::Ui, controls_disabled: bool) {
         if let Some(error) = &self.monitor_error {
             ui.colored_label(
                 egui::Color32::RED,
@@ -236,7 +245,7 @@ impl DwmLutApp {
             .auto_shrink([false, true])
             .max_height(ui.available_height())
             .show(ui, |ui| {
-                ui.add_enabled_ui(!ui_blocked, |ui| {
+                ui.add_enabled_ui(!controls_disabled, |ui| {
                     ui.spacing_mut().item_spacing.y = 8.0;
                     let rows = self.display_monitors();
                     if rows.is_empty() {

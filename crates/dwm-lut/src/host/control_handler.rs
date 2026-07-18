@@ -1,82 +1,41 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::control::protocol::{ControlCommand, ControlResponse, ControlStatus};
-use crate::control::server::{ControlDispatch, ControlHandler, ServerShutdown};
+use crate::control::server::{ControlDispatch, ControlHandler};
 use crate::error::{InjectorError, ShutdownStatus};
-use crate::gui::{UiCommand, UiHandle};
 use crate::inject::{ApplyOutcome, ApplyReport, DisableOutcome, DisableReport};
 
-use super::controller::{HostCommandError, HostController, HostState};
+use super::controller::{HostCommandError, HostController, HostState, MutationCompletion};
 
-pub(crate) struct HostApplication {
+pub(crate) struct ControlCommandHandler {
     controller: Arc<HostController>,
-    shutdown: Arc<ServerShutdown>,
-    ui: Arc<UiHandle>,
 }
 
-impl HostApplication {
-    pub(crate) fn new(
-        controller: Arc<HostController>,
-        shutdown: Arc<ServerShutdown>,
-        ui: Arc<UiHandle>,
-    ) -> Self {
-        Self {
-            controller,
-            shutdown,
-            ui,
-        }
+impl ControlCommandHandler {
+    pub(crate) fn new(controller: Arc<HostController>) -> Self {
+        Self { controller }
     }
+}
 
-    pub(crate) fn apply(
-        &self,
-        config_path: PathBuf,
-        profile: Option<String>,
-    ) -> Result<ApplyReport, HostCommandError> {
-        self.controller.apply(config_path, profile)
-    }
-
-    pub(crate) fn disable(&self) -> Result<DisableReport, HostCommandError> {
-        self.controller.disable()
-    }
-
-    pub(crate) fn is_busy(&self) -> bool {
-        self.controller.is_busy()
-    }
-
-    pub(crate) fn state(&self) -> HostState {
-        self.controller.state()
-    }
-
-    pub(crate) fn request_exit(self: &Arc<Self>) -> Result<(), HostCommandError> {
-        let permit = self.controller.prepare_stop()?;
-        self.shutdown.request();
-        permit.commit();
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_instance() -> Arc<Self> {
-        let controller = Arc::new(HostController::new(None));
-        let shutdown = Arc::new(ServerShutdown::new());
-        let (ui, _commands) = UiHandle::new();
-        Arc::new(Self::new(controller, shutdown, ui))
-    }
-
-    fn dispatch_command(&self, command: ControlCommand) -> ControlDispatch {
+impl ControlHandler for ControlCommandHandler {
+    fn dispatch(&self, command: ControlCommand) -> ControlDispatch {
         match command {
             ControlCommand::Apply {
                 config_path,
                 profile,
             } => ControlDispatch::immediate(response_from_apply(
-                self.controller.apply(config_path, profile),
+                self.controller
+                    .submit_apply(config_path, profile)
+                    .and_then(MutationCompletion::wait),
             )),
-            ControlCommand::Disable => {
-                ControlDispatch::immediate(response_from_disable(self.controller.disable()))
-            }
+            ControlCommand::Disable => ControlDispatch::immediate(response_from_disable(
+                self.controller
+                    .submit_disable()
+                    .and_then(MutationCompletion::wait),
+            )),
             ControlCommand::Status => {
                 let response = match self.controller.state() {
-                    HostState::Running => {
+                    HostState::Idle | HostState::Mutating => {
                         ControlResponse::ok("host instance is running", ControlStatus::Running)
                     }
                     HostState::Stopping => ControlResponse::ok(
@@ -87,44 +46,24 @@ impl HostApplication {
                 ControlDispatch::immediate(response)
             }
             ControlCommand::ShowGui => {
-                let response = match self
-                    .controller
-                    .perform_while_running(|| self.ui.send(UiCommand::Show))
-                {
+                let response = match self.controller.show_gui() {
                     Ok(()) => ControlResponse::ok("showing dwm-lut GUI", ControlStatus::Shown),
                     Err(error) => response_from_error(error),
                 };
                 ControlDispatch::immediate(response)
             }
             ControlCommand::Stop => match self.controller.prepare_stop() {
-                Ok(permit) => {
-                    let shutdown = Arc::clone(&self.shutdown);
-                    let ui = Arc::clone(&self.ui);
-                    ControlDispatch::after_response(
-                        ControlResponse::ok(
-                            "stopped dwm-lut host instance",
-                            ControlStatus::Stopped,
-                        ),
-                        move || {
-                            shutdown.request();
-                            permit.commit();
-                            ui.send(UiCommand::Exit)
-                        },
-                    )
-                }
+                Ok(permit) => ControlDispatch::after_response(
+                    ControlResponse::ok("stopped dwm-lut host instance", ControlStatus::Stopped),
+                    move || permit.commit(),
+                ),
                 Err(error) => ControlDispatch::immediate(response_from_error(error)),
             },
         }
     }
 }
 
-impl ControlHandler for HostApplication {
-    fn dispatch(&self, command: ControlCommand) -> ControlDispatch {
-        self.dispatch_command(command)
-    }
-}
-
-pub(crate) fn response_from_error(error: HostCommandError) -> ControlResponse {
+fn response_from_error(error: HostCommandError) -> ControlResponse {
     match error {
         HostCommandError::Busy => {
             ControlResponse::error(InjectorError::HostBusy.to_string(), ControlStatus::Busy)
@@ -132,17 +71,17 @@ pub(crate) fn response_from_error(error: HostCommandError) -> ControlResponse {
         HostCommandError::Stopping => {
             ControlResponse::error("dwm-lut host instance is stopping", ControlStatus::Stopping)
         }
+        HostCommandError::MutationExecutorStopped => ControlResponse::error(
+            "host mutation executor stopped unexpectedly",
+            ControlStatus::Error,
+        ),
         HostCommandError::Injector(error) => {
             ControlResponse::error(error.to_string(), ControlStatus::Error)
         }
     }
 }
 
-pub(crate) fn response_from_injector_error(error: InjectorError) -> ControlResponse {
-    ControlResponse::error(error.to_string(), ControlStatus::Error)
-}
-
-pub(crate) fn apply_message(report: &ApplyReport) -> String {
+fn apply_message(report: &ApplyReport) -> String {
     match report.outcome {
         ApplyOutcome::Replaced => format!(
             "replaced assignments in dwm.exe (pid={pid}) from {} (profile={})",
@@ -169,7 +108,7 @@ pub(crate) fn apply_message(report: &ApplyReport) -> String {
     }
 }
 
-pub(crate) fn disable_message(report: &DisableReport) -> String {
+fn disable_message(report: &DisableReport) -> String {
     match report.outcome {
         DisableOutcome::NotInjected => format!(
             "disable skipped: hook DLL is not injected into dwm.exe (pid={})",
@@ -226,53 +165,63 @@ fn response_from_disable(result: Result<DisableReport, HostCommandError>) -> Con
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::Receiver;
+    use std::sync::mpsc::{self, Receiver};
+
+    use crate::control::server::ServerShutdown;
+    use crate::gui::{UiCommand, UiHandle};
 
     use super::*;
 
-    fn test_application() -> (
-        Arc<HostApplication>,
+    fn test_handler() -> (
+        ControlCommandHandler,
         Arc<HostController>,
         Receiver<UiCommand>,
     ) {
-        let controller = Arc::new(HostController::new(None));
         let shutdown = Arc::new(ServerShutdown::new());
         let (ui, commands) = UiHandle::new();
-        (
-            Arc::new(HostApplication::new(Arc::clone(&controller), shutdown, ui)),
-            controller,
-            commands,
-        )
+        let controller = Arc::new(HostController::new(None, shutdown, ui).unwrap());
+        let handler = ControlCommandHandler::new(Arc::clone(&controller));
+        (handler, controller, commands)
     }
 
     #[test]
-    fn show_gui_does_not_wait_for_mutation_lock() {
-        let (application, controller, commands) = test_application();
-        let _mutation = controller.hold_command_lock();
+    fn status_remains_running_and_stop_is_busy_during_mutation() {
+        let (handler, controller, _commands) = test_handler();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let mutation = controller
+            .submit_test_mutation(move || {
+                release_receiver.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
 
-        let dispatch = application.dispatch(ControlCommand::ShowGui);
+        let status = handler.dispatch(ControlCommand::Status);
+        let stop = handler.dispatch(ControlCommand::Stop);
 
-        assert!(dispatch.response().ok);
-        assert_eq!(dispatch.response().status, ControlStatus::Shown);
-        assert!(matches!(commands.recv().unwrap(), UiCommand::Show));
+        assert!(status.response().ok);
+        assert_eq!(status.response().status, ControlStatus::Running);
+        assert!(!stop.response().ok);
+        assert_eq!(stop.response().status, ControlStatus::Busy);
+        release_sender.send(()).unwrap();
+        mutation.wait().unwrap();
     }
 
     #[test]
     fn dropping_stop_dispatch_before_completion_rolls_back_state() {
-        let (application, controller, _commands) = test_application();
+        let (handler, controller, _commands) = test_handler();
 
-        let dispatch = application.dispatch(ControlCommand::Stop);
+        let dispatch = handler.dispatch(ControlCommand::Stop);
         assert_eq!(controller.state(), HostState::Stopping);
         drop(dispatch);
 
-        assert_eq!(controller.state(), HostState::Running);
+        assert_eq!(controller.state(), HostState::Idle);
     }
 
     #[test]
     fn completing_stop_dispatch_commits_state_and_exits_ui() {
-        let (application, controller, commands) = test_application();
+        let (handler, controller, commands) = test_handler();
 
-        let dispatch = application.dispatch(ControlCommand::Stop);
+        let dispatch = handler.dispatch(ControlCommand::Stop);
         assert_eq!(dispatch.response().status, ControlStatus::Stopped);
         dispatch.complete().unwrap();
 

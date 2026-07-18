@@ -8,7 +8,6 @@ pub(super) enum GuiError {
     Injector(InjectorError),
     Config(config::ConfigError),
     Host(HostCommandError),
-    WorkerStopped,
     InvalidEdit(String),
 }
 
@@ -18,7 +17,6 @@ impl fmt::Display for GuiError {
             Self::Injector(error) => error.fmt(formatter),
             Self::Config(error) => error.fmt(formatter),
             Self::Host(error) => error.fmt(formatter),
-            Self::WorkerStopped => formatter.write_str("background operation stopped unexpectedly"),
             Self::InvalidEdit(message) => formatter.write_str(message),
         }
     }

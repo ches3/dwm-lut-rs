@@ -2,7 +2,6 @@ mod app;
 mod error;
 mod fonts;
 mod tray;
-mod worker;
 
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, OnceLock};
@@ -10,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 use eframe::egui;
 
 use crate::error::InjectorError;
-use crate::host::HostApplication;
+use crate::host::HostController;
 
 use crate::config::{ConfigColorMode, ConfigDocument};
 use error::GuiError;
@@ -54,10 +53,10 @@ impl UiHandle {
 }
 
 pub(crate) fn run_host_ui(
-    application: Arc<HostApplication>,
+    controller: Arc<HostController>,
     ui_handle: Arc<UiHandle>,
     ui_commands: Receiver<UiCommand>,
     ready: mpsc::Sender<()>,
 ) -> Result<(), InjectorError> {
-    app::run_host(application, ui_handle, ui_commands, ready)
+    app::run(controller, ui_handle, ui_commands, ready)
 }

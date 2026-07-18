@@ -11,7 +11,7 @@ use crate::error::InjectorError;
 use crate::gui;
 use crate::host::launch::StartupNotifier;
 use crate::host::{
-    HostApplication, HostController, HostInstanceClaim, HostInstanceGuard, HostInstanceWaiter,
+    ControlCommandHandler, HostController, HostInstanceClaim, HostInstanceGuard, HostInstanceWaiter,
 };
 use crate::inject;
 use crate::panic_report;
@@ -76,7 +76,7 @@ pub fn run_host(options: BackgroundOptions) -> Result<(), InjectorError> {
         startup_notifier = startup_result_pipe
             .map(StartupNotifier::connect)
             .transpose()?;
-        run_host_inner(
+        run_host_session(
             dll_path,
             &mut startup_notifier,
             Arc::clone(&startup_completed),
@@ -103,7 +103,7 @@ pub fn run_host(options: BackgroundOptions) -> Result<(), InjectorError> {
     result
 }
 
-fn run_host_inner(
+fn run_host_session(
     dll_path: Option<PathBuf>,
     startup_notifier: &mut Option<StartupNotifier>,
     startup_completed: Arc<AtomicBool>,
@@ -111,18 +111,18 @@ fn run_host_inner(
     let _host_guard = acquire_host_instance()?;
     inject::ensure_host_privileges()?;
     let dll_path = crate::entry::launcher::resolve_host_dll_path(dll_path)?;
-    let controller = Arc::new(HostController::new(dll_path));
     let shutdown = Arc::new(ServerShutdown::new());
     let (ui_handle, ui_commands) = gui::UiHandle::new();
-    let application = Arc::new(HostApplication::new(
-        controller,
+    let controller = Arc::new(HostController::new(
+        dll_path,
         Arc::clone(&shutdown),
         Arc::clone(&ui_handle),
-    ));
+    )?);
     let (ui_ready_sender, ui_ready_receiver) = mpsc::channel();
     let (notifier_sender, notifier_receiver) = mpsc::sync_channel::<Option<StartupNotifier>>(1);
 
-    let server_handler: Arc<dyn control::server::ControlHandler> = application.clone();
+    let command_handler: Arc<dyn control::server::ControlHandler> =
+        Arc::new(ControlCommandHandler::new(Arc::clone(&controller)));
     let server_shutdown = Arc::clone(&shutdown);
     let server_ui_handle = Arc::clone(&ui_handle);
     let server_startup_completed = Arc::clone(&startup_completed);
@@ -137,7 +137,7 @@ fn run_host_inner(
             })?;
             let result = match ui_ready_receiver.recv() {
                 Ok(()) => control::server::run_server(
-                    server_handler,
+                    command_handler,
                     Arc::clone(&server_shutdown),
                     || {
                         if let Some(notifier) = server_notifier.take() {
@@ -173,7 +173,7 @@ fn run_host_inner(
         })?;
     send_startup_notifier(notifier_sender, startup_notifier)?;
 
-    let ui_result = gui::run_host_ui(application, ui_handle, ui_commands, ui_ready_sender);
+    let ui_result = gui::run_host_ui(controller, ui_handle, ui_commands, ui_ready_sender);
     shutdown.request();
     let server_result = match server_thread.join() {
         Ok(result) => result,
@@ -260,9 +260,9 @@ fn wait_for_host_instance_transition(
         if let Some(guard) = waiter.wait(0)? {
             return Ok(guard);
         }
-        match existing_host_state() {
-            Ok(ExistingHostState::Running) => return Err(InjectorError::HostAlreadyRunning),
-            Ok(ExistingHostState::Stopping) => {}
+        match query_existing_host_status() {
+            Ok(ExistingHostStatus::Running) => return Err(InjectorError::HostAlreadyRunning),
+            Ok(ExistingHostStatus::Stopping) => {}
             Err(error) if is_transient_host_state_error(&error) => {}
             Err(error) => return Err(error),
         }
@@ -297,19 +297,19 @@ fn is_transient_host_state_error(error: &InjectorError) -> bool {
     }
 }
 
-enum ExistingHostState {
+enum ExistingHostStatus {
     Running,
     Stopping,
 }
 
-fn existing_host_state() -> Result<ExistingHostState, InjectorError> {
+fn query_existing_host_status() -> Result<ExistingHostStatus, InjectorError> {
     let response = control::client::send_request(&ControlRequest::new(ControlCommand::Status))?;
     if !response.ok {
         return Err(InjectorError::ControlProtocol(response.message));
     }
     match response.status {
-        ControlStatus::Running => Ok(ExistingHostState::Running),
-        ControlStatus::Stopping => Ok(ExistingHostState::Stopping),
+        ControlStatus::Running => Ok(ExistingHostStatus::Running),
+        ControlStatus::Stopping => Ok(ExistingHostStatus::Stopping),
         status => Err(InjectorError::ControlProtocol(format!(
             "unexpected host status: {status:?}"
         ))),

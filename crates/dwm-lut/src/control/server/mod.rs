@@ -122,7 +122,7 @@ async fn handle_connected_client(
         Ok(bytes) => bytes,
         Err(error @ InjectorError::ControlTimeout { .. }) => return Err(error),
         Err(error) => {
-            let response = crate::host::response_from_injector_error(error);
+            let response = response_from_injector_error(error);
             let response = encode_response(&response)?;
             return write_message(
                 &mut pipe,
@@ -141,7 +141,7 @@ async fn handle_connected_client(
             })?;
     let dispatch = match dispatch {
         Ok(dispatch) => dispatch,
-        Err(error) => ControlDispatch::immediate(crate::host::response_from_injector_error(error)),
+        Err(error) => ControlDispatch::immediate(response_from_injector_error(error)),
     };
     let response = encode_response(&dispatch.response)?;
     write_message(
@@ -157,6 +157,13 @@ async fn handle_connected_client(
 
 pub(crate) trait ControlHandler: Send + Sync {
     fn dispatch(&self, command: ControlCommand) -> ControlDispatch;
+}
+
+fn response_from_injector_error(error: InjectorError) -> ControlResponse {
+    ControlResponse::error(
+        error.to_string(),
+        crate::control::protocol::ControlStatus::Error,
+    )
 }
 
 pub(crate) struct ControlDispatch {
