@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::lut_pipeline::{
     BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
     DirtyRect, LutPipeline, ShaderConstantsCBuffer,
@@ -89,8 +91,59 @@ enum RenderTargetState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum BackBufferId {
+    PrivateData(u128),
+    ComIdentity(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct RenderTargetKey {
     overlay_swap_chain: usize,
+    back_buffer: BackBufferId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RenderTargetStateEntry {
+    state: RenderTargetState,
+    last_seen: u64,
+}
+
+#[derive(Default)]
+struct RenderTargetStates {
+    entries: BTreeMap<RenderTargetKey, RenderTargetStateEntry>,
+    sequence: u64,
+}
+
+impl RenderTargetStates {
+    const MAX_ENTRIES: usize = 16;
+
+    fn previous_state(&mut self, key: RenderTargetKey) -> RenderTargetState {
+        self.sequence = self.sequence.saturating_add(1);
+        let Some(entry) = self.entries.get_mut(&key) else {
+            return RenderTargetState::Bootstrapping;
+        };
+        entry.last_seen = self.sequence;
+        entry.state
+    }
+
+    fn record_success(&mut self, key: RenderTargetKey, state: DrawState) {
+        if !self.entries.contains_key(&key) && self.entries.len() >= Self::MAX_ENTRIES {
+            let oldest_key = self
+                .entries
+                .iter()
+                .min_by_key(|(key, entry)| (entry.last_seen, **key))
+                .map(|(key, _)| *key)
+                .expect("a full render target state cache must have an oldest entry");
+            self.entries.remove(&oldest_key);
+        }
+        self.entries.insert(
+            key,
+            RenderTargetStateEntry {
+                state: RenderTargetState::Stable(state),
+                last_seen: self.sequence,
+            },
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -635,15 +688,86 @@ mod tests {
     }
 
     #[test]
-    fn render_target_key_is_stable_for_one_overlay_swap_chain() {
+    fn render_target_states_stabilize_back_buffers_independently() {
+        let state = DrawState {
+            format: BackBufferFormat::Bgra8Unorm,
+            lut_index: 0,
+        };
         let first = RenderTargetKey {
             overlay_swap_chain: 0x1000,
+            back_buffer: BackBufferId::PrivateData(0x2000),
         };
-        let second = RenderTargetKey {
+        let other_buffer = RenderTargetKey {
             overlay_swap_chain: 0x1000,
+            back_buffer: BackBufferId::PrivateData(0x3000),
         };
+        let fallback_buffer = RenderTargetKey {
+            overlay_swap_chain: 0x1000,
+            back_buffer: BackBufferId::ComIdentity(0x4000),
+        };
+        let mut states = RenderTargetStates::default();
 
-        assert_eq!(first, second);
+        assert_eq!(
+            states.previous_state(first),
+            RenderTargetState::Bootstrapping
+        );
+        states.record_success(first, state);
+        assert_eq!(
+            states.previous_state(first),
+            RenderTargetState::Stable(state)
+        );
+        assert_eq!(
+            states.previous_state(other_buffer),
+            RenderTargetState::Bootstrapping
+        );
+        states.record_success(other_buffer, state);
+        assert_eq!(
+            states.previous_state(other_buffer),
+            RenderTargetState::Stable(state)
+        );
+        assert_eq!(
+            states.previous_state(fallback_buffer),
+            RenderTargetState::Bootstrapping
+        );
+        states.record_success(fallback_buffer, state);
+        assert_eq!(
+            states.previous_state(fallback_buffer),
+            RenderTargetState::Stable(state)
+        );
+    }
+
+    #[test]
+    fn render_target_states_evict_the_least_recently_seen_buffer() {
+        let state = DrawState {
+            format: BackBufferFormat::Bgra8Unorm,
+            lut_index: 0,
+        };
+        let key = |id| RenderTargetKey {
+            overlay_swap_chain: 0x1000,
+            back_buffer: BackBufferId::PrivateData(id),
+        };
+        let mut states = RenderTargetStates::default();
+        for id in 0..RenderTargetStates::MAX_ENTRIES as u128 {
+            let key = key(id);
+            assert_eq!(states.previous_state(key), RenderTargetState::Bootstrapping);
+            states.record_success(key, state);
+        }
+
+        assert_eq!(
+            states.previous_state(key(0)),
+            RenderTargetState::Stable(state)
+        );
+        let new_key = key(RenderTargetStates::MAX_ENTRIES as u128);
+        assert_eq!(
+            states.previous_state(new_key),
+            RenderTargetState::Bootstrapping
+        );
+        states.record_success(new_key, state);
+
+        assert_eq!(states.entries.len(), RenderTargetStates::MAX_ENTRIES);
+        assert!(states.entries.contains_key(&key(0)));
+        assert!(!states.entries.contains_key(&key(1)));
+        assert!(states.entries.contains_key(&new_key));
     }
 
     #[test]

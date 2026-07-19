@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+#[cfg(debug_assertions)]
+use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::{Mutex, OnceLock};
@@ -11,7 +13,7 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D,
     ID3D11VertexShader,
 };
-use windows::core::Interface;
+use windows::core::{GUID, IUnknown, Interface};
 
 use super::Vertex;
 use super::context_state::{ContextState, unbind_pipeline};
@@ -25,6 +27,8 @@ use dwm_lut_payload::MonitorIdentity;
 
 #[cfg(debug_assertions)]
 const DIAGNOSTIC_SAMPLE_INTERVAL: u64 = 600;
+const BACK_BUFFER_ID_PRIVATE_DATA_GUID: GUID =
+    GUID::from_u128(0x6ca95369_322a_4ee3_8515_fec2020a7416);
 
 static RENDERER: OnceLock<Mutex<D3D11Renderer>> = OnceLock::new();
 
@@ -75,6 +79,8 @@ struct D3D11Renderer {
     devices: BTreeMap<super::ResourceKey, DeviceResources>,
     #[cfg(debug_assertions)]
     frame_diagnostics: PerOverlayDiagnosticLogLimiter<FrameDiagnosticKey>,
+    #[cfg(debug_assertions)]
+    back_buffer_identity_fallbacks: BTreeSet<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -100,6 +106,8 @@ impl D3D11Renderer {
             devices: BTreeMap::new(),
             #[cfg(debug_assertions)]
             frame_diagnostics: PerOverlayDiagnosticLogLimiter::default(),
+            #[cfg(debug_assertions)]
+            back_buffer_identity_fallbacks: BTreeSet::new(),
         }
     }
 
@@ -319,6 +327,7 @@ impl D3D11Renderer {
         pipeline: &LutPipeline,
         mut draw_plan: super::GpuDrawPlan,
     ) -> super::RenderPresentLutResult {
+        let back_buffer_id = self.back_buffer_id(frame.back_buffer);
         let device_key = frame.device.as_raw() as usize;
         let resource_key = super::ResourceKey {
             device: device_key,
@@ -374,12 +383,11 @@ impl D3D11Renderer {
             format: draw_plan.format,
             lut_index: draw_plan.lut_index,
         };
-        let render_target_key = super::RenderTargetKey { overlay_swap_chain };
-        let previous_state = resources
-            .draw_states
-            .get(&render_target_key)
-            .copied()
-            .unwrap_or(super::RenderTargetState::Bootstrapping);
+        let render_target_key = super::RenderTargetKey {
+            overlay_swap_chain,
+            back_buffer: back_buffer_id,
+        };
+        let previous_state = resources.draw_states.previous_state(render_target_key);
         let copy_texture_created = !resources.copy_textures.has_format(draw_plan.format);
         let needs_full_redraw = super::requires_full_redraw(
             previous_state,
@@ -433,10 +441,9 @@ impl D3D11Renderer {
             result,
         );
         if result {
-            resources.draw_states.insert(
-                render_target_key,
-                super::RenderTargetState::Stable(current_draw_state),
-            );
+            resources
+                .draw_states
+                .record_success(render_target_key, current_draw_state);
         }
         super::RenderPresentLutResult {
             lut_applied: result,
@@ -454,9 +461,58 @@ impl D3D11Renderer {
         #[cfg(debug_assertions)]
         {
             self.frame_diagnostics = PerOverlayDiagnosticLogLimiter::default();
+            self.back_buffer_identity_fallbacks.clear();
         }
         device_count
     }
+
+    fn back_buffer_id(&mut self, back_buffer: &ID3D11Texture2D) -> super::BackBufferId {
+        match private_data_back_buffer_id(back_buffer) {
+            Ok(id) => super::BackBufferId::PrivateData(id),
+            Err(_reason) => {
+                let identity = back_buffer
+                    .cast::<IUnknown>()
+                    .map(|unknown| unknown.as_raw() as usize)
+                    .unwrap_or_else(|_| back_buffer.as_raw() as usize);
+                #[cfg(debug_assertions)]
+                if self.back_buffer_identity_fallbacks.insert(identity) {
+                    debug_log!(
+                        "event=back_buffer_identity_fallback reason={} back_buffer=0x{:x} identity=0x{:x}",
+                        _reason,
+                        back_buffer.as_raw() as usize,
+                        identity
+                    );
+                }
+                super::BackBufferId::ComIdentity(identity)
+            }
+        }
+    }
+}
+
+fn private_data_back_buffer_id(back_buffer: &ID3D11Texture2D) -> Result<u128, &'static str> {
+    let mut id = GUID::zeroed();
+    let mut size = size_of::<GUID>() as u32;
+    let get_result = unsafe {
+        back_buffer.GetPrivateData(
+            &BACK_BUFFER_ID_PRIVATE_DATA_GUID,
+            &mut size,
+            Some((&mut id as *mut GUID).cast()),
+        )
+    };
+    if get_result.is_ok() && size == size_of::<GUID>() as u32 && id != GUID::zeroed() {
+        return Ok(id.to_u128());
+    }
+
+    let id = GUID::new().map_err(|_| "guid_create_failed")?;
+    unsafe {
+        back_buffer.SetPrivateData(
+            &BACK_BUFFER_ID_PRIVATE_DATA_GUID,
+            size_of::<GUID>() as u32,
+            Some((&id as *const GUID).cast()),
+        )
+    }
+    .map_err(|_| "private_data_set_failed")?;
+    Ok(id.to_u128())
 }
 
 struct DeviceResources {
@@ -471,7 +527,7 @@ struct DeviceResources {
     constant_buffer: ID3D11Buffer,
     copy_textures: CopyTextureResources,
     lut_srvs: Vec<ID3D11ShaderResourceView>,
-    draw_states: BTreeMap<super::RenderTargetKey, super::RenderTargetState>,
+    draw_states: super::RenderTargetStates,
 }
 
 #[derive(Default)]
@@ -554,7 +610,7 @@ impl DeviceResources {
             constant_buffer,
             copy_textures: CopyTextureResources::default(),
             lut_srvs,
-            draw_states: BTreeMap::new(),
+            draw_states: super::RenderTargetStates::default(),
         })
     }
 
