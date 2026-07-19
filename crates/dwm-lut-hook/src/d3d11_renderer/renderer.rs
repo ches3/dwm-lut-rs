@@ -200,7 +200,14 @@ impl D3D11Renderer {
                     desc.Height,
                     dirty_rects.len()
                 );
-                return super::RenderPresentLutResult::default();
+                return super::RenderPresentLutResult {
+                    lut_applied: false,
+                    dxgi_format: Some(desc.Format.0 as u32),
+                    width: Some(desc.Width),
+                    height: Some(desc.Height),
+                    lut_index: None,
+                    present_dirty_rect: None,
+                };
             }
         };
         #[cfg(debug_assertions)]

@@ -488,13 +488,6 @@ pub(super) unsafe extern "system" fn present_detour(
                     Some((inputs.hardware_protected, inputs.monitor_identity, None));
             }
             if let Some(_present_guard) = state::try_lock_present_runtime() {
-                let _ = state::prepare_present_lut_context(
-                    this,
-                    inputs.monitor_identity,
-                    inputs.clip_box,
-                    crate::DXGI_FORMAT_B8G8R8A8_UNORM,
-                    &inputs.dirty_rects,
-                );
                 let render_result = state::render_present_lut(
                     overlay_swap_chain,
                     inputs.monitor_identity,
@@ -550,15 +543,16 @@ pub(super) unsafe extern "system" fn present_detour(
                 }
                 #[cfg(not(debug_assertions))]
                 let _ = present_dirty_rect_source;
-                let _ = state::evaluate_rendered_present_hook(
-                    this,
-                    inputs.clip_box,
-                    render_result
-                        .dxgi_format
-                        .unwrap_or(crate::DXGI_FORMAT_B8G8R8A8_UNORM),
-                    &inputs.dirty_rects,
-                    render_result,
-                );
+                if let Some(dxgi_format) = render_result.dxgi_format {
+                    let _ = state::evaluate_rendered_present_hook(
+                        this,
+                        inputs.monitor_identity,
+                        inputs.clip_box,
+                        dxgi_format,
+                        &inputs.dirty_rects,
+                        render_result,
+                    );
+                }
             } else {
                 route_trace::record_present_lock_miss(overlay_swap_chain);
             }
@@ -1104,7 +1098,7 @@ mod tests {
             .expect("renderer should be called with collected present inputs");
         assert_eq!(
             crate::d3d11_renderer::test_render_context_active(),
-            Some(true)
+            Some(false)
         );
         assert_eq!(
             render_call.overlay_swap_chain,
@@ -1274,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn rendered_present_clears_prepared_context_when_renderer_returns_no_lut_index() {
+    fn rendered_present_clears_context_when_observed_format_has_no_assignment() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         initialize_test_state();
         let context_address = 0x1234;
@@ -1291,20 +1285,17 @@ mod tests {
             bottom: 64,
         }];
 
-        state::prepare_present_lut_context(
+        activate_context(context_address);
+        state::evaluate_rendered_present_hook(
             context_address,
             Some(test_monitor_identity()),
             clip_box,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
             &dirty_rects,
-        )
-        .expect("pre-render present evaluation should run");
-        state::evaluate_rendered_present_hook(
-            context_address,
-            clip_box,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &dirty_rects,
-            crate::d3d11_renderer::RenderPresentLutResult::default(),
+            crate::d3d11_renderer::RenderPresentLutResult {
+                dxgi_format: Some(DXGI_FORMAT_R16G16B16A16_FLOAT),
+                ..Default::default()
+            },
         )
         .expect("post-render present evaluation should run");
 
@@ -1313,6 +1304,69 @@ mod tests {
                 .and_then(|runtime| runtime.context(context_address).cloned())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn present_detour_preserves_hdr_context_when_back_buffer_format_is_unobserved() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        reset_last_original_present_rects();
+        state::reset_state_for_tests();
+        initialize_test_state_from_payload(test_payload(&[ColorMode::Hdr]));
+        let fake = FakePresentObjects::new(
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            vec![DirtyRect {
+                left: 0,
+                top: 0,
+                right: 64,
+                bottom: 64,
+            }],
+            false,
+        );
+        state::evaluate_present_hook(
+            fake.context_address(),
+            Some(test_monitor_identity()),
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            &fake.dirty_rects,
+            true,
+        )
+        .expect("HDR present evaluation should activate the context");
+        super::super::detours::original_pointer_for_target(HookTarget::Present)
+            .store(returns_present_status as *mut c_void, Ordering::Release);
+
+        assert_eq!(
+            unsafe {
+                super::present_detour(
+                    fake.context_address(),
+                    fake.overlay_swap_chain_address(),
+                    0,
+                    fake.rect_vec_address(),
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0x55
+        );
+
+        let context = state::lut_bypass_runtime()
+            .and_then(|runtime| runtime.context(fake.context_address()).cloned())
+            .expect("unobserved format must not clear an active HDR context");
+        assert_eq!(
+            context.back_buffer_format,
+            Some(BackBufferFormat::Rgba16Float)
+        );
+        assert_eq!(context.lut_index, Some(0));
     }
 
     #[test]

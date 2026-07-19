@@ -30,7 +30,7 @@ static TEST_RENDER_PRESENT_LUT_CALL: OnceLock<Mutex<Option<TestRenderPresentLutC
 pub(crate) fn set_test_render_present_lut_result(result: bool) {
     TEST_RENDER_PRESENT_LUT_RESULT.store(result, Ordering::Release);
     set_test_render_present_dirty_rect(None);
-    set_test_render_present_dxgi_format(None);
+    set_test_render_present_dxgi_format(result.then_some(DXGI_FORMAT_B8G8R8A8_UNORM));
     set_test_render_present_size(None);
 }
 
@@ -40,7 +40,7 @@ pub(crate) fn set_test_render_present_lut_result_with_present_rect(
 ) {
     TEST_RENDER_PRESENT_LUT_RESULT.store(result, Ordering::Release);
     set_test_render_present_dirty_rect(rect);
-    set_test_render_present_dxgi_format(None);
+    set_test_render_present_dxgi_format(result.then_some(DXGI_FORMAT_B8G8R8A8_UNORM));
     set_test_render_present_size(None);
 }
 
@@ -144,19 +144,18 @@ pub(crate) unsafe fn render_present_lut(
         dxgi_format,
         width,
         height,
-        lut_index: dxgi_format
-            .or(Some(DXGI_FORMAT_B8G8R8A8_UNORM))
-            .and_then(|format| {
-                monitor_identity.and_then(|identity| {
-                    pipeline.build_present_plan_for_monitor_identity(
+        lut_index: dxgi_format.and_then(|format| {
+            monitor_identity.and_then(|identity| {
+                pipeline
+                    .build_present_plan_for_monitor_identity(
                         identity,
                         clip_box,
                         format,
                         dirty_rects,
                     )
-                })
+                    .map(|plan| plan.lut_index)
             })
-            .map(|plan| plan.lut_index),
+        }),
         present_dirty_rect,
     }
 }

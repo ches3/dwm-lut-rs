@@ -373,6 +373,7 @@ pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHo
 
 pub(crate) fn evaluate_rendered_present_hook(
     context_address: usize,
+    monitor_identity: Option<MonitorIdentity>,
     clip_box: ClipBox,
     dxgi_format: u32,
     dirty_rects: &[DirtyRect],
@@ -393,7 +394,7 @@ pub(crate) fn evaluate_rendered_present_hook(
             runtime.lut_bypass.update_present(
                 &runtime.lut_pipeline,
                 context_address,
-                None,
+                monitor_identity,
                 clip_box,
                 dxgi_format,
                 dirty_rects,
@@ -429,23 +430,6 @@ pub(crate) fn render_present_lut(
             &lut_pipeline,
         )
     }
-}
-
-pub(crate) fn prepare_present_lut_context(
-    context_address: usize,
-    monitor_identity: Option<MonitorIdentity>,
-    clip_box: ClipBox,
-    dxgi_format: u32,
-    dirty_rects: &[DirtyRect],
-) -> Option<PresentHookOutcome> {
-    evaluate_present_hook(
-        context_address,
-        monitor_identity,
-        clip_box,
-        dxgi_format,
-        dirty_rects,
-        false,
-    )
 }
 
 pub fn evaluate_direct_flip_compatible(
