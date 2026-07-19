@@ -292,7 +292,18 @@ pub(crate) fn ffi_shutdown() -> u32 {
         return ShutdownStatus::Success as u32;
     };
 
-    let cleanup_failures = unregister_registered_hooks(&minhook, &hooks);
+    let cleanup_failures = {
+        let _present_guard = lock_present_runtime();
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+        let renderer_device_count = crate::d3d11_renderer::shutdown_renderer_resources();
+        crate::state::restore_overlay_test_mode();
+        debug_log!(
+            "event=renderer_resources_released device_resource_count={}",
+            renderer_device_count
+        );
+        crate::desktop_redraw::request_desktop_redraw();
+        unregister_registered_hooks(&minhook, &hooks)
+    };
     #[cfg(debug_assertions)]
     {
         for failure in &cleanup_failures {
@@ -304,19 +315,6 @@ pub(crate) fn ffi_shutdown() -> u32 {
             );
         }
     }
-
-    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-    let renderer_device_count = {
-        let _present_guard = lock_present_runtime();
-        let renderer_device_count = crate::d3d11_renderer::shutdown_renderer_resources();
-        crate::state::restore_overlay_test_mode();
-        renderer_device_count
-    };
-    debug_log!(
-        "event=renderer_resources_released device_resource_count={}",
-        renderer_device_count
-    );
-    crate::desktop_redraw::request_desktop_redraw();
 
     if cleanup_failures
         .iter()
