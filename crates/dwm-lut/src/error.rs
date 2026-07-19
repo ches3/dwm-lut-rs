@@ -144,6 +144,7 @@ pub enum InjectorError {
     HostRequiresAdministratorUser,
     HostElevationCancelled,
     HostStartupFailed(String),
+    HostUiUnavailable,
     HostPanicAlreadyReported,
     StartupTaskElevationCancelled,
     StartupTaskRequiresAdministratorUser,
@@ -240,6 +241,7 @@ impl fmt::Display for InjectorError {
             Self::HostStartupFailed(message) => {
                 write!(f, "host background startup failed: {message}")
             }
+            Self::HostUiUnavailable => write!(f, "host UI event loop is unavailable"),
             Self::HostPanicAlreadyReported => {
                 write!(f, "host background panic was already reported")
             }

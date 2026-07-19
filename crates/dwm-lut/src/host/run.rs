@@ -173,7 +173,7 @@ fn run_host_session(
         })?;
     send_startup_notifier(notifier_sender, startup_notifier)?;
 
-    let ui_result = gui::run_host_ui(controller, ui_handle, ui_commands, ui_ready_sender);
+    let ui_result = gui::run_host_ui(controller, ui_commands, ui_ready_sender);
     shutdown.request();
     let server_result = match server_thread.join() {
         Ok(result) => result,

@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use crate::config::{ConfigDocument, load_config_document, save_config_document};
 use crate::paths::default_config_path;
 
-use super::GuiError;
+use super::super::error::GuiError;
 
-pub(super) enum ConfigState {
+pub(crate) enum ConfigState {
     Ready(ConfigEditor),
     LoadFailed {
         path: Option<PathBuf>,
@@ -13,14 +13,14 @@ pub(super) enum ConfigState {
     },
 }
 
-pub(super) struct ConfigEditor {
-    pub(super) path: PathBuf,
-    pub(super) document: ConfigDocument,
-    pub(super) selected_profile: String,
+pub(crate) struct ConfigEditor {
+    pub(crate) path: PathBuf,
+    pub(crate) document: ConfigDocument,
+    pub(crate) selected_profile: String,
 }
 
 impl ConfigState {
-    pub(super) fn load_default() -> Self {
+    pub(crate) fn load_default() -> Self {
         match default_config_path() {
             Ok(path) => Self::load(path),
             Err(error) => Self::LoadFailed {
@@ -30,11 +30,11 @@ impl ConfigState {
         }
     }
 
-    pub(super) fn load(path: PathBuf) -> Self {
+    pub(crate) fn load(path: PathBuf) -> Self {
         Self::load_selecting(path, None)
     }
 
-    pub(super) fn load_selecting(path: PathBuf, selected_profile: Option<&str>) -> Self {
+    pub(crate) fn load_selecting(path: PathBuf, selected_profile: Option<&str>) -> Self {
         match load_config_document(&path) {
             Ok(document) => {
                 if !path.exists()
@@ -61,7 +61,7 @@ impl ConfigState {
         }
     }
 
-    pub(super) fn reload(&self) -> Self {
+    pub(crate) fn reload(&self) -> Self {
         match self {
             Self::Ready(editor) => {
                 Self::load_selecting(editor.path.clone(), Some(editor.selected_profile.as_str()))
@@ -73,7 +73,7 @@ impl ConfigState {
         }
     }
 
-    pub(super) fn retry(&self) -> Self {
+    pub(crate) fn retry(&self) -> Self {
         match self {
             Self::Ready(editor) => Self::load(editor.path.clone()),
             Self::LoadFailed {
@@ -83,25 +83,21 @@ impl ConfigState {
         }
     }
 
-    pub(super) fn document(&self) -> Option<&ConfigDocument> {
-        self.editor().map(|editor| &editor.document)
-    }
-
-    pub(super) fn load_error(&self) -> Option<&GuiError> {
+    pub(crate) fn load_error(&self) -> Option<&GuiError> {
         match self {
             Self::Ready(_) => None,
             Self::LoadFailed { error, .. } => Some(error),
         }
     }
 
-    pub(super) fn editor(&self) -> Option<&ConfigEditor> {
+    pub(crate) fn editor(&self) -> Option<&ConfigEditor> {
         match self {
             Self::Ready(editor) => Some(editor),
             Self::LoadFailed { .. } => None,
         }
     }
 
-    pub(super) fn editor_mut(&mut self) -> Option<&mut ConfigEditor> {
+    pub(crate) fn editor_mut(&mut self) -> Option<&mut ConfigEditor> {
         match self {
             Self::Ready(editor) => Some(editor),
             Self::LoadFailed { .. } => None,
@@ -109,7 +105,7 @@ impl ConfigState {
     }
 }
 
-pub(super) fn edit_and_save_config<T, E>(
+pub(crate) fn edit_and_save_config<T, E>(
     path: &Path,
     mut config: ConfigDocument,
     edit: impl FnOnce(&mut ConfigDocument) -> Result<T, E>,

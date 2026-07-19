@@ -1,18 +1,19 @@
 mod app;
 mod error;
-mod fonts;
-mod tray;
+mod session;
 
+use std::cell::RefCell;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, OnceLock};
-
-use eframe::egui;
 
 use crate::error::InjectorError;
 use crate::host::HostController;
 
-use crate::config::{ConfigColorMode, ConfigDocument};
-use error::GuiError;
+slint::include_modules!();
+
+thread_local! {
+    static UI_WAKE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UiCommand {
@@ -23,41 +24,51 @@ pub(crate) enum UiCommand {
 
 pub(crate) struct UiHandle {
     sender: mpsc::Sender<UiCommand>,
-    context: OnceLock<egui::Context>,
 }
 
 impl UiHandle {
     pub(crate) fn new() -> (Arc<Self>, Receiver<UiCommand>) {
         let (sender, receiver) = mpsc::channel();
-        (
-            Arc::new(Self {
-                sender,
-                context: OnceLock::new(),
-            }),
-            receiver,
-        )
-    }
-
-    pub(crate) fn attach_context(&self, context: egui::Context) {
-        let _ = self.context.set(context);
+        (Arc::new(Self { sender }), receiver)
     }
 
     pub(crate) fn send(&self, command: UiCommand) -> Result<(), InjectorError> {
-        self.sender.send(command).map_err(|_| {
-            InjectorError::HostStartupFailed("host UI event loop is unavailable".to_string())
-        })?;
-        if let Some(context) = self.context.get() {
-            context.request_repaint();
-        }
+        self.sender
+            .send(command)
+            .map_err(|_| InjectorError::HostUiUnavailable)?;
+        schedule_ui_wake();
         Ok(())
     }
 }
 
+fn install_ui_wake(callback: impl Fn() + 'static) {
+    UI_WAKE.with(|wake| {
+        *wake.borrow_mut() = Some(Box::new(callback));
+    });
+}
+
+fn clear_ui_wake() {
+    UI_WAKE.with(|wake| {
+        *wake.borrow_mut() = None;
+    });
+}
+
+fn invoke_installed_ui_wake() {
+    UI_WAKE.with(|wake| {
+        if let Some(callback) = wake.borrow().as_ref() {
+            callback();
+        }
+    });
+}
+
+fn schedule_ui_wake() {
+    let _ = slint::invoke_from_event_loop(invoke_installed_ui_wake);
+}
+
 pub(crate) fn run_host_ui(
     controller: Arc<HostController>,
-    ui_handle: Arc<UiHandle>,
     ui_commands: Receiver<UiCommand>,
     ready: mpsc::Sender<()>,
 ) -> Result<(), InjectorError> {
-    app::run(controller, ui_handle, ui_commands, ready)
+    session::run(controller, ui_commands, ready)
 }

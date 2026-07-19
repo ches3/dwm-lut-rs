@@ -1,0 +1,532 @@
+import {
+    Button,
+    ComboBox,
+    LineEdit,
+    Palette,
+    ScrollView,
+    VerticalBox,
+    HorizontalBox,
+} from "std-widgets.slint";
+
+component BusyIndicator {
+    width: 18px;
+    height: 18px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+
+    path := Path {
+        private property <float> radius: min(self.viewbox-width, self.viewbox-height) / 2 - 10;
+        private property <float> start-x: self.viewbox-width / 2;
+        private property <float> start-y: self.viewbox-height / 2;
+        private property <float> start: mod(animation-tick(), 1s) / 1s;
+        private property <float> progress: 0.75;
+
+        width: 100%;
+        height: 100%;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        stroke-width: 3px;
+        stroke: Palette.foreground;
+
+        MoveTo {
+            x: path.start-x - path.radius * sin(-(path.start - 0.001) * 360deg);
+            y: path.start-y - path.radius * cos(-(path.start - 0.001) * 360deg);
+        }
+        LineTo {
+            x: path.start-x - path.radius * sin(-path.start * 360deg);
+            y: path.start-y - path.radius * cos(-path.start * 360deg);
+        }
+        ArcTo {
+            radius-x: path.radius;
+            radius-y: path.radius;
+            x: path.start-x - path.radius * sin(-(path.start + path.progress) * 360deg);
+            y: path.start-y - path.radius * cos(-(path.start + path.progress) * 360deg);
+            sweep: true;
+            large-arc: true;
+        }
+    }
+}
+
+export struct TrayProfile {
+    name: string,
+    label: string,
+}
+
+export struct MonitorRow {
+    device-path: string,
+    title: string,
+    connected: bool,
+    sdr-path: string,
+    hdr-path: string,
+    has-sdr: bool,
+    has-hdr: bool,
+}
+
+export enum DialogKind {
+    none,
+    error,
+    add-profile,
+    rename-profile,
+    delete-profile,
+}
+
+export component HostTray inherits SystemTrayIcon {
+    in-out property <string> tray-tooltip <=> root.tooltip;
+    in-out property <bool> tray-visible <=> root.visible;
+    in property <[TrayProfile]> apply-profiles;
+    in property <bool> apply-enabled: false;
+    in property <bool> disable-enabled: false;
+    in property <bool> exit-enabled: true;
+
+    callback open-window();
+    callback apply-profile(string);
+    callback disable();
+    callback exit();
+
+    icon: @image-url("../assets/icon.png");
+    tooltip: "dwm-lut";
+
+    clicked => {
+        root.open-window();
+    }
+
+    Menu {
+        MenuItem {
+            title: "Open";
+            activated => {
+                root.open-window();
+            }
+        }
+        MenuSeparator {}
+        Menu {
+            title: "Apply";
+            enabled: root.apply-enabled;
+            for profile in root.apply-profiles: MenuItem {
+                title: profile.label;
+                activated => {
+                    root.apply-profile(profile.name);
+                }
+            }
+        }
+        MenuItem {
+            title: "Disable";
+            enabled: root.disable-enabled;
+            activated => {
+                root.disable();
+            }
+        }
+        MenuSeparator {}
+        MenuItem {
+            title: "Exit";
+            enabled: root.exit-enabled;
+            activated => {
+                root.exit();
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "dwm-lut";
+    icon: @image-url("../assets/icon.png");
+    preferred-width: 800px;
+    preferred-height: 580px;
+    min-width: root.load-failed ? 480px : 720px;
+    min-height: root.load-failed ? 220px : 480px;
+    default-font-family: "Segoe UI";
+    default-font-size: 13px;
+
+    forward-focus: app-focus;
+
+    in property <bool> load-failed: false;
+    in property <string> load-error: "";
+    in property <bool> controls-disabled: false;
+    in property <bool> can-exit: true;
+    in property <string> mutation-status: "";
+    in property <string> monitor-error: "";
+    in property <[string]> profile-names;
+    in-out property <int> selected-profile-index: 0;
+    private property <string> selected-profile:
+        root.selected-profile-index >= 0 && root.selected-profile-index < root.profile-names.length
+            ? root.profile-names[root.selected-profile-index]
+            : "";
+    in property <string> default-profile: "";
+    in property <[MonitorRow]> monitors;
+    in property <DialogKind> dialog-kind: DialogKind.none;
+    in property <string> dialog-title: "";
+    in property <string> dialog-message: "";
+    in-out property <string> dialog-input: "";
+    in property <string> dialog-error: "";
+
+    callback apply();
+    callback disable();
+    callback reload-config();
+    callback exit();
+    callback profile-selected(string);
+    callback add-profile();
+    callback rename-profile();
+    callback delete-profile();
+    callback set-default-profile();
+    callback browse-lut(string, bool);
+    callback clear-lut(string, bool);
+    callback dialog-accept();
+    callback dialog-cancel();
+
+    public function restore-default-focus() {
+        app-focus.focus();
+    }
+
+    app-focus := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: true;
+
+        capture-key-pressed(event) => {
+            if (root.dialog-kind != DialogKind.none && event.text == Key.Escape) {
+                root.dialog-cancel();
+                return accept;
+            }
+            reject
+        }
+
+        VerticalBox {
+            padding: 0px;
+            spacing: 10px;
+
+            if root.load-failed: VerticalBox {
+                padding: 16px;
+                spacing: 12px;
+                alignment: start;
+                vertical-stretch: 1;
+
+                Text {
+                    text: "Failed to load configuration";
+                    font-size: 18px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: root.load-error;
+                    wrap: word-wrap;
+                }
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 8px;
+                    vertical-stretch: 0;
+                    alignment: start;
+                    Button {
+                        text: "Reload";
+                        enabled: !root.controls-disabled;
+                        clicked => {
+                            root.reload-config();
+                        }
+                    }
+                    Button {
+                        text: "Exit";
+                        enabled: root.can-exit;
+                        clicked => {
+                            root.exit();
+                        }
+                    }
+                    if root.mutation-status != "": HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            alignment: center;
+                            BusyIndicator {}
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: root.mutation-status;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !root.load-failed: VerticalBox {
+                spacing: 0;
+                vertical-stretch: 1;
+
+                HorizontalBox {
+                    spacing: 8px;
+                    Text {
+                        text: "Profile";
+                        vertical-alignment: center;
+                    }
+                    ComboBox {
+                        horizontal-stretch: 0;
+                        model: root.profile-names;
+                        current-index <=> root.selected-profile-index;
+                        enabled: !root.controls-disabled;
+                        selected(value) => {
+                            root.profile-selected(value);
+                        }
+                    }
+                    if root.selected-profile == root.default-profile: Text {
+                        text: "(default)";
+                        vertical-alignment: center;
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 6px;
+                        horizontal-stretch: 1;
+                        Button {
+                            text: "Add";
+                            enabled: !root.controls-disabled;
+                            clicked => {
+                                root.add-profile();
+                            }
+                        }
+                        Button {
+                            text: "Rename";
+                            enabled: !root.controls-disabled;
+                            clicked => {
+                                root.rename-profile();
+                            }
+                        }
+                        Button {
+                            text: "Delete";
+                            enabled: !root.controls-disabled;
+                            clicked => {
+                                root.delete-profile();
+                            }
+                        }
+                        Button {
+                            text: "Set Default";
+                            enabled: !root.controls-disabled && root.selected-profile != root.default-profile;
+                            clicked => {
+                                root.set-default-profile();
+                            }
+                        }
+                    }
+                }
+
+                if root.monitor-error != "": Text {
+                    text: "Failed to refresh monitors: \{root.monitor-error}";
+                    color: #d9534f;
+                    wrap: word-wrap;
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalBox {
+                        alignment: start;
+                        spacing: 4px;
+                        padding-top: 2px;
+                        padding-bottom: 2px;
+                        padding-left: 0px;
+                        padding-right: 6px;
+
+                        if root.monitors.length == 0: Text {
+                            text: "No active monitors or saved assignments.";
+                        }
+
+                        for monitor in root.monitors: VerticalBox {
+                            padding: 10px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                spacing: 12px;
+                                alignment: start;
+                                Text {
+                                    text: monitor.title;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    color: monitor.connected ? Palette.foreground : Palette.foreground.transparentize(0.4);
+                                }
+                                if !monitor.connected: Text {
+                                    text: "Disconnected";
+                                    color: Palette.foreground.transparentize(0.4);
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: "SDR LUT";
+                                    width: 64px;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: monitor.sdr-path;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                    color: Palette.foreground.transparentize(0.15);
+                                    vertical-alignment: center;
+                                }
+                                Button {
+                                    text: "Browse";
+                                    enabled: !root.controls-disabled;
+                                    clicked => {
+                                        root.browse-lut(monitor.device-path, false);
+                                    }
+                                }
+                                Button {
+                                    text: "Clear";
+                                    enabled: !root.controls-disabled && monitor.has-sdr;
+                                    clicked => {
+                                        root.clear-lut(monitor.device-path, false);
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: "HDR LUT";
+                                    width: 64px;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: monitor.hdr-path;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                    color: Palette.foreground.transparentize(0.15);
+                                    vertical-alignment: center;
+                                }
+                                Button {
+                                    text: "Browse";
+                                    enabled: !root.controls-disabled;
+                                    clicked => {
+                                        root.browse-lut(monitor.device-path, true);
+                                    }
+                                }
+                                Button {
+                                    text: "Clear";
+                                    enabled: !root.controls-disabled && monitor.has-hdr;
+                                    clicked => {
+                                        root.clear-lut(monitor.device-path, true);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalBox {
+                    alignment: start;
+                    padding-top: 16px;
+                    spacing: 12px;
+                    VerticalLayout {
+                        alignment: center;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button {
+                                text: "Apply";
+                                enabled: !root.controls-disabled;
+                                clicked => {
+                                    root.apply();
+                                }
+                            }
+                            Button {
+                                text: "Disable";
+                                enabled: !root.controls-disabled;
+                                clicked => {
+                                    root.disable();
+                                }
+                            }
+                        }
+                    }
+                    if root.mutation-status != "": HorizontalLayout {
+                        spacing: 6px;
+                        VerticalLayout {
+                            alignment: center;
+                            BusyIndicator {}
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: root.mutation-status;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.dialog-kind != DialogKind.none: Rectangle {
+            background: #000000b4;
+            width: 100%;
+            height: 100%;
+
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                clicked => {
+                    root.dialog-cancel();
+                }
+            }
+
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: min(360px, parent.width - 40px);
+                height: dialog-content.preferred-height;
+                background: Palette.background;
+                border-width: 1px;
+                border-color: Palette.border;
+                border-radius: 6px;
+                drop-shadow-blur: 16px;
+                drop-shadow-color: #00000066;
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+                }
+
+                dialog-content := VerticalBox {
+                    padding: 16px;
+                    spacing: 16px;
+
+                    Text {
+                        text: root.dialog-title;
+                        font-size: 16px;
+                        font-weight: 700;
+                    }
+
+                    if root.dialog-kind == DialogKind.error || root.dialog-kind == DialogKind.delete-profile: Text {
+                        text: root.dialog-message;
+                        wrap: word-wrap;
+                    }
+
+                    if root.dialog-kind == DialogKind.add-profile || root.dialog-kind == DialogKind.rename-profile: VerticalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Profile name";
+                        }
+                        LineEdit {
+                            text <=> root.dialog-input;
+                            enabled: true;
+                            init => {
+                                self.focus();
+                            }
+                        }
+                        if root.dialog-error != "": Text {
+                            text: root.dialog-error;
+                            color: #d9534f;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+                        Button {
+                            text: root.dialog-kind == DialogKind.delete-profile ? "Delete" : "OK";
+                            clicked => {
+                                root.dialog-accept();
+                            }
+                        }
+                        if root.dialog-kind != DialogKind.error: Button {
+                            text: "Cancel";
+                            clicked => {
+                                root.dialog-cancel();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

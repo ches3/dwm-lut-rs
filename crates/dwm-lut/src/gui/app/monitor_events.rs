@@ -1,14 +1,9 @@
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::{
-    OnceLock,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use eframe::egui;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     UI::{
@@ -19,29 +14,17 @@ use windows_sys::Win32::{
     },
 };
 
-pub(super) const SETTLE_DELAY: Duration = Duration::from_millis(250);
-pub(super) const RETRY_DELAY: Duration = Duration::from_secs(1);
+pub(crate) const SETTLE_DELAY: Duration = Duration::from_millis(250);
+pub(crate) const RETRY_DELAY: Duration = Duration::from_secs(1);
 const MONITOR_CHANGE_SUBCLASS_ID: usize = 1;
 
-pub(super) struct MonitorChangeListener {
+pub(crate) struct MonitorChangeListener {
     hwnd: HWND,
     signal: Option<Arc<MonitorChangeSignal>>,
 }
 
 impl MonitorChangeListener {
-    pub(super) fn attach(
-        context: &eframe::CreationContext<'_>,
-        signal: Arc<MonitorChangeSignal>,
-    ) -> io::Result<Self> {
-        let window_handle = context
-            .window_handle()
-            .map_err(|error| io::Error::other(format!("get host window handle: {error}")))?;
-        let RawWindowHandle::Win32(window_handle) = window_handle.as_raw() else {
-            return Err(io::Error::other(
-                "host UI did not provide a Win32 window handle",
-            ));
-        };
-        let hwnd = window_handle.hwnd.get() as HWND;
+    pub(crate) fn attach(hwnd: HWND, signal: Arc<MonitorChangeSignal>) -> io::Result<Self> {
         let signal_pointer = Arc::as_ptr(&signal) as usize;
 
         // SAFETY: the HWND belongs to this UI thread, the callback has the required ABI,
@@ -90,31 +73,25 @@ impl Drop for MonitorChangeListener {
     }
 }
 
-pub(super) struct MonitorChangeSignal {
+pub(crate) struct MonitorChangeSignal {
     pending: AtomicBool,
-    context: OnceLock<egui::Context>,
+    wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl MonitorChangeSignal {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
         Self {
             pending: AtomicBool::new(false),
-            context: OnceLock::new(),
+            wake,
         }
     }
 
-    pub(super) fn set_context(&self, context: &egui::Context) {
-        let _ = self.context.set(context.clone());
-    }
-
-    pub(super) fn notify(&self) {
+    pub(crate) fn notify(&self) {
         self.pending.store(true, Ordering::Release);
-        if let Some(context) = self.context.get() {
-            context.request_repaint();
-        }
+        (self.wake)();
     }
 
-    pub(super) fn take(&self) -> bool {
+    pub(crate) fn take(&self) -> bool {
         self.pending.swap(false, Ordering::AcqRel)
     }
 }
