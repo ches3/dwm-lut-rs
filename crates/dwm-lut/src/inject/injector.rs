@@ -288,25 +288,33 @@ pub(crate) fn disable_injected_hook(pid: u32) -> Result<DisableOutcome, Injector
         ) {
             Ok(address) => address,
             Err(error) => {
-                aggregation.record_export_error(error)?;
+                aggregation.record_failure(module_path, error);
                 continue;
             }
         };
 
-        let shutdown_status = run_remote_thread(
+        let shutdown_status = match run_remote_thread(
             &process,
             remote_shutdown_address,
             std::ptr::null_mut(),
             InjectionStep::StartShutdown,
             InjectionStep::WaitShutdown,
-        )?;
+        ) {
+            Ok(status) => status,
+            Err(error) => {
+                aggregation.record_failure(module_path, error);
+                continue;
+            }
+        };
         let Some(status) = ShutdownStatus::from_code(shutdown_status) else {
-            return Err(InjectorError::UnknownShutdownStatus(shutdown_status));
+            aggregation.record_failure(
+                module_path,
+                InjectorError::UnknownShutdownStatus(shutdown_status),
+            );
+            continue;
         };
 
-        if let Some(outcome) = aggregation.record_status(status)? {
-            return Ok(outcome);
-        }
+        aggregation.record_status(module_path, status);
     }
 
     aggregation.finish()
@@ -356,16 +364,16 @@ fn is_staged_hook_module_name(module_name: &str) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShutdownDecision {
-    Done,
-    Continue,
+    Stopped,
+    Inactive,
     Fail,
 }
 
 fn evaluate_shutdown_status(status: ShutdownStatus) -> ShutdownDecision {
     match status {
-        ShutdownStatus::Success => ShutdownDecision::Done,
+        ShutdownStatus::Success => ShutdownDecision::Stopped,
         ShutdownStatus::NotInitialized | ShutdownStatus::AlreadyShutDown => {
-            ShutdownDecision::Continue
+            ShutdownDecision::Inactive
         }
         ShutdownStatus::AlreadyInProgress | ShutdownStatus::MinHookCleanupFailed => {
             ShutdownDecision::Fail
@@ -375,44 +383,45 @@ fn evaluate_shutdown_status(status: ShutdownStatus) -> ShutdownDecision {
 
 #[derive(Debug, Default)]
 struct ShutdownAggregation {
+    stopped_module: bool,
     deferred_status: Option<ShutdownStatus>,
-    export_not_found: Option<InjectorError>,
+    failures: Vec<(PathBuf, InjectorError)>,
 }
 
 impl ShutdownAggregation {
-    fn record_export_error(&mut self, error: InjectorError) -> Result<(), InjectorError> {
-        match error {
-            InjectorError::ExportNotFound { .. } => {
-                self.export_not_found.get_or_insert(error);
-                Ok(())
-            }
-            error => Err(error),
-        }
+    fn record_failure(&mut self, module_path: PathBuf, error: InjectorError) {
+        self.failures.push((module_path, error));
     }
 
-    fn record_status(
-        &mut self,
-        status: ShutdownStatus,
-    ) -> Result<Option<DisableOutcome>, InjectorError> {
+    fn record_status(&mut self, module_path: PathBuf, status: ShutdownStatus) {
         match evaluate_shutdown_status(status) {
-            ShutdownDecision::Done => Ok(Some(DisableOutcome::ShutDown(status))),
-            ShutdownDecision::Fail => Err(InjectorError::HookShutdownFailed(status)),
-            ShutdownDecision::Continue => {
+            ShutdownDecision::Stopped => self.stopped_module = true,
+            ShutdownDecision::Fail => {
+                self.record_failure(module_path, InjectorError::HookShutdownFailed(status));
+            }
+            ShutdownDecision::Inactive => {
                 self.deferred_status =
                     preferred_deferred_shutdown_status(self.deferred_status, status);
-                Ok(None)
             }
         }
     }
 
     fn finish(self) -> Result<DisableOutcome, InjectorError> {
+        if !self.failures.is_empty() {
+            return Err(InjectorError::HookShutdownModulesFailed {
+                failures: self.failures,
+            });
+        }
+
+        if self.stopped_module {
+            return Ok(DisableOutcome::ShutDown(ShutdownStatus::Success));
+        }
+
         if let Some(status) = self.deferred_status {
             return Ok(DisableOutcome::ShutDown(status));
         }
 
-        Err(self
-            .export_not_found
-            .expect("at least one staged hook module was evaluated"))
+        unreachable!("at least one staged hook module was evaluated");
     }
 }
 
@@ -547,18 +556,18 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_status_decision_continues_until_success_or_failure() {
+    fn shutdown_status_decision_classifies_each_module() {
         assert_eq!(
             evaluate_shutdown_status(ShutdownStatus::NotInitialized),
-            ShutdownDecision::Continue
+            ShutdownDecision::Inactive
         );
         assert_eq!(
             evaluate_shutdown_status(ShutdownStatus::AlreadyShutDown),
-            ShutdownDecision::Continue
+            ShutdownDecision::Inactive
         );
         assert_eq!(
             evaluate_shutdown_status(ShutdownStatus::Success),
-            ShutdownDecision::Done
+            ShutdownDecision::Stopped
         );
         assert_eq!(
             evaluate_shutdown_status(ShutdownStatus::AlreadyInProgress),
@@ -571,49 +580,75 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_aggregation_continues_after_export_not_found_until_success() {
+    fn shutdown_aggregation_rejects_success_when_another_module_failed() {
         let mut aggregation = ShutdownAggregation::default();
-        aggregation
-            .record_export_error(InjectorError::ExportNotFound {
+        aggregation.record_failure(
+            PathBuf::from("old.dll"),
+            InjectorError::ExportNotFound {
                 export: "dwm_lut_shutdown".to_string(),
                 dll_path: PathBuf::from("old.dll"),
-            })
-            .expect("export mismatch should not stop candidate evaluation");
-
-        let outcome = aggregation
-            .record_status(ShutdownStatus::Success)
-            .expect("success should be accepted")
-            .expect("success should finish aggregation");
-
-        assert_eq!(outcome, DisableOutcome::ShutDown(ShutdownStatus::Success));
-    }
-
-    #[test]
-    fn shutdown_aggregation_returns_representative_export_error_when_none_resolve() {
-        let mut aggregation = ShutdownAggregation::default();
-        aggregation
-            .record_export_error(InjectorError::ExportNotFound {
-                export: "dwm_lut_shutdown".to_string(),
-                dll_path: PathBuf::from("first.dll"),
-            })
-            .expect("first export mismatch should be recorded");
-        aggregation
-            .record_export_error(InjectorError::ExportNotFound {
-                export: "dwm_lut_shutdown".to_string(),
-                dll_path: PathBuf::from("second.dll"),
-            })
-            .expect("second export mismatch should be recorded");
+            },
+        );
+        aggregation.record_status(PathBuf::from("current.dll"), ShutdownStatus::Success);
 
         let error = aggregation
             .finish()
-            .expect_err("all candidates without shutdown export should fail");
-
+            .expect_err("one failed module must reject the aggregate result");
         match error {
-            InjectorError::ExportNotFound { dll_path, .. } => {
-                assert_eq!(dll_path, PathBuf::from("first.dll"));
+            InjectorError::HookShutdownModulesFailed { failures } => {
+                assert_eq!(failures.len(), 1);
+                assert_eq!(failures[0].0, PathBuf::from("old.dll"));
             }
             error => panic!("unexpected error: {error}"),
         }
+    }
+
+    #[test]
+    fn shutdown_aggregation_preserves_all_module_failures() {
+        let mut aggregation = ShutdownAggregation::default();
+        aggregation.record_failure(
+            PathBuf::from("first.dll"),
+            InjectorError::ExportNotFound {
+                export: "dwm_lut_shutdown".to_string(),
+                dll_path: PathBuf::from("first.dll"),
+            },
+        );
+        aggregation.record_status(
+            PathBuf::from("second.dll"),
+            ShutdownStatus::MinHookCleanupFailed,
+        );
+
+        let error = aggregation
+            .finish()
+            .expect_err("all module failures should be returned together");
+
+        match error {
+            InjectorError::HookShutdownModulesFailed { failures } => {
+                assert_eq!(failures.len(), 2);
+                assert_eq!(failures[0].0, PathBuf::from("first.dll"));
+                assert_eq!(failures[1].0, PathBuf::from("second.dll"));
+                assert!(matches!(
+                    failures[1].1,
+                    InjectorError::HookShutdownFailed(ShutdownStatus::MinHookCleanupFailed)
+                ));
+            }
+            error => panic!("unexpected error: {error}"),
+        }
+    }
+
+    #[test]
+    fn shutdown_aggregation_reports_success_after_all_modules_are_processed() {
+        let mut aggregation = ShutdownAggregation::default();
+        aggregation.record_status(PathBuf::from("first.dll"), ShutdownStatus::Success);
+        aggregation.record_status(PathBuf::from("second.dll"), ShutdownStatus::AlreadyShutDown);
+        aggregation.record_status(PathBuf::from("third.dll"), ShutdownStatus::Success);
+
+        assert_eq!(
+            aggregation
+                .finish()
+                .expect("all stopped modules should finish successfully"),
+            DisableOutcome::ShutDown(ShutdownStatus::Success)
+        );
     }
 
     #[test]
@@ -630,12 +665,7 @@ mod tests {
         ] {
             let mut aggregation = ShutdownAggregation::default();
             for status in statuses {
-                assert_eq!(
-                    aggregation
-                        .record_status(status)
-                        .expect("benign status should be accepted"),
-                    None
-                );
+                aggregation.record_status(PathBuf::from("hook.dll"), status);
             }
 
             assert_eq!(

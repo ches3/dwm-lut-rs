@@ -188,6 +188,9 @@ pub enum InjectorError {
     HookReplaceAssignmentsFailed(ReplaceAssignmentsStatus),
     UnknownReplaceAssignmentsStatus(u32),
     HookShutdownFailed(ShutdownStatus),
+    HookShutdownModulesFailed {
+        failures: Vec<(PathBuf, InjectorError)>,
+    },
     UnknownShutdownStatus(u32),
     MonitorEnumeration(String),
 }
@@ -304,6 +307,17 @@ impl fmt::Display for InjectorError {
                 write!(f, "replace assignments returned unknown status {code:#x}")
             }
             Self::HookShutdownFailed(status) => write!(f, "hook shutdown failed: {status}"),
+            Self::HookShutdownModulesFailed { failures } => {
+                write!(
+                    f,
+                    "hook shutdown failed for {} staged module(s)",
+                    failures.len()
+                )?;
+                for (module_path, error) in failures {
+                    write!(f, "; {}: {error}", module_path.display())?;
+                }
+                Ok(())
+            }
             Self::UnknownShutdownStatus(code) => {
                 write!(f, "hook shutdown returned unknown status {code:#x}")
             }
