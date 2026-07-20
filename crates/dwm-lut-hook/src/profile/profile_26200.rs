@@ -1,7 +1,6 @@
 use super::{
-    AobToken, ClipBoxPathHypothesis, HardwareProtectedPathHypothesis, HookProfile, HookSignature,
-    HookTarget, MonitorIdentityPathHypothesis, ProfileHypotheses, SignatureLocator,
-    SwapChainPathHypothesis,
+    AobToken, HardwareProtectedPathHypothesis, HookProfile, HookSignature, HookTarget,
+    MonitorIdentityPathHypothesis, ProfileHypotheses, SignatureLocator, SwapChainPathHypothesis,
 };
 use AobToken::{Exact, Wildcard};
 
@@ -507,10 +506,6 @@ pub(super) fn build() -> HookProfile {
             swap_chain: SwapChainPathHypothesis {
                 container_vtable_index: 24,
                 resource_vtable_index: 19,
-            },
-            clip_box: ClipBoxPathHypothesis {
-                context_state_pointer_offset: 0,
-                offset: 0x4D0,
             },
             hardware_protected: HardwareProtectedPathHypothesis { offset: 0x4c },
             monitor_identity: MonitorIdentityPathHypothesis {

@@ -19,9 +19,7 @@ use super::Vertex;
 use super::context_state::{ContextState, unbind_pipeline};
 use super::d3d11_api::*;
 
-use crate::lut_pipeline::{
-    BackBufferFormat, ClipBox, DirtyRect, LutPipeline, ShaderConstantsCBuffer,
-};
+use crate::lut_pipeline::{BackBufferFormat, DirtyRect, LutPipeline, ShaderConstantsCBuffer};
 use crate::profile::SwapChainPathHypothesis;
 use dwm_lut_payload::MonitorIdentity;
 
@@ -114,7 +112,6 @@ impl D3D11Renderer {
     unsafe fn render_present_lut(
         &mut self,
         present_context: PresentRenderContext,
-        clip_box: ClipBox,
         dirty_rects: &[DirtyRect],
         pipeline: &LutPipeline,
     ) -> super::RenderPresentLutResult {
@@ -185,7 +182,6 @@ impl D3D11Renderer {
         let draw_plan = match super::prepare_gpu_draw_plan(
             pipeline,
             present_context.monitor_identity,
-            clip_box,
             desc.Format.0 as u32,
             desc.Width,
             desc.Height,
@@ -195,14 +191,12 @@ impl D3D11Renderer {
             Err(_reason) => {
                 #[cfg(debug_assertions)]
                 debug_log!(
-                    "event=lut_draw_skip reason={} overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} dirty_rect_count={}",
+                    "event=lut_draw_skip reason={} overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} dxgi_format={} width={} height={} dirty_rect_count={}",
                     _reason.as_str(),
                     present_context.overlay_swap_chain,
                     back_buffer.as_raw() as usize,
                     frame_adapter_luid,
                     frame_target_id,
-                    clip_box.left,
-                    clip_box.top,
                     desc.Format.0,
                     desc.Width,
                     desc.Height,
@@ -221,13 +215,11 @@ impl D3D11Renderer {
         #[cfg(debug_assertions)]
         if should_log_success_frame {
             debug_log!(
-                "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} clip_left={} clip_top={} dxgi_format={} width={} height={} lut_index={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?}",
+                "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} dxgi_format={} width={} height={} lut_index={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?}",
                 present_context.overlay_swap_chain,
                 back_buffer.as_raw() as usize,
                 frame_adapter_luid,
                 frame_target_id,
-                clip_box.left,
-                clip_box.top,
                 desc.Format.0,
                 desc.Width,
                 desc.Height,
@@ -714,7 +706,6 @@ pub(crate) unsafe fn render_present_lut(
     swap_chain_path: SwapChainPathHypothesis,
     monitor_identity: Option<MonitorIdentity>,
     hardware_protected: bool,
-    clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,
 ) -> super::RenderPresentLutResult {
@@ -730,7 +721,6 @@ pub(crate) unsafe fn render_present_lut(
                 monitor_identity,
                 hardware_protected,
             },
-            clip_box,
             dirty_rects,
             pipeline,
         )

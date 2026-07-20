@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::lut_pipeline::{
-    BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
-    DirtyRect, LutPipeline, ShaderConstantsCBuffer,
+    BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
+    LutPipeline, ShaderConstantsCBuffer,
 };
 use dwm_lut_payload::MonitorIdentity;
 
@@ -157,7 +157,6 @@ struct ResourceKey {
 fn prepare_gpu_draw_plan(
     pipeline: &LutPipeline,
     monitor_identity: Option<MonitorIdentity>,
-    clip_box: ClipBox,
     dxgi_format: u32,
     width: u32,
     height: u32,
@@ -176,8 +175,7 @@ fn prepare_gpu_draw_plan(
     let Some(lut_index) = pipeline.select_lut_index_for_monitor_identity(identity, format) else {
         return Err(DrawPlanSkipReason::MissingAssignment);
     };
-    let Some(plan) =
-        pipeline.build_present_plan_for_lut_index(clip_box, dxgi_format, dirty_rects, lut_index)
+    let Some(plan) = pipeline.build_present_plan_for_lut_index(dxgi_format, dirty_rects, lut_index)
     else {
         return Err(DrawPlanSkipReason::MissingAssignment);
     };
@@ -470,12 +468,6 @@ mod tests {
     #[test]
     fn gpu_draw_plan_accepts_sdr_and_hdr_frames_with_size() {
         let pipeline = test_pipeline();
-        let clip_box = ClipBox {
-            left: 0,
-            top: 0,
-            right: 1920,
-            bottom: 1080,
-        };
         let dirty_rects = [DirtyRect {
             left: 0,
             top: 0,
@@ -487,7 +479,6 @@ mod tests {
             prepare_gpu_draw_plan(
                 &pipeline,
                 Some(test_identity()),
-                clip_box,
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 1920,
                 1080,
@@ -498,7 +489,6 @@ mod tests {
         let hdr_plan = prepare_gpu_draw_plan(
             &pipeline,
             Some(test_identity()),
-            clip_box,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             1920,
             1080,
@@ -512,7 +502,6 @@ mod tests {
             prepare_gpu_draw_plan(
                 &pipeline,
                 Some(test_identity()),
-                clip_box,
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 0,
                 1080,
@@ -540,12 +529,6 @@ mod tests {
         let plan = prepare_gpu_draw_plan(
             &pipeline,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
             1080,
@@ -794,12 +777,6 @@ mod tests {
         let plan = prepare_gpu_draw_plan(
             &pipeline,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
             1080,
@@ -833,12 +810,6 @@ mod tests {
             prepare_gpu_draw_plan(
                 &pipeline,
                 Some(test_identity()),
-                ClipBox {
-                    left: 0,
-                    top: 0,
-                    right: 1920,
-                    bottom: 1080,
-                },
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 1920,
                 1080,
@@ -899,12 +870,6 @@ mod tests {
         let plan = prepare_gpu_draw_plan(
             &pipeline,
             Some(right),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
             1080,
@@ -914,21 +879,8 @@ mod tests {
 
         assert_eq!(plan.lut_index, 1);
         assert!(
-            prepare_gpu_draw_plan(
-                &pipeline,
-                None,
-                ClipBox {
-                    left: 0,
-                    top: 0,
-                    right: 0,
-                    bottom: 0,
-                },
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                1920,
-                1080,
-                &[],
-            )
-            .is_err()
+            prepare_gpu_draw_plan(&pipeline, None, DXGI_FORMAT_B8G8R8A8_UNORM, 1920, 1080, &[],)
+                .is_err()
         );
     }
 

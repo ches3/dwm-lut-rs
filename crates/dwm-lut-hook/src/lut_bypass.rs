@@ -10,7 +10,7 @@ use windows::Win32::System::Memory::{
     PAGE_GUARD, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
 };
 
-use crate::lut_pipeline::{BackBufferFormat, ClipBox, DirtyRect, LutPipeline, LutRenderPlan};
+use crate::lut_pipeline::{BackBufferFormat, DirtyRect, LutPipeline, LutRenderPlan};
 use dwm_lut_payload::MonitorIdentity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +38,6 @@ impl OverlayTestModeControl {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextLutState {
-    pub clip_box: ClipBox,
     pub back_buffer_format: Option<BackBufferFormat>,
     pub lut_index: Option<usize>,
     pub dirty_rect_count: usize,
@@ -110,45 +109,32 @@ impl LutBypassRuntime {
         lut_pipeline: &LutPipeline,
         context_address: usize,
         monitor_identity: Option<MonitorIdentity>,
-        clip_box: ClipBox,
         dxgi_format: u32,
         dirty_rects: &[DirtyRect],
     ) -> PresentHookOutcome {
         let plan = monitor_identity.and_then(|identity| {
-            lut_pipeline.build_present_plan_for_monitor_identity(
-                identity,
-                clip_box,
-                dxgi_format,
-                dirty_rects,
-            )
+            lut_pipeline.build_present_plan_for_monitor_identity(identity, dxgi_format, dirty_rects)
         });
-        self.update_context(context_address, clip_box, dxgi_format, dirty_rects, plan)
+        self.update_context(context_address, dxgi_format, dirty_rects, plan)
     }
 
     pub fn update_present_with_lut_index(
         &mut self,
         lut_pipeline: &LutPipeline,
         context_address: usize,
-        clip_box: ClipBox,
         dxgi_format: u32,
         dirty_rects: &[DirtyRect],
         lut_index: Option<usize>,
     ) -> PresentHookOutcome {
         let plan = lut_index.and_then(|lut_index| {
-            lut_pipeline.build_present_plan_for_lut_index(
-                clip_box,
-                dxgi_format,
-                dirty_rects,
-                lut_index,
-            )
+            lut_pipeline.build_present_plan_for_lut_index(dxgi_format, dirty_rects, lut_index)
         });
-        self.update_context(context_address, clip_box, dxgi_format, dirty_rects, plan)
+        self.update_context(context_address, dxgi_format, dirty_rects, plan)
     }
 
     fn update_context(
         &mut self,
         context_address: usize,
-        clip_box: ClipBox,
         dxgi_format: u32,
         dirty_rects: &[DirtyRect],
         plan: Option<LutRenderPlan>,
@@ -161,7 +147,6 @@ impl LutBypassRuntime {
             self.contexts.insert(
                 context_address,
                 ContextLutState {
-                    clip_box,
                     back_buffer_format,
                     lut_index,
                     dirty_rect_count: dirty_rects.len(),
@@ -403,7 +388,7 @@ mod tests {
     };
 
     use super::{LutBypassRuntime, OverlayTestModeControl};
-    use crate::lut_pipeline::{ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, LutPipeline};
+    use crate::lut_pipeline::{DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, LutPipeline};
 
     fn test_identity() -> MonitorIdentity {
         MonitorIdentity {
@@ -441,12 +426,6 @@ mod tests {
             &pipeline,
             0x1234,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[DirtyRect {
                 left: 0,
@@ -487,29 +466,12 @@ mod tests {
             &pipeline,
             0x1234,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
         );
 
-        let outcome = runtime.update_present(
-            &pipeline,
-            0x1234,
-            None,
-            ClipBox {
-                left: 100,
-                top: 100,
-                right: 1920,
-                bottom: 1080,
-            },
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[],
-        );
+        let outcome =
+            runtime.update_present(&pipeline, 0x1234, None, DXGI_FORMAT_B8G8R8A8_UNORM, &[]);
 
         assert!(outcome.plan.is_none());
         assert!(!outcome.promotion_blocked);
@@ -530,12 +492,6 @@ mod tests {
             &pipeline,
             0x1234,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[DirtyRect {
                 left: 0,
@@ -564,12 +520,6 @@ mod tests {
             &pipeline,
             0x1234,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[DirtyRect {
                 left: 0,
@@ -598,31 +548,13 @@ mod tests {
             &pipeline,
             0x1234,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
         );
 
         assert_eq!(overlay_test_mode, 5);
 
-        let _ = runtime.update_present(
-            &pipeline,
-            0x1234,
-            None,
-            ClipBox {
-                left: 100,
-                top: 100,
-                right: 1920,
-                bottom: 1080,
-            },
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[],
-        );
+        let _ = runtime.update_present(&pipeline, 0x1234, None, DXGI_FORMAT_B8G8R8A8_UNORM, &[]);
 
         assert_eq!(overlay_test_mode, 0);
     }
@@ -655,30 +587,12 @@ mod tests {
             &pipeline,
             0x1234,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
         );
         assert_eq!(disable_independent_flip, 1);
 
-        let _ = runtime.update_present(
-            &pipeline,
-            0x1234,
-            None,
-            ClipBox {
-                left: 100,
-                top: 100,
-                right: 1920,
-                bottom: 1080,
-            },
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[],
-        );
+        let _ = runtime.update_present(&pipeline, 0x1234, None, DXGI_FORMAT_B8G8R8A8_UNORM, &[]);
         assert!(!runtime.has_active_contexts());
         assert_eq!(disable_independent_flip, 0);
     }
@@ -697,12 +611,6 @@ mod tests {
             &pipeline,
             0x1234,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
         );
@@ -730,12 +638,6 @@ mod tests {
             &pipeline,
             0x1234,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
         );
@@ -753,12 +655,6 @@ mod tests {
             &pipeline,
             0x1234,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
         );
@@ -781,12 +677,6 @@ mod tests {
             &pipeline,
             0x1234,
             Some(test_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
         );

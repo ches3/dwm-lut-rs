@@ -27,15 +27,6 @@ impl BackBufferFormat {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClipBox {
-    pub left: i32,
-    pub top: i32,
-    pub right: i32,
-    pub bottom: i32,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirtyRect {
     pub left: i32,
     pub top: i32,
@@ -103,7 +94,6 @@ pub struct LutPipeline {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LutRenderPlan {
     pub format: BackBufferFormat,
-    pub clip_box: ClipBox,
     pub dirty_rects: Vec<DirtyRect>,
     pub lut_index: usize,
     pub shader_constants: ShaderConstants,
@@ -147,18 +137,16 @@ impl LutPipeline {
     pub fn build_present_plan_for_monitor_identity(
         &self,
         identity: MonitorIdentity,
-        clip_box: ClipBox,
         dxgi_format: u32,
         dirty_rects: &[DirtyRect],
     ) -> Option<LutRenderPlan> {
         let format = BackBufferFormat::from_dxgi_format(dxgi_format)?;
         let lut_index = self.select_lut_index_for_monitor_identity(identity, format)?;
-        self.build_present_plan_for_index(clip_box, format, dirty_rects, lut_index)
+        self.build_present_plan_for_index(format, dirty_rects, lut_index)
     }
 
     pub fn build_present_plan_for_lut_index(
         &self,
-        clip_box: ClipBox,
         dxgi_format: u32,
         dirty_rects: &[DirtyRect],
         lut_index: usize,
@@ -170,13 +158,12 @@ impl LutPipeline {
             BackBufferFormat::Rgba16Float => ColorMode::Hdr,
         };
         (lut.target.color_mode == color_mode)
-            .then(|| self.build_present_plan_for_index(clip_box, format, dirty_rects, lut_index))
+            .then(|| self.build_present_plan_for_index(format, dirty_rects, lut_index))
             .flatten()
     }
 
     fn build_present_plan_for_index(
         &self,
-        clip_box: ClipBox,
         format: BackBufferFormat,
         dirty_rects: &[DirtyRect],
         lut_index: usize,
@@ -185,7 +172,6 @@ impl LutPipeline {
 
         Some(LutRenderPlan {
             format,
-            clip_box,
             dirty_rects: dirty_rects.to_vec(),
             lut_index,
             shader_constants: ShaderConstants {
@@ -446,9 +432,9 @@ mod tests {
     use std::ptr::addr_of;
 
     use super::{
-        BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        DirtyRect, LutPipeline, ShaderConstants, ShaderConstantsCBuffer, apply_sdr_dither,
-        normalize_sample, pq_to_scrgb, scrgb_to_pq, tetrahedral_interpolation,
+        BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
+        LutPipeline, ShaderConstants, ShaderConstantsCBuffer, apply_sdr_dither, normalize_sample,
+        pq_to_scrgb, scrgb_to_pq, tetrahedral_interpolation,
     };
 
     fn identity_cube() -> PayloadLut {
@@ -555,12 +541,6 @@ mod tests {
         let plan = runtime
             .build_present_plan_for_monitor_identity(
                 identity,
-                ClipBox {
-                    left: 0,
-                    top: 0,
-                    right: 1920,
-                    bottom: 1080,
-                },
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 &[DirtyRect {
                     left: 0,
@@ -592,12 +572,6 @@ mod tests {
             LutPipeline::from_payload(&payload([(identity, ColorMode::Hdr, identity_cube())]));
         let plan = runtime.build_present_plan_for_monitor_identity(
             identity,
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             &[],
         );
@@ -631,12 +605,6 @@ mod tests {
             runtime
                 .build_present_plan_for_monitor_identity(
                     identity_b,
-                    ClipBox {
-                        left: 0,
-                        top: 0,
-                        right: 0,
-                        bottom: 0,
-                    },
                     DXGI_FORMAT_B8G8R8A8_UNORM,
                     &[],
                 )
@@ -675,17 +643,7 @@ mod tests {
         lut.domain_min = [-1.0, 0.0, 0.0];
         let runtime = LutPipeline::from_payload(&payload([(identity, ColorMode::Sdr, lut)]));
         let plan = runtime
-            .build_present_plan_for_monitor_identity(
-                identity,
-                ClipBox {
-                    left: 0,
-                    top: 0,
-                    right: 1920,
-                    bottom: 1080,
-                },
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                &[],
-            )
+            .build_present_plan_for_monitor_identity(identity, DXGI_FORMAT_B8G8R8A8_UNORM, &[])
             .expect("plan should exist");
 
         assert_eq!(plan.shader_constants.domain_min, [-1.0, 0.0, 0.0, 0.0]);

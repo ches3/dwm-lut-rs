@@ -6,12 +6,12 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
 use dwm_lut_payload::{HookPayload, MonitorIdentity};
 
+use crate::DirtyRect;
 use crate::lut_bypass::{LutBypassRuntime, PresentHookOutcome};
 use crate::lut_pipeline::LutPipeline;
 use crate::minhook::{MinHookRuntime, RegisteredHook};
 use crate::profile::{HookProfile, HookTarget};
 use crate::resolver::SignatureResolutionReport;
-use crate::{ClipBox, DirtyRect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookRegistrationTarget {
@@ -199,7 +199,6 @@ pub(crate) fn is_runtime_active() -> bool {
 pub(crate) fn evaluate_present_hook(
     context_address: usize,
     monitor_identity: Option<MonitorIdentity>,
-    clip_box: ClipBox,
     dxgi_format: u32,
     dirty_rects: &[DirtyRect],
     _lut_applied: bool,
@@ -210,7 +209,6 @@ pub(crate) fn evaluate_present_hook(
             &runtime.lut_pipeline,
             context_address,
             monitor_identity,
-            clip_box,
             dxgi_format,
             dirty_rects,
         )
@@ -464,7 +462,6 @@ pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHo
 pub(crate) fn evaluate_rendered_present_hook(
     context_address: usize,
     monitor_identity: Option<MonitorIdentity>,
-    clip_box: ClipBox,
     dxgi_format: u32,
     dirty_rects: &[DirtyRect],
     render_result: crate::d3d11_renderer::RenderPresentLutResult,
@@ -475,7 +472,6 @@ pub(crate) fn evaluate_rendered_present_hook(
             runtime.lut_bypass.update_present_with_lut_index(
                 &runtime.lut_pipeline,
                 context_address,
-                clip_box,
                 dxgi_format,
                 dirty_rects,
                 render_result.lut_index,
@@ -485,7 +481,6 @@ pub(crate) fn evaluate_rendered_present_hook(
                 &runtime.lut_pipeline,
                 context_address,
                 monitor_identity,
-                clip_box,
                 dxgi_format,
                 dirty_rects,
             )
@@ -497,7 +492,6 @@ pub(crate) fn render_present_lut(
     overlay_swap_chain: usize,
     monitor_identity: Option<MonitorIdentity>,
     hardware_protected: bool,
-    clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
 ) -> crate::d3d11_renderer::RenderPresentLutResult {
     let Some((lut_pipeline, swap_chain_path)) = with_state(|state| {
@@ -515,7 +509,6 @@ pub(crate) fn render_present_lut(
             swap_chain_path,
             monitor_identity,
             hardware_protected,
-            clip_box,
             dirty_rects,
             &lut_pipeline,
         )

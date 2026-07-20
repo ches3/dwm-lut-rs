@@ -11,7 +11,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::profile::{HookProfile, MonitorIdentityPathHypothesis};
 use crate::route_trace;
-use crate::{ClipBox, DirtyRect, state};
+use crate::{DirtyRect, state};
 use dwm_lut_payload::{AdapterLuid, MonitorIdentity};
 #[cfg(not(test))]
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
@@ -43,7 +43,6 @@ struct RectVec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PresentInputsWithoutFormat {
     monitor_identity: Option<MonitorIdentity>,
-    clip_box: ClipBox,
     dirty_rects: Vec<DirtyRect>,
     hardware_protected: bool,
 }
@@ -52,7 +51,6 @@ struct PresentInputsWithoutFormat {
 enum PresentInputError {
     MissingProfile,
     NullOverlaySwapChain,
-    NullContextState,
     InvalidDirtyRectVector,
     UnreadableMemory,
 }
@@ -162,17 +160,15 @@ fn should_log_present_detour_enter(overlay_swap_chain: usize, hardware_protected
 const PAGE_PROTECTION_MASK: u32 = 0xff;
 
 unsafe fn collect_present_inputs(
-    this: usize,
     overlay_swap_chain: usize,
     rect_vec: usize,
 ) -> Result<PresentInputsWithoutFormat, PresentInputError> {
     let profile = state::hook_profile().ok_or(PresentInputError::MissingProfile)?;
-    unsafe { collect_present_inputs_with_profile(&profile, this, overlay_swap_chain, rect_vec) }
+    unsafe { collect_present_inputs_with_profile(&profile, overlay_swap_chain, rect_vec) }
 }
 
 unsafe fn collect_present_inputs_with_profile(
     profile: &HookProfile,
-    this: usize,
     overlay_swap_chain: usize,
     rect_vec: usize,
 ) -> Result<PresentInputsWithoutFormat, PresentInputError> {
@@ -188,19 +184,11 @@ unsafe fn collect_present_inputs_with_profile(
             hypotheses.hardware_protected.offset,
         )?)? != 0
     };
-    let clip_box = unsafe {
-        read_clip_box(
-            this,
-            hypotheses.clip_box.context_state_pointer_offset,
-            hypotheses.clip_box.offset,
-        )?
-    };
     let monitor_identity =
         unsafe { read_monitor_identity(overlay_swap_chain, hypotheses.monitor_identity) };
     let dirty_rects = unsafe { read_dirty_rects(rect_vec)? };
     Ok(PresentInputsWithoutFormat {
         monitor_identity,
-        clip_box,
         dirty_rects,
         hardware_protected,
     })
@@ -233,27 +221,6 @@ unsafe fn read_monitor_identity(
             low_part,
         },
         target_id,
-    })
-}
-
-unsafe fn read_clip_box(
-    context_address: usize,
-    context_state_pointer_offset: usize,
-    clip_box_offset: usize,
-) -> Result<ClipBox, PresentInputError> {
-    let state_pointer_address = checked_address(context_address, context_state_pointer_offset)?;
-    let state_object = unsafe { read_memory::<usize>(state_pointer_address)? };
-    if state_object == 0 {
-        return Err(PresentInputError::NullContextState);
-    }
-
-    let origin =
-        unsafe { read_memory::<[i32; 2]>(checked_address(state_object, clip_box_offset)?)? };
-    Ok(ClipBox {
-        left: origin[0],
-        top: origin[1],
-        right: origin[0],
-        bottom: origin[1],
     })
 }
 
@@ -413,19 +380,7 @@ fn is_readable_memory_region(info: &MEMORY_BASIC_INFORMATION) -> bool {
 }
 
 fn deactivate_present_context(context_address: usize) {
-    let _ = state::evaluate_present_hook(
-        context_address,
-        None,
-        ClipBox {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        },
-        0,
-        &[],
-        false,
-    );
+    let _ = state::evaluate_present_hook(context_address, None, 0, &[], false);
 }
 
 pub(super) unsafe extern "system" fn present_detour(
@@ -462,7 +417,7 @@ pub(super) unsafe extern "system" fn present_detour(
     let mut protected_resource_result_detail = None;
     #[cfg(debug_assertions)]
     let mut last_present_context = None;
-    match unsafe { collect_present_inputs(this, overlay_swap_chain, rect_vec) } {
+    match unsafe { collect_present_inputs(overlay_swap_chain, rect_vec) } {
         Ok(inputs) => {
             if should_log_present_detour_enter(overlay_swap_chain, inputs.hardware_protected) {
                 debug_log!(
@@ -483,7 +438,6 @@ pub(super) unsafe extern "system" fn present_detour(
                     overlay_swap_chain,
                     inputs.monitor_identity,
                     inputs.hardware_protected,
-                    inputs.clip_box,
                     &inputs.dirty_rects,
                 ) {
                     #[cfg(debug_assertions)]
@@ -538,7 +492,6 @@ pub(super) unsafe extern "system" fn present_detour(
                         let _ = state::evaluate_rendered_present_hook(
                             this,
                             inputs.monitor_identity,
-                            inputs.clip_box,
                             dxgi_format,
                             &inputs.dirty_rects,
                             render_result,
@@ -603,7 +556,6 @@ fn render_present_lut_if_active(
     overlay_swap_chain: usize,
     monitor_identity: Option<MonitorIdentity>,
     hardware_protected: bool,
-    clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
 ) -> Option<crate::d3d11_renderer::RenderPresentLutResult> {
     if !state::is_runtime_active() {
@@ -613,7 +565,6 @@ fn render_present_lut_if_active(
         overlay_swap_chain,
         monitor_identity,
         hardware_protected,
-        clip_box,
         dirty_rects,
     ))
 }
@@ -650,8 +601,8 @@ mod tests {
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
     use crate::{
-        BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
-        DirtyRect, HookProfile,
+        BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
+        HookProfile,
     };
 
     fn test_profile() -> HookProfile {
@@ -782,12 +733,6 @@ mod tests {
         state::evaluate_present_hook(
             context_address,
             Some(test_monitor_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &dirty_rects,
             true,
@@ -797,25 +742,15 @@ mod tests {
 
     struct FakePresentObjects {
         context: Box<usize>,
-        _context_state: Vec<usize>,
         overlay_swap_chain: Vec<usize>,
         dirty_rects: Vec<DirtyRect>,
         rect_vec: super::RectVec,
     }
 
     impl FakePresentObjects {
-        fn new(clip_box: ClipBox, dirty_rects: Vec<DirtyRect>, hardware_protected: bool) -> Self {
+        fn new(dirty_rects: Vec<DirtyRect>, hardware_protected: bool) -> Self {
             let profile = test_profile();
-            let context_state_len = (profile.hypotheses.clip_box.offset + size_of::<ClipBox>())
-                .div_ceil(size_of::<usize>());
-            let mut context_state = vec![0usize; context_state_len];
-            unsafe {
-                ((context_state.as_mut_ptr() as *mut u8).add(profile.hypotheses.clip_box.offset)
-                    as *mut ClipBox)
-                    .write(clip_box);
-            }
-
-            let context = Box::new(context_state.as_ptr() as usize);
+            let context = Box::new(0usize);
 
             let identity = profile.hypotheses.monitor_identity;
             let overlay_swap_chain_len = (profile
@@ -858,7 +793,6 @@ mod tests {
 
             Self {
                 context,
-                _context_state: context_state,
                 overlay_swap_chain,
                 dirty_rects,
                 rect_vec,
@@ -883,12 +817,6 @@ mod tests {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         initialize_test_state();
         let fake = FakePresentObjects::new(
-            ClipBox {
-                left: 120,
-                top: 80,
-                right: 1920,
-                bottom: 1080,
-            },
             vec![DirtyRect {
                 left: 10,
                 top: 20,
@@ -901,15 +829,12 @@ mod tests {
         let inputs = unsafe {
             super::collect_present_inputs_with_profile(
                 &test_profile(),
-                fake.context_address(),
                 fake.overlay_swap_chain_address(),
                 fake.rect_vec_address(),
             )
         }
         .expect("present inputs should be collected");
 
-        assert_eq!(inputs.clip_box.left, 120);
-        assert_eq!(inputs.clip_box.top, 80);
         assert_eq!(inputs.monitor_identity, Some(test_monitor_identity()));
         assert_eq!(inputs.dirty_rects, fake.dirty_rects);
         assert!(!inputs.hardware_protected);
@@ -920,12 +845,6 @@ mod tests {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         initialize_test_state();
         let fake = FakePresentObjects::new(
-            ClipBox {
-                left: 120,
-                top: 80,
-                right: 1920,
-                bottom: 1080,
-            },
             vec![DirtyRect {
                 left: 10,
                 top: 20,
@@ -938,15 +857,12 @@ mod tests {
         let inputs = unsafe {
             super::collect_present_inputs_with_profile(
                 &test_profile(),
-                fake.context_address(),
                 fake.overlay_swap_chain_address(),
                 fake.rect_vec_address(),
             )
         }
         .expect("hardware protected state should be collected");
 
-        assert_eq!(inputs.clip_box.left, 120);
-        assert_eq!(inputs.clip_box.top, 80);
         assert_eq!(inputs.monitor_identity, Some(test_monitor_identity()));
         assert_eq!(inputs.dirty_rects, fake.dirty_rects);
         assert!(inputs.hardware_protected);
@@ -1035,16 +951,7 @@ mod tests {
         assert_eq!(hypothesis.adapter_luid_high_offset, 0x38);
         assert_eq!(hypothesis.target_id_offset, 0x3c);
 
-        let fake = FakePresentObjects::new(
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
-            Vec::new(),
-            false,
-        );
+        let fake = FakePresentObjects::new(Vec::new(), false);
 
         let identity =
             unsafe { super::read_monitor_identity(fake.overlay_swap_chain_address(), hypothesis) };
@@ -1058,12 +965,6 @@ mod tests {
         reset_last_original_present_rects();
         initialize_test_state();
         let fake = FakePresentObjects::new(
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             vec![DirtyRect {
                 left: 0,
                 top: 0,
@@ -1109,8 +1010,6 @@ mod tests {
         assert_eq!(render_call.swap_chain_path.container_vtable_index, 24);
         assert_eq!(render_call.swap_chain_path.resource_vtable_index, 19);
         assert_eq!(render_call.monitor_identity, Some(test_monitor_identity()));
-        assert_eq!(render_call.clip_box.left, 0);
-        assert_eq!(render_call.clip_box.top, 0);
         assert_eq!(render_call.dirty_rects, fake.dirty_rects);
     }
 
@@ -1122,12 +1021,6 @@ mod tests {
         state::reset_state_for_tests();
         initialize_test_state_from_payload(test_payload(&[ColorMode::Sdr, ColorMode::Hdr]));
         let fake = FakePresentObjects::new(
-            ClipBox {
-                left: 120,
-                top: 80,
-                right: 120,
-                bottom: 80,
-            },
             vec![DirtyRect {
                 left: 0,
                 top: 0,
@@ -1176,12 +1069,6 @@ mod tests {
         reset_last_original_present_rects();
         initialize_test_state();
         let fake = FakePresentObjects::new(
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             vec![DirtyRect {
                 left: 10,
                 top: 20,
@@ -1230,12 +1117,6 @@ mod tests {
         reset_last_original_present_rects();
         initialize_test_state();
         let fake = FakePresentObjects::new(
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             vec![DirtyRect {
                 left: 0,
                 top: 0,
@@ -1274,12 +1155,6 @@ mod tests {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         initialize_test_state();
         let context_address = 0x1234;
-        let clip_box = ClipBox {
-            left: 0,
-            top: 0,
-            right: 1920,
-            bottom: 1080,
-        };
         let dirty_rects = [DirtyRect {
             left: 0,
             top: 0,
@@ -1291,7 +1166,6 @@ mod tests {
         state::evaluate_rendered_present_hook(
             context_address,
             Some(test_monitor_identity()),
-            clip_box,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             &dirty_rects,
             crate::d3d11_renderer::RenderPresentLutResult {
@@ -1315,12 +1189,6 @@ mod tests {
         state::reset_state_for_tests();
         initialize_test_state_from_payload(test_payload(&[ColorMode::Hdr]));
         let fake = FakePresentObjects::new(
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             vec![DirtyRect {
                 left: 0,
                 top: 0,
@@ -1332,12 +1200,6 @@ mod tests {
         state::evaluate_present_hook(
             fake.context_address(),
             Some(test_monitor_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             &fake.dirty_rects,
             true,
@@ -1375,16 +1237,7 @@ mod tests {
     fn present_detour_renders_when_hardware_protected_inputs_are_readable() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         initialize_test_state();
-        let fake = FakePresentObjects::new(
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
-            Vec::new(),
-            true,
-        );
+        let fake = FakePresentObjects::new(Vec::new(), true);
         activate_context(fake.context_address());
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
@@ -1443,18 +1296,8 @@ mod tests {
 
         assert_eq!(state::begin_shutdown(), state::ShutdownStart::Started);
 
-        let render_result = super::render_present_lut_if_active(
-            0x1234,
-            Some(test_monitor_identity()),
-            false,
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
-            &[],
-        );
+        let render_result =
+            super::render_present_lut_if_active(0x1234, Some(test_monitor_identity()), false, &[]);
 
         assert!(render_result.is_none());
         assert!(crate::d3d11_renderer::test_render_present_lut_call().is_none());

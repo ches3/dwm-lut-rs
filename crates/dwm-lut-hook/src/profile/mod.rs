@@ -129,12 +129,6 @@ pub struct SwapChainPathHypothesis {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClipBoxPathHypothesis {
-    pub context_state_pointer_offset: usize,
-    pub offset: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HardwareProtectedPathHypothesis {
     pub offset: usize,
 }
@@ -149,7 +143,6 @@ pub struct MonitorIdentityPathHypothesis {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProfileHypotheses {
     pub swap_chain: SwapChainPathHypothesis,
-    pub clip_box: ClipBoxPathHypothesis,
     pub hardware_protected: HardwareProtectedPathHypothesis,
     pub monitor_identity: MonitorIdentityPathHypothesis,
 }

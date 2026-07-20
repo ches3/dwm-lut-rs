@@ -368,7 +368,7 @@ mod tests {
     use crate::profile::VERSIONED_PROFILES;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
-    use crate::{ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookProfile};
+    use crate::{DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookProfile};
 
     fn test_profile() -> HookProfile {
         (VERSIONED_PROFILES[0].build)()
@@ -611,12 +611,6 @@ mod tests {
         state::evaluate_present_hook(
             context_address,
             Some(test_monitor_identity()),
-            ClipBox {
-                left: 0,
-                top: 0,
-                right: 1920,
-                bottom: 1080,
-            },
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &dirty_rects,
             true,

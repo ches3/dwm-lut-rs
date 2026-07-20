@@ -1,5 +1,5 @@
 use super::RenderPresentLutResult;
-use crate::lut_pipeline::{ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, LutPipeline};
+use crate::lut_pipeline::{DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, LutPipeline};
 use dwm_lut_payload::MonitorIdentity;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -20,7 +20,6 @@ pub(crate) struct TestRenderPresentLutCall {
     pub swap_chain_path: crate::profile::SwapChainPathHypothesis,
     pub monitor_identity: Option<MonitorIdentity>,
     pub hardware_protected: bool,
-    pub clip_box: ClipBox,
     pub dirty_rects: Vec<DirtyRect>,
 }
 
@@ -101,7 +100,6 @@ pub(crate) unsafe fn render_present_lut(
     swap_chain_path: crate::profile::SwapChainPathHypothesis,
     monitor_identity: Option<MonitorIdentity>,
     hardware_protected: bool,
-    clip_box: ClipBox,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,
 ) -> RenderPresentLutResult {
@@ -112,7 +110,6 @@ pub(crate) unsafe fn render_present_lut(
             swap_chain_path,
             monitor_identity,
             hardware_protected,
-            clip_box,
             dirty_rects: dirty_rects.to_vec(),
         });
     }
@@ -147,12 +144,7 @@ pub(crate) unsafe fn render_present_lut(
         lut_index: dxgi_format.and_then(|format| {
             monitor_identity.and_then(|identity| {
                 pipeline
-                    .build_present_plan_for_monitor_identity(
-                        identity,
-                        clip_box,
-                        format,
-                        dirty_rects,
-                    )
+                    .build_present_plan_for_monitor_identity(identity, format, dirty_rects)
                     .map(|plan| plan.lut_index)
             })
         }),
