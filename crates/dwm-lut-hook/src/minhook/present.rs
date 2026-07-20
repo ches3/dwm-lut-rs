@@ -488,70 +488,71 @@ pub(super) unsafe extern "system" fn present_detour(
                     Some((inputs.hardware_protected, inputs.monitor_identity, None));
             }
             if let Some(_present_guard) = state::try_lock_present_runtime() {
-                let render_result = state::render_present_lut(
+                if let Some(render_result) = render_present_lut_if_active(
                     overlay_swap_chain,
                     inputs.monitor_identity,
                     inputs.hardware_protected,
                     inputs.clip_box,
                     &inputs.dirty_rects,
-                );
-                #[cfg(debug_assertions)]
-                {
-                    last_present_context = Some((
+                ) {
+                    #[cfg(debug_assertions)]
+                    {
+                        last_present_context = Some((
+                            inputs.hardware_protected,
+                            inputs.monitor_identity,
+                            Some(render_result.lut_applied),
+                        ));
+                        if inputs.hardware_protected {
+                            protected_resource_result_detail = Some(PresentOriginalCallDetail {
+                                hardware_protected: inputs.hardware_protected,
+                                monitor_identity: inputs.monitor_identity,
+                                dirty_rect_count: inputs.dirty_rects.len(),
+                                first_dirty_rect: inputs.dirty_rects.first().copied(),
+                                render_result,
+                                present_dirty_rect_source: "original",
+                            });
+                        }
+                    }
+                    route_trace::record_present_lut_result(
                         inputs.hardware_protected,
-                        inputs.monitor_identity,
-                        Some(render_result.lut_applied),
-                    ));
-                    if inputs.hardware_protected {
-                        protected_resource_result_detail = Some(PresentOriginalCallDetail {
-                            hardware_protected: inputs.hardware_protected,
-                            monitor_identity: inputs.monitor_identity,
-                            dirty_rect_count: inputs.dirty_rects.len(),
-                            first_dirty_rect: inputs.dirty_rects.first().copied(),
-                            render_result,
-                            present_dirty_rect_source: "original",
-                        });
-                    }
-                }
-                route_trace::record_present_lut_result(
-                    inputs.hardware_protected,
-                    render_result.lut_applied,
-                );
-                let present_dirty_rect_source = if let Some(rect) = render_result.present_dirty_rect
-                {
-                    original_rect_vec = full_present_rect_vec(
-                        rect,
-                        &mut present_rect_storage,
-                        &mut present_rect_vec_storage,
+                        render_result.lut_applied,
                     );
-                    "expanded"
-                } else {
-                    "original"
-                };
-                #[cfg(debug_assertions)]
-                {
-                    if inputs.hardware_protected {
-                        protected_resource_result_detail = Some(PresentOriginalCallDetail {
-                            hardware_protected: inputs.hardware_protected,
-                            monitor_identity: inputs.monitor_identity,
-                            dirty_rect_count: inputs.dirty_rects.len(),
-                            first_dirty_rect: inputs.dirty_rects.first().copied(),
-                            render_result,
-                            present_dirty_rect_source,
-                        });
+                    let present_dirty_rect_source =
+                        if let Some(rect) = render_result.present_dirty_rect {
+                            original_rect_vec = full_present_rect_vec(
+                                rect,
+                                &mut present_rect_storage,
+                                &mut present_rect_vec_storage,
+                            );
+                            "expanded"
+                        } else {
+                            "original"
+                        };
+                    #[cfg(debug_assertions)]
+                    {
+                        if inputs.hardware_protected {
+                            protected_resource_result_detail = Some(PresentOriginalCallDetail {
+                                hardware_protected: inputs.hardware_protected,
+                                monitor_identity: inputs.monitor_identity,
+                                dirty_rect_count: inputs.dirty_rects.len(),
+                                first_dirty_rect: inputs.dirty_rects.first().copied(),
+                                render_result,
+                                present_dirty_rect_source,
+                            });
+                        }
                     }
-                }
-                #[cfg(not(debug_assertions))]
-                let _ = present_dirty_rect_source;
-                if let Some(dxgi_format) = render_result.dxgi_format {
-                    let _ = state::evaluate_rendered_present_hook(
-                        this,
-                        inputs.monitor_identity,
-                        inputs.clip_box,
-                        dxgi_format,
-                        &inputs.dirty_rects,
-                        render_result,
-                    );
+                    #[cfg(not(debug_assertions))]
+                    let _ = present_dirty_rect_source;
+                    if let Some(dxgi_format) = render_result.dxgi_format {
+                        let _ = state::evaluate_rendered_present_hook(
+                            this,
+                            inputs.monitor_identity,
+                            inputs.clip_box,
+                            dxgi_format,
+                            &inputs.dirty_rects,
+                            render_result,
+                        );
+                    }
                 }
             } else {
                 route_trace::record_present_lock_miss(overlay_swap_chain);
@@ -605,6 +606,25 @@ pub(super) unsafe extern "system" fn present_detour(
 
     let original: PresentOriginal = unsafe { std::mem::transmute(original) };
     unsafe { original(this, overlay_swap_chain, a3, original_rect_vec, a5, a6, a7) }
+}
+
+fn render_present_lut_if_active(
+    overlay_swap_chain: usize,
+    monitor_identity: Option<MonitorIdentity>,
+    hardware_protected: bool,
+    clip_box: ClipBox,
+    dirty_rects: &[DirtyRect],
+) -> Option<crate::d3d11_renderer::RenderPresentLutResult> {
+    if !state::is_runtime_active() {
+        return None;
+    }
+    Some(state::render_present_lut(
+        overlay_swap_chain,
+        monitor_identity,
+        hardware_protected,
+        clip_box,
+        dirty_rects,
+    ))
 }
 
 fn full_present_rect_vec(
@@ -1431,5 +1451,31 @@ mod tests {
                 .and_then(|runtime| runtime.context(0x1234).cloned())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn present_render_is_skipped_when_shutdown_starts_after_entry_check() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        initialize_test_state();
+        crate::d3d11_renderer::set_test_render_present_lut_result(true);
+
+        assert_eq!(state::begin_shutdown(), state::ShutdownStart::Started);
+
+        let render_result = super::render_present_lut_if_active(
+            0x1234,
+            Some(test_monitor_identity()),
+            false,
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            &[],
+        );
+
+        assert!(render_result.is_none());
+        assert!(crate::d3d11_renderer::test_render_present_lut_call().is_none());
+        state::reset_state_for_tests();
     }
 }
