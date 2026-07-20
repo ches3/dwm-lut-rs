@@ -180,38 +180,6 @@ impl LutBypassRuntime {
         }
     }
 
-    pub fn window_context_direct_flip_compatible(&self, original_compatible: bool) -> bool {
-        if self.has_lut_assignments {
-            false
-        } else {
-            original_compatible
-        }
-    }
-
-    pub fn comp_swap_chain_direct_flip_compatible(&self, original_compatible: bool) -> bool {
-        if self.has_lut_assignments {
-            false
-        } else {
-            original_compatible
-        }
-    }
-
-    pub fn comp_visual_candidate_for_promotion(&self, original_candidate: bool) -> bool {
-        if self.has_lut_assignments {
-            false
-        } else {
-            original_candidate
-        }
-    }
-
-    pub fn comp_swap_chain_independent_flip_compatible(&self, original_compatible: bool) -> bool {
-        if self.has_lut_assignments {
-            false
-        } else {
-            original_compatible
-        }
-    }
-
     pub fn ensure_independent_flip_state(&self) -> Option<i32> {
         if self.has_lut_assignments {
             Some(0)
@@ -442,9 +410,8 @@ mod tests {
             OverlayTestModeControl::ForceMode5
         );
         assert!(!runtime.direct_flip_compatible(0x1234, true));
-        assert!(!runtime.window_context_direct_flip_compatible(true));
-        assert!(!runtime.comp_swap_chain_direct_flip_compatible(true));
-        assert!(!runtime.comp_visual_candidate_for_promotion(true));
+        assert!(!runtime.direct_flip_support_compatible(true));
+        assert_eq!(runtime.ensure_independent_flip_state(), Some(0));
         assert_eq!(runtime.overlay_test_mode(0), 5);
         assert!(runtime.direct_flip_compatible(0x4321, true));
         assert_eq!(
@@ -476,9 +443,8 @@ mod tests {
         assert!(outcome.plan.is_none());
         assert!(!outcome.promotion_blocked);
         assert!(runtime.direct_flip_compatible(0x1234, true));
-        assert!(!runtime.window_context_direct_flip_compatible(true));
-        assert!(!runtime.comp_swap_chain_direct_flip_compatible(true));
-        assert!(!runtime.comp_visual_candidate_for_promotion(true));
+        assert!(!runtime.direct_flip_support_compatible(true));
+        assert_eq!(runtime.ensure_independent_flip_state(), Some(0));
         assert_eq!(runtime.overlay_test_mode(0), 0);
         assert!(runtime.context(0x1234).is_none());
     }
@@ -505,9 +471,8 @@ mod tests {
         assert!(outcome.promotion_blocked);
         assert!(runtime.context(0x1234).is_some());
         assert!(!runtime.direct_flip_compatible(0x1234, true));
-        assert!(!runtime.window_context_direct_flip_compatible(true));
-        assert!(!runtime.comp_swap_chain_direct_flip_compatible(true));
-        assert!(!runtime.comp_visual_candidate_for_promotion(true));
+        assert!(!runtime.direct_flip_support_compatible(true));
+        assert_eq!(runtime.ensure_independent_flip_state(), Some(0));
         assert_eq!(runtime.overlay_test_mode(0), 5);
     }
 
@@ -530,7 +495,7 @@ mod tests {
         );
 
         assert!(runtime.context(0x1234).is_some());
-        assert!(!runtime.window_context_direct_flip_compatible(true));
+        assert!(!runtime.direct_flip_support_compatible(true));
         assert_eq!(runtime.overlay_test_mode(0), 5);
     }
 

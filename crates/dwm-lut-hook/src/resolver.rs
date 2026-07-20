@@ -712,7 +712,7 @@ mod tests {
                 },
             },
             HookSignature {
-                target: HookTarget::WindowContextIsCandidateDirectFlipCompatible,
+                target: HookTarget::IsAdvancedDirectFlipCompatible,
                 locator: SignatureLocator::Aob {
                     tokens: &[AobToken::Exact(0xDD)],
                 },
@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(
             report.skipped_signatures,
             vec![crate::resolver::SkippedSignature {
-                target: crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible,
+                target: crate::profile::HookTarget::IsAdvancedDirectFlipCompatible,
                 reason: crate::resolver::SkippedSignatureReason::NotFound,
             }]
         );
@@ -752,7 +752,7 @@ mod tests {
                 },
             },
             HookSignature {
-                target: HookTarget::CompVisualIsCandidateForPromotion,
+                target: HookTarget::IsDirectFlipSupportedOnTarget,
                 locator: SignatureLocator::Aob {
                     tokens: &[AobToken::Exact(0xDD)],
                 },
@@ -770,7 +770,7 @@ mod tests {
         assert_eq!(
             report.skipped_signatures,
             vec![crate::resolver::SkippedSignature {
-                target: crate::profile::HookTarget::CompVisualIsCandidateForPromotion,
+                target: crate::profile::HookTarget::IsDirectFlipSupportedOnTarget,
                 reason: crate::resolver::SkippedSignatureReason::Ambiguous { matches: 2 },
             }]
         );

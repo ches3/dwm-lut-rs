@@ -15,16 +15,8 @@ pub enum InitializeStatus {
     DirectFlipSignatureAmbiguous = 9,
     PayloadDecodeFailed = 12,
     PayloadHasNoAssignments = 13,
-    WindowDirectFlipSignatureNotFound = 15,
-    WindowDirectFlipSignatureAmbiguous = 16,
-    CompSwapChainDirectFlipSignatureNotFound = 17,
-    CompSwapChainDirectFlipSignatureAmbiguous = 18,
-    CompVisualPromotionSignatureNotFound = 19,
-    CompVisualPromotionSignatureAmbiguous = 20,
     OverlayTestModeNotFound = 21,
     OverlayTestModeAmbiguous = 22,
-    CompSwapChainIndependentFlipSignatureNotFound = 23,
-    CompSwapChainIndependentFlipSignatureAmbiguous = 24,
     MinHookLoadFailed = 25,
     MinHookGetProcAddressFailed = 26,
     MinHookInitializeFailed = 27,
@@ -33,10 +25,6 @@ pub enum InitializeStatus {
     DwmcoreImageMismatch = 30,
     PresentPrologueConflict = 31,
     DirectFlipPrologueConflict = 32,
-    WindowDirectFlipPrologueConflict = 33,
-    CompSwapChainDirectFlipPrologueConflict = 34,
-    CompVisualPromotionPrologueConflict = 35,
-    CompSwapChainIndependentFlipPrologueConflict = 36,
     DwmcoreImageAccessFailed = 37,
     UnsupportedOsBuild = 38,
     DisableIndependentFlipNotFound = 39,
@@ -71,16 +59,8 @@ impl InitializeStatus {
             9 => Self::DirectFlipSignatureAmbiguous,
             12 => Self::PayloadDecodeFailed,
             13 => Self::PayloadHasNoAssignments,
-            15 => Self::WindowDirectFlipSignatureNotFound,
-            16 => Self::WindowDirectFlipSignatureAmbiguous,
-            17 => Self::CompSwapChainDirectFlipSignatureNotFound,
-            18 => Self::CompSwapChainDirectFlipSignatureAmbiguous,
-            19 => Self::CompVisualPromotionSignatureNotFound,
-            20 => Self::CompVisualPromotionSignatureAmbiguous,
             21 => Self::OverlayTestModeNotFound,
             22 => Self::OverlayTestModeAmbiguous,
-            23 => Self::CompSwapChainIndependentFlipSignatureNotFound,
-            24 => Self::CompSwapChainIndependentFlipSignatureAmbiguous,
             25 => Self::MinHookLoadFailed,
             26 => Self::MinHookGetProcAddressFailed,
             27 => Self::MinHookInitializeFailed,
@@ -89,10 +69,6 @@ impl InitializeStatus {
             30 => Self::DwmcoreImageMismatch,
             31 => Self::PresentPrologueConflict,
             32 => Self::DirectFlipPrologueConflict,
-            33 => Self::WindowDirectFlipPrologueConflict,
-            34 => Self::CompSwapChainDirectFlipPrologueConflict,
-            35 => Self::CompVisualPromotionPrologueConflict,
-            36 => Self::CompSwapChainIndependentFlipPrologueConflict,
             37 => Self::DwmcoreImageAccessFailed,
             38 => Self::UnsupportedOsBuild,
             39 => Self::DisableIndependentFlipNotFound,
@@ -139,42 +115,10 @@ impl fmt::Display for InitializeStatus {
             Self::PayloadHasNoAssignments => {
                 write!(f, "payload does not contain any LUT assignments")
             }
-            Self::WindowDirectFlipSignatureNotFound => write!(
-                f,
-                "CWindowContext::IsCandidateDirectFlipCompatible signature was not found"
-            ),
-            Self::WindowDirectFlipSignatureAmbiguous => write!(
-                f,
-                "CWindowContext::IsCandidateDirectFlipCompatible signature matched multiple locations"
-            ),
-            Self::CompSwapChainDirectFlipSignatureNotFound => write!(
-                f,
-                "CCompSwapChain::IsCandidateDirectFlipCompatible signature was not found"
-            ),
-            Self::CompSwapChainDirectFlipSignatureAmbiguous => write!(
-                f,
-                "CCompSwapChain::IsCandidateDirectFlipCompatible signature matched multiple locations"
-            ),
-            Self::CompVisualPromotionSignatureNotFound => write!(
-                f,
-                "CCompVisual::IsCandidateForPromotion signature was not found"
-            ),
-            Self::CompVisualPromotionSignatureAmbiguous => write!(
-                f,
-                "CCompVisual::IsCandidateForPromotion signature matched multiple locations"
-            ),
             Self::OverlayTestModeNotFound => write!(f, "OverlayTestMode reference was not found"),
             Self::OverlayTestModeAmbiguous => {
                 write!(f, "OverlayTestMode reference matched multiple locations")
             }
-            Self::CompSwapChainIndependentFlipSignatureNotFound => write!(
-                f,
-                "CCompSwapChain::IsCandidateIndependentFlipCompatible signature was not found"
-            ),
-            Self::CompSwapChainIndependentFlipSignatureAmbiguous => write!(
-                f,
-                "CCompSwapChain::IsCandidateIndependentFlipCompatible signature matched multiple locations"
-            ),
             Self::MinHookLoadFailed => write!(f, "MinHook DLL could not be loaded"),
             Self::MinHookGetProcAddressFailed => write!(f, "MinHook exports could not be resolved"),
             Self::MinHookInitializeFailed => write!(f, "MH_Initialize failed"),
@@ -189,22 +133,6 @@ impl fmt::Display for InitializeStatus {
             Self::DirectFlipPrologueConflict => write!(
                 f,
                 "IsCandidateDirectFlipCompatible prologue is modified by a conflicting hook"
-            ),
-            Self::WindowDirectFlipPrologueConflict => write!(
-                f,
-                "CWindowContext::IsCandidateDirectFlipCompatible prologue is modified by a conflicting hook"
-            ),
-            Self::CompSwapChainDirectFlipPrologueConflict => write!(
-                f,
-                "CCompSwapChain::IsCandidateDirectFlipCompatible prologue is modified by a conflicting hook"
-            ),
-            Self::CompVisualPromotionPrologueConflict => write!(
-                f,
-                "CCompVisual::IsCandidateForPromotion prologue is modified by a conflicting hook"
-            ),
-            Self::CompSwapChainIndependentFlipPrologueConflict => write!(
-                f,
-                "CCompSwapChain::IsCandidateIndependentFlipCompatible prologue is modified by a conflicting hook"
             ),
             Self::DwmcoreImageAccessFailed => {
                 write!(f, "dwmcore.dll backing image could not be accessed")

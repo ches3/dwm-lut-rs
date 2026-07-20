@@ -642,18 +642,6 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
                 InitializeStatus::DirectFlipSignatureNotFound
             }
-            crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible => {
-                InitializeStatus::WindowDirectFlipSignatureNotFound
-            }
-            crate::profile::HookTarget::CompSwapChainIsCandidateDirectFlipCompatible => {
-                InitializeStatus::CompSwapChainDirectFlipSignatureNotFound
-            }
-            crate::profile::HookTarget::CompVisualIsCandidateForPromotion => {
-                InitializeStatus::CompVisualPromotionSignatureNotFound
-            }
-            crate::profile::HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible => {
-                InitializeStatus::CompSwapChainIndependentFlipSignatureNotFound
-            }
             crate::profile::HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
                 InitializeStatus::DirectFlipInfoEnsureIndependentFlipSignatureNotFound
             }
@@ -681,18 +669,6 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
                 InitializeStatus::DirectFlipSignatureAmbiguous
             }
-            crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible => {
-                InitializeStatus::WindowDirectFlipSignatureAmbiguous
-            }
-            crate::profile::HookTarget::CompSwapChainIsCandidateDirectFlipCompatible => {
-                InitializeStatus::CompSwapChainDirectFlipSignatureAmbiguous
-            }
-            crate::profile::HookTarget::CompVisualIsCandidateForPromotion => {
-                InitializeStatus::CompVisualPromotionSignatureAmbiguous
-            }
-            crate::profile::HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible => {
-                InitializeStatus::CompSwapChainIndependentFlipSignatureAmbiguous
-            }
             crate::profile::HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
                 InitializeStatus::DirectFlipInfoEnsureIndependentFlipSignatureAmbiguous
             }
@@ -719,18 +695,6 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::Present => InitializeStatus::PresentPrologueConflict,
             crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
                 InitializeStatus::DirectFlipPrologueConflict
-            }
-            crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible => {
-                InitializeStatus::WindowDirectFlipPrologueConflict
-            }
-            crate::profile::HookTarget::CompSwapChainIsCandidateDirectFlipCompatible => {
-                InitializeStatus::CompSwapChainDirectFlipPrologueConflict
-            }
-            crate::profile::HookTarget::CompVisualIsCandidateForPromotion => {
-                InitializeStatus::CompVisualPromotionPrologueConflict
-            }
-            crate::profile::HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible => {
-                InitializeStatus::CompSwapChainIndependentFlipPrologueConflict
             }
             crate::profile::HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
                 InitializeStatus::DirectFlipInfoEnsureIndependentFlipPrologueConflict

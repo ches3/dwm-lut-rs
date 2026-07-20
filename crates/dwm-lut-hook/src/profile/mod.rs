@@ -45,10 +45,6 @@ pub const VERSIONED_PROFILES: &[VersionedProfile] = &[VersionedProfile {
 pub enum HookTarget {
     Present,
     IsCandidateDirectFlipCompatible,
-    WindowContextIsCandidateDirectFlipCompatible,
-    CompSwapChainIsCandidateDirectFlipCompatible,
-    CompSwapChainIsCandidateIndependentFlipCompatible,
-    CompVisualIsCandidateForPromotion,
     DirectFlipInfoEnsureIndependentFlipState,
     IsDirectFlipSupportedOnTarget,
     LegacySwapChainCheckDirectFlipSupport,
@@ -63,16 +59,6 @@ impl HookTarget {
         match self {
             Self::Present => "Present",
             Self::IsCandidateDirectFlipCompatible => "IsCandidateDirectFlipCompatible",
-            Self::WindowContextIsCandidateDirectFlipCompatible => {
-                "CWindowContext::IsCandidateDirectFlipCompatible"
-            }
-            Self::CompSwapChainIsCandidateDirectFlipCompatible => {
-                "CCompSwapChain::IsCandidateDirectFlipCompatible"
-            }
-            Self::CompSwapChainIsCandidateIndependentFlipCompatible => {
-                "CCompSwapChain::IsCandidateIndependentFlipCompatible"
-            }
-            Self::CompVisualIsCandidateForPromotion => "CCompVisual::IsCandidateForPromotion",
             Self::DirectFlipInfoEnsureIndependentFlipState => {
                 "CDirectFlipInfo::EnsureIndependentFlipState"
             }

@@ -686,7 +686,7 @@ mod tests {
         let plan = plan_with_targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
-            (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
+            (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
         ]);
 
         let error = register_plan_with_apis(&plan, test_minhook_apis())
@@ -694,7 +694,7 @@ mod tests {
 
         assert_eq!(
             error.operation,
-            MinHookOperation::CreateHook(HookTarget::CompVisualIsCandidateForPromotion)
+            MinHookOperation::CreateHook(HookTarget::IsDirectFlipSupportedOnTarget)
         );
         assert!(error.cleanup_failures.is_empty());
         let calls = test_minhook_call_counts();
@@ -711,7 +711,7 @@ mod tests {
         let plan = plan_with_targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
-            (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
+            (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
         ]);
 
         let error =
@@ -734,7 +734,7 @@ mod tests {
         let plan = plan_with_targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
-            (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
+            (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
         ]);
 
         let error = register_plan_with_apis(&plan, test_minhook_apis())
@@ -742,7 +742,7 @@ mod tests {
 
         assert_eq!(
             error.operation,
-            MinHookOperation::CreateHook(HookTarget::CompVisualIsCandidateForPromotion)
+            MinHookOperation::CreateHook(HookTarget::IsDirectFlipSupportedOnTarget)
         );
         assert_eq!(error.cleanup_failures.len(), 1);
         assert_eq!(
@@ -776,7 +776,7 @@ mod tests {
         let plan = plan_with_targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
-            (HookTarget::CompVisualIsCandidateForPromotion, 0x1800_3000),
+            (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
         ]);
 
         let error =
@@ -790,7 +790,7 @@ mod tests {
         );
         assert_eq!(
             error.cleanup_failures[0].target,
-            HookTarget::CompVisualIsCandidateForPromotion
+            HookTarget::IsDirectFlipSupportedOnTarget
         );
         assert_eq!(error.cleanup_failures[0].status, -4);
         assert!(
@@ -804,11 +804,11 @@ mod tests {
                 .is_null()
         );
         assert_eq!(
-            detours::original_pointer_for_target(HookTarget::CompVisualIsCandidateForPromotion)
+            detours::original_pointer_for_target(HookTarget::IsDirectFlipSupportedOnTarget)
                 .load(Ordering::Acquire) as usize,
             0x1800_3000
         );
-        detours::original_pointer_for_target(HookTarget::CompVisualIsCandidateForPromotion)
+        detours::original_pointer_for_target(HookTarget::IsDirectFlipSupportedOnTarget)
             .store(std::ptr::null_mut(), Ordering::Release);
     }
 

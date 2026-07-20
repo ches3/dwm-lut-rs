@@ -6,10 +6,6 @@
 #[repr(usize)]
 pub enum FlipGateKind {
     OverlayContextDirectFlip,
-    WindowContextDirectFlip,
-    CompSwapChainDirectFlip,
-    CompSwapChainIndependentFlip,
-    CompVisualPromotion,
     DirectFlipInfoEnsureIndependentFlip,
     IsDirectFlipSupportedOnTarget,
     LegacySwapChainCheckDirectFlip,
@@ -17,15 +13,11 @@ pub enum FlipGateKind {
 }
 
 impl FlipGateKind {
-    const COUNT: usize = 9;
+    const COUNT: usize = 5;
 
     const fn label(self) -> &'static str {
         match self {
             Self::OverlayContextDirectFlip => "overlay_context_direct_flip",
-            Self::WindowContextDirectFlip => "window_context_direct_flip",
-            Self::CompSwapChainDirectFlip => "comp_swap_chain_direct_flip",
-            Self::CompSwapChainIndependentFlip => "comp_swap_chain_independent_flip",
-            Self::CompVisualPromotion => "comp_visual_promotion",
             Self::DirectFlipInfoEnsureIndependentFlip => "direct_flip_info_ensure_independent_flip",
             Self::IsDirectFlipSupportedOnTarget => "is_direct_flip_supported_on_target",
             Self::LegacySwapChainCheckDirectFlip => "legacy_swap_chain_check_direct_flip",
@@ -130,16 +122,6 @@ pub fn record_protected_present_resource_result_summary(
     );
 }
 
-pub fn record_comp_direct_flip_call_summary(
-    this: usize,
-    a2: usize,
-    a3: u8,
-    original: bool,
-    result: bool,
-) {
-    imp::record_comp_direct_flip_call_summary(this, a2, a3, original, result);
-}
-
 pub fn flush_summary(reason: &str) {
     imp::flush_summary(reason);
 }
@@ -170,16 +152,8 @@ mod imp {
         AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
-        AtomicU64::new(0),
-        AtomicU64::new(0),
-        AtomicU64::new(0),
-        AtomicU64::new(0),
     ];
     static FLIP_GATE_DENIED: [AtomicU64; FlipGateKind::COUNT] = [
-        AtomicU64::new(0),
-        AtomicU64::new(0),
-        AtomicU64::new(0),
-        AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
@@ -191,8 +165,6 @@ mod imp {
     const PRESENT_SAMPLE_INTERVAL: u64 = 600;
     const FLUSH_EVERY_PRESENTS: u64 = 120;
     const IDLE_GAP_LOG_THRESHOLD: Duration = Duration::from_secs(2);
-    const COMP_DIRECT_FLIP_CALL_SUMMARY_BURST: u64 = 16;
-    const COMP_DIRECT_FLIP_CALL_SUMMARY_EVERY: u64 = 600;
     const PROTECTED_FLIP_GATE_SEQUENCE_SUMMARY_BURST: u64 = 16;
     const PROTECTED_FLIP_GATE_SEQUENCE_SUMMARY_EVERY: u64 = 600;
     const PROTECTED_PRESENT_RESOURCE_RESULT_SUMMARY_BURST: u64 = 16;
@@ -203,7 +175,6 @@ mod imp {
         last_present_at: BTreeMap<usize, Instant>,
         last_idle_gap_logged_at: BTreeMap<usize, Instant>,
         presents_since_flush: u64,
-        comp_direct_flip_call_summary_count: u64,
         protected_flip_gate_sequence: u64,
         protected_flip_gate_log_count: u64,
         protected_flip_gate_stats: [FlipGateSequenceGateStats; FlipGateKind::COUNT],
@@ -443,7 +414,6 @@ mod imp {
                     [FlipGateSequenceGateStats::new(); FlipGateKind::COUNT];
             }
 
-            let comp_direct_flip_summary_count = state.comp_direct_flip_call_summary_count + 1;
             let stats = &mut state.protected_flip_gate_stats[kind.index()];
             stats.calls = stats.calls.saturating_add(1);
             if original {
@@ -463,15 +433,9 @@ mod imp {
             } else {
                 0
             };
-            let matches_comp_direct_flip_summary = kind == FlipGateKind::CompSwapChainDirectFlip
-                && (comp_direct_flip_summary_count <= COMP_DIRECT_FLIP_CALL_SUMMARY_BURST
-                    || comp_direct_flip_summary_count
-                        .is_multiple_of(COMP_DIRECT_FLIP_CALL_SUMMARY_EVERY));
-            matches_comp_direct_flip_summary
-                || is_hardware_protected_present
-                    && (protected_count <= PROTECTED_FLIP_GATE_SEQUENCE_SUMMARY_BURST
-                        || protected_count
-                            .is_multiple_of(PROTECTED_FLIP_GATE_SEQUENCE_SUMMARY_EVERY))
+            is_hardware_protected_present
+                && (protected_count <= PROTECTED_FLIP_GATE_SEQUENCE_SUMMARY_BURST
+                    || protected_count.is_multiple_of(PROTECTED_FLIP_GATE_SEQUENCE_SUMMARY_EVERY))
         };
         if !should_log {
             return;
@@ -482,11 +446,6 @@ mod imp {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let overlay =
             state.protected_flip_gate_stats[FlipGateKind::OverlayContextDirectFlip.index()];
-        let window = state.protected_flip_gate_stats[FlipGateKind::WindowContextDirectFlip.index()];
-        let comp = state.protected_flip_gate_stats[FlipGateKind::CompSwapChainDirectFlip.index()];
-        let independent =
-            state.protected_flip_gate_stats[FlipGateKind::CompSwapChainIndependentFlip.index()];
-        let visual = state.protected_flip_gate_stats[FlipGateKind::CompVisualPromotion.index()];
         let ensure = state.protected_flip_gate_stats
             [FlipGateKind::DirectFlipInfoEnsureIndependentFlip.index()];
         let df_supported =
@@ -496,7 +455,7 @@ mod imp {
         let advanced =
             state.protected_flip_gate_stats[FlipGateKind::IsAdvancedDirectFlipCompatible.index()];
         trace_log!(
-            "event=protected_flip_gate_sequence_summary last_present_sequence={:?} last_target_id={:?} last_hardware_protected={:?} last_present_age_ms={:?} overlay_context_direct_flip_calls={} overlay_context_direct_flip_original_true={} overlay_context_direct_flip_returned_true={} overlay_context_direct_flip_denied={} window_context_direct_flip_calls={} window_context_direct_flip_original_true={} window_context_direct_flip_returned_true={} window_context_direct_flip_denied={} comp_swap_chain_direct_flip_calls={} comp_swap_chain_direct_flip_original_true={} comp_swap_chain_direct_flip_returned_true={} comp_swap_chain_direct_flip_denied={} comp_swap_chain_independent_flip_calls={} comp_swap_chain_independent_flip_original_true={} comp_swap_chain_independent_flip_returned_true={} comp_swap_chain_independent_flip_denied={} comp_visual_promotion_calls={} comp_visual_promotion_original_true={} comp_visual_promotion_returned_true={} comp_visual_promotion_denied={} ensure_independent_flip_calls={} ensure_independent_flip_original_true={} ensure_independent_flip_returned_true={} ensure_independent_flip_denied={} df_supported_calls={} df_supported_original_true={} df_supported_returned_true={} df_supported_denied={} legacy_df_calls={} legacy_df_original_true={} legacy_df_returned_true={} legacy_df_denied={} advanced_df_calls={} advanced_df_original_true={} advanced_df_returned_true={} advanced_df_denied={}",
+            "event=protected_flip_gate_sequence_summary last_present_sequence={:?} last_target_id={:?} last_hardware_protected={:?} last_present_age_ms={:?} overlay_context_direct_flip_calls={} overlay_context_direct_flip_original_true={} overlay_context_direct_flip_returned_true={} overlay_context_direct_flip_denied={} ensure_independent_flip_calls={} ensure_independent_flip_original_true={} ensure_independent_flip_returned_true={} ensure_independent_flip_denied={} df_supported_calls={} df_supported_original_true={} df_supported_returned_true={} df_supported_denied={} legacy_df_calls={} legacy_df_original_true={} legacy_df_returned_true={} legacy_df_denied={} advanced_df_calls={} advanced_df_original_true={} advanced_df_returned_true={} advanced_df_denied={}",
             last_present_sequence,
             last_target_id,
             last_hardware_protected,
@@ -505,22 +464,6 @@ mod imp {
             overlay.original_true,
             overlay.returned_true,
             overlay.denied,
-            window.calls,
-            window.original_true,
-            window.returned_true,
-            window.denied,
-            comp.calls,
-            comp.original_true,
-            comp.returned_true,
-            comp.denied,
-            independent.calls,
-            independent.original_true,
-            independent.returned_true,
-            independent.denied,
-            visual.calls,
-            visual.original_true,
-            visual.returned_true,
-            visual.denied,
             ensure.calls,
             ensure.original_true,
             ensure.returned_true,
@@ -718,52 +661,9 @@ mod imp {
         );
     }
 
-    pub fn record_comp_direct_flip_call_summary(
-        this: usize,
-        a2: usize,
-        a3: u8,
-        original: bool,
-        result: bool,
-    ) {
-        let should_log = {
-            let mut state = trace_state()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.comp_direct_flip_call_summary_count =
-                state.comp_direct_flip_call_summary_count.saturating_add(1);
-            let count = state.comp_direct_flip_call_summary_count;
-            count <= COMP_DIRECT_FLIP_CALL_SUMMARY_BURST
-                || count.is_multiple_of(COMP_DIRECT_FLIP_CALL_SUMMARY_EVERY)
-        };
-        if !should_log {
-            return;
-        }
-
-        let last_present = last_present_context_snapshot();
-        let now = Instant::now();
-        let last_present_age_ms = last_present.and_then(|last_present| {
-            last_present
-                .recorded_at
-                .map(|recorded_at| now.duration_since(recorded_at).as_millis())
-        });
-
-        trace_log!(
-            "event=comp_direct_flip_call_summary this=0x{:x} a2=0x{:x} a3=0x{:x} original={} result={} last_present_sequence={:?} last_target_id={:?} last_hardware_protected={:?} last_present_age_ms={:?}",
-            this,
-            a2,
-            a3,
-            original,
-            result,
-            last_present.map(|last_present| last_present.sequence),
-            last_present.and_then(|last_present| last_present.target_id),
-            last_present.and_then(|last_present| last_present.hardware_protected),
-            last_present_age_ms
-        );
-    }
-
     pub fn flush_summary(reason: &str) {
         trace_log!(
-            "event=route_trace_summary reason={} present_enters={} present_hw_protected={} present_lock_misses={} present_lut_applied={} present_lut_not_applied={} overlay_df_calls={} overlay_df_denied={} window_df_calls={} window_df_denied={} comp_df_calls={} comp_df_denied={} comp_if_calls={} comp_if_denied={} comp_vis_calls={} comp_vis_denied={} ensure_if_calls={} ensure_if_denied={} df_supported_calls={} df_supported_denied={} legacy_df_calls={} legacy_df_denied={} advanced_df_calls={} advanced_df_denied={}",
+            "event=route_trace_summary reason={} present_enters={} present_hw_protected={} present_lock_misses={} present_lut_applied={} present_lut_not_applied={} overlay_df_calls={} overlay_df_denied={} ensure_if_calls={} ensure_if_denied={} df_supported_calls={} df_supported_denied={} legacy_df_calls={} legacy_df_denied={} advanced_df_calls={} advanced_df_denied={}",
             crate::debug_log::quoted(reason),
             PRESENT_ENTERS.load(Ordering::Relaxed),
             PRESENT_HARDWARE_PROTECTED.load(Ordering::Relaxed),
@@ -773,16 +673,6 @@ mod imp {
             FLIP_GATE_CALLS[FlipGateKind::OverlayContextDirectFlip.index()].load(Ordering::Relaxed),
             FLIP_GATE_DENIED[FlipGateKind::OverlayContextDirectFlip.index()]
                 .load(Ordering::Relaxed),
-            FLIP_GATE_CALLS[FlipGateKind::WindowContextDirectFlip.index()].load(Ordering::Relaxed),
-            FLIP_GATE_DENIED[FlipGateKind::WindowContextDirectFlip.index()].load(Ordering::Relaxed),
-            FLIP_GATE_CALLS[FlipGateKind::CompSwapChainDirectFlip.index()].load(Ordering::Relaxed),
-            FLIP_GATE_DENIED[FlipGateKind::CompSwapChainDirectFlip.index()].load(Ordering::Relaxed),
-            FLIP_GATE_CALLS[FlipGateKind::CompSwapChainIndependentFlip.index()]
-                .load(Ordering::Relaxed),
-            FLIP_GATE_DENIED[FlipGateKind::CompSwapChainIndependentFlip.index()]
-                .load(Ordering::Relaxed),
-            FLIP_GATE_CALLS[FlipGateKind::CompVisualPromotion.index()].load(Ordering::Relaxed),
-            FLIP_GATE_DENIED[FlipGateKind::CompVisualPromotion.index()].load(Ordering::Relaxed),
             FLIP_GATE_CALLS[FlipGateKind::DirectFlipInfoEnsureIndependentFlip.index()]
                 .load(Ordering::Relaxed),
             FLIP_GATE_DENIED[FlipGateKind::DirectFlipInfoEnsureIndependentFlip.index()]
@@ -808,7 +698,6 @@ mod imp {
                 last_present_at: BTreeMap::new(),
                 last_idle_gap_logged_at: BTreeMap::new(),
                 presents_since_flush: 0,
-                comp_direct_flip_call_summary_count: 0,
                 protected_flip_gate_sequence: 0,
                 protected_flip_gate_log_count: 0,
                 protected_flip_gate_stats: [FlipGateSequenceGateStats::new(); FlipGateKind::COUNT],
@@ -927,8 +816,6 @@ mod imp {
         _: Option<crate::DirtyRect>,
     ) {
     }
-
-    pub fn record_comp_direct_flip_call_summary(_: usize, _: usize, _: u8, _: bool, _: bool) {}
 
     pub fn flush_summary(_: &str) {}
 }
