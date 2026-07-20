@@ -87,7 +87,7 @@ const OVERLAY_DIRECT_FLIP_AOB: &[AobToken] = &[
     Exact(0xF1),
 ];
 
-const OVERLAY_TEST_MODE_ANCHOR_AOB: &[AobToken] = &[
+const OVERLAYS_ENABLED_AOB: &[AobToken] = &[
     Exact(0x83),
     Exact(0x3D),
     Wildcard,
@@ -103,6 +103,10 @@ const OVERLAY_TEST_MODE_ANCHOR_AOB: &[AobToken] = &[
     Exact(0x01),
     Exact(0x0F),
     Exact(0x97),
+    Exact(0xC0),
+    Exact(0xC3),
+    Exact(0xCC),
+    Exact(0x32),
     Exact(0xC0),
     Exact(0xC3),
 ];
@@ -475,7 +479,7 @@ const SIGNATURES: &[HookSignature] = &[
     HookSignature {
         target: HookTarget::OverlayTestMode,
         locator: SignatureLocator::RipRelativeGlobalAob {
-            tokens: OVERLAY_TEST_MODE_ANCHOR_AOB,
+            tokens: OVERLAYS_ENABLED_AOB,
             displacement_offset: 2,
             instruction_size: 7,
         },
@@ -486,6 +490,12 @@ const SIGNATURES: &[HookSignature] = &[
             tokens: DISABLE_INDEPENDENT_FLIP_ANCHOR_AOB,
             displacement_offset: 2,
             instruction_size: 7,
+        },
+    },
+    HookSignature {
+        target: HookTarget::OverlaysEnabled,
+        locator: SignatureLocator::Aob {
+            tokens: OVERLAYS_ENABLED_AOB,
         },
     },
 ];

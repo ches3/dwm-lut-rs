@@ -55,6 +55,7 @@ pub enum HookTarget {
     IsAdvancedDirectFlipCompatible,
     OverlayTestMode,
     DisableIndependentFlip,
+    OverlaysEnabled,
 }
 
 impl HookTarget {
@@ -84,6 +85,7 @@ impl HookTarget {
             }
             Self::OverlayTestMode => "OverlayTestMode",
             Self::DisableIndependentFlip => "DisableIndependentFlip",
+            Self::OverlaysEnabled => "COverlayContext::OverlaysEnabled",
         }
     }
 

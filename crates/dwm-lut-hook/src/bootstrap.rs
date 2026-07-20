@@ -672,6 +672,9 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::DisableIndependentFlip => {
                 InitializeStatus::DisableIndependentFlipNotFound
             }
+            crate::profile::HookTarget::OverlaysEnabled => {
+                unreachable!("optional OverlaysEnabled resolution errors are skipped")
+            }
         },
         HookResolveError::SignatureAmbiguous { target, .. } => match target {
             crate::profile::HookTarget::Present => InitializeStatus::PresentSignatureAmbiguous,
@@ -708,6 +711,9 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::DisableIndependentFlip => {
                 InitializeStatus::DisableIndependentFlipAmbiguous
             }
+            crate::profile::HookTarget::OverlaysEnabled => {
+                unreachable!("optional OverlaysEnabled resolution errors are skipped")
+            }
         },
         HookResolveError::ConflictingPrologue { target, .. } => match target {
             crate::profile::HookTarget::Present => InitializeStatus::PresentPrologueConflict,
@@ -737,6 +743,9 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             }
             crate::profile::HookTarget::IsAdvancedDirectFlipCompatible => {
                 InitializeStatus::IsAdvancedDirectFlipCompatiblePrologueConflict
+            }
+            crate::profile::HookTarget::OverlaysEnabled => {
+                InitializeStatus::OverlaysEnabledPrologueConflict
             }
             crate::profile::HookTarget::OverlayTestMode
             | crate::profile::HookTarget::DisableIndependentFlip => {

@@ -215,6 +215,11 @@ pub(crate) fn disable_registered_hooks(
     disable_registered_hooks_with_apis(hooks, runtime.apis)
 }
 
+#[cfg(not(test))]
+pub(crate) fn set_overlays_enabled_override(value: Option<bool>) {
+    detours::set_overlays_enabled_override(value);
+}
+
 #[cfg(test)]
 pub(crate) fn reset_test_original_slots() {
     detours::reset_test_original_slots();

@@ -53,6 +53,7 @@ pub enum InitializeStatus {
     IsAdvancedDirectFlipCompatibleSignatureNotFound = 50,
     IsAdvancedDirectFlipCompatibleSignatureAmbiguous = 51,
     IsAdvancedDirectFlipCompatiblePrologueConflict = 52,
+    OverlaysEnabledPrologueConflict = 53,
 }
 
 impl InitializeStatus {
@@ -108,6 +109,7 @@ impl InitializeStatus {
             50 => Self::IsAdvancedDirectFlipCompatibleSignatureNotFound,
             51 => Self::IsAdvancedDirectFlipCompatibleSignatureAmbiguous,
             52 => Self::IsAdvancedDirectFlipCompatiblePrologueConflict,
+            53 => Self::OverlaysEnabledPrologueConflict,
             _ => return None,
         })
     }
@@ -266,6 +268,10 @@ impl fmt::Display for InitializeStatus {
             Self::IsAdvancedDirectFlipCompatiblePrologueConflict => write!(
                 f,
                 "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible prologue is modified by a conflicting hook"
+            ),
+            Self::OverlaysEnabledPrologueConflict => write!(
+                f,
+                "COverlayContext::OverlaysEnabled prologue is modified by a conflicting hook"
             ),
         }
     }

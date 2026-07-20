@@ -71,6 +71,7 @@ pub struct LutBypassRuntime {
     pub overlay_test_mode_control: OverlayTestModeControl,
     pub overlay_test_mode_patch: Option<OverlayTestModePatch>,
     pub disable_independent_flip_patch: Option<DisableIndependentFlipPatch>,
+    pub overlays_enabled_override: Option<bool>,
     pub has_lut_assignments: bool,
     pub contexts: BTreeMap<usize, ContextLutState>,
 }
@@ -98,6 +99,7 @@ impl LutBypassRuntime {
                     applied: false,
                     rejected: false,
                 }),
+            overlays_enabled_override: None,
             has_lut_assignments,
             contexts: BTreeMap::new(),
         }
@@ -169,8 +171,10 @@ impl LutBypassRuntime {
             self.contexts.remove(&context_address);
         }
 
+        let active = self.has_active_contexts();
         self.set_overlay_test_mode_control(self.overlay_test_mode_control());
-        self.set_disable_independent_flip_enabled(self.has_active_contexts());
+        self.set_disable_independent_flip_enabled(active);
+        self.set_overlays_enabled_override(active);
 
         PresentHookOutcome {
             plan,
@@ -246,6 +250,7 @@ impl LutBypassRuntime {
     pub fn restore_overlay_test_mode(&mut self) {
         self.set_overlay_test_mode_control(OverlayTestModeControl::Unmodified);
         self.set_disable_independent_flip_enabled(false);
+        self.set_overlays_enabled_override(false);
     }
 
     pub fn reload_for_new_payload(&mut self, has_lut_assignments: bool) {
@@ -327,6 +332,22 @@ impl LutBypassRuntime {
             patch.applied = false;
             debug_log!("event=disable_independent_flip_restored");
         }
+    }
+
+    fn set_overlays_enabled_override(&mut self, enabled: bool) {
+        let value = enabled.then(|| {
+            self.disable_independent_flip_patch
+                .as_ref()
+                .is_some_and(|dif| dif.applied)
+        });
+        if self.overlays_enabled_override == value {
+            return;
+        }
+
+        self.overlays_enabled_override = value;
+        #[cfg(not(test))]
+        crate::minhook::set_overlays_enabled_override(value);
+        debug_log!("event=overlays_enabled_override value={value:?}");
     }
 }
 
@@ -628,6 +649,8 @@ mod tests {
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
+        assert_eq!(disable_independent_flip, 0);
+
         let _ = runtime.update_present(
             &pipeline,
             0x1234,
@@ -641,14 +664,7 @@ mod tests {
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
         );
-
         assert_eq!(disable_independent_flip, 1);
-        assert!(
-            runtime
-                .disable_independent_flip_patch
-                .as_ref()
-                .is_some_and(|patch| patch.applied)
-        );
 
         let _ = runtime.update_present(
             &pipeline,
@@ -663,7 +679,7 @@ mod tests {
             DXGI_FORMAT_B8G8R8A8_UNORM,
             &[],
         );
-
+        assert!(!runtime.has_active_contexts());
         assert_eq!(disable_independent_flip, 0);
     }
 
@@ -701,6 +717,56 @@ mod tests {
     }
 
     #[test]
+    fn overlays_enabled_override_returns_true_when_dif_is_applied() {
+        let pipeline = pipeline_for_single_sdr_monitor();
+        let mut disable_independent_flip = 0i32;
+        let mut runtime = LutBypassRuntime::new(
+            true,
+            None,
+            Some((&mut disable_independent_flip as *mut i32) as usize),
+        );
+
+        let _ = runtime.update_present(
+            &pipeline,
+            0x1234,
+            Some(test_identity()),
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            &[],
+        );
+
+        assert_eq!(disable_independent_flip, 1);
+        assert_eq!(runtime.overlays_enabled_override, Some(true));
+    }
+
+    #[test]
+    fn overlays_enabled_override_returns_false_when_dif_is_unavailable() {
+        let pipeline = pipeline_for_single_sdr_monitor();
+        let mut runtime = LutBypassRuntime::new(true, None, None);
+
+        let _ = runtime.update_present(
+            &pipeline,
+            0x1234,
+            Some(test_identity()),
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            &[],
+        );
+
+        assert_eq!(runtime.overlays_enabled_override, Some(false));
+    }
+
+    #[test]
     fn reload_for_new_payload_clears_active_contexts_and_restores_overlay_test_mode() {
         let pipeline = pipeline_for_single_sdr_monitor();
         let mut overlay_test_mode = 0i32;
@@ -728,12 +794,14 @@ mod tests {
         assert!(runtime.has_active_contexts());
         assert_eq!(overlay_test_mode, 5);
         assert_eq!(disable_independent_flip, 1);
+        assert_eq!(runtime.overlays_enabled_override, Some(true));
 
         runtime.reload_for_new_payload(true);
 
         assert!(!runtime.has_active_contexts());
         assert_eq!(overlay_test_mode, 0);
         assert_eq!(disable_independent_flip, 0);
+        assert_eq!(runtime.overlays_enabled_override, None);
         assert_eq!(runtime.overlay_test_mode(0), 0);
     }
 }

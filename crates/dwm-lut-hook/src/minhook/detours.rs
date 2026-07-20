@@ -1,6 +1,6 @@
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 use crate::profile::HookTarget;
 #[cfg(debug_assertions)]
@@ -31,6 +31,13 @@ static IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL: AtomicPtr<c_void> =
     AtomicPtr::new(ptr::null_mut());
 static LEGACY_CHECK_DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static IS_ADVANCED_DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static OVERLAYS_ENABLED_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+
+const OVERLAYS_ENABLED_ORIGINAL_BEHAVIOR: u8 = 0;
+const OVERLAYS_ENABLED_FORCE_FALSE: u8 = 1;
+const OVERLAYS_ENABLED_FORCE_TRUE: u8 = 2;
+
+static OVERLAYS_ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(OVERLAYS_ENABLED_ORIGINAL_BEHAVIOR);
 
 pub(super) fn present_original() -> *mut c_void {
     PRESENT_ORIGINAL.load(Ordering::Acquire)
@@ -48,6 +55,17 @@ pub(super) fn reset_test_original_slots() {
     IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
     LEGACY_CHECK_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
     IS_ADVANCED_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    OVERLAYS_ENABLED_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    set_overlays_enabled_override(None);
+}
+
+pub(super) fn set_overlays_enabled_override(value: Option<bool>) {
+    let value = match value {
+        None => OVERLAYS_ENABLED_ORIGINAL_BEHAVIOR,
+        Some(false) => OVERLAYS_ENABLED_FORCE_FALSE,
+        Some(true) => OVERLAYS_ENABLED_FORCE_TRUE,
+    };
+    OVERLAYS_ENABLED_OVERRIDE.store(value, Ordering::Release);
 }
 
 pub(super) fn original_pointer_for_target(target: HookTarget) -> &'static AtomicPtr<c_void> {
@@ -68,6 +86,7 @@ pub(super) fn original_pointer_for_target(target: HookTarget) -> &'static Atomic
         HookTarget::IsDirectFlipSupportedOnTarget => &IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL,
         HookTarget::LegacySwapChainCheckDirectFlipSupport => &LEGACY_CHECK_DIRECT_FLIP_ORIGINAL,
         HookTarget::IsAdvancedDirectFlipCompatible => &IS_ADVANCED_DIRECT_FLIP_ORIGINAL,
+        HookTarget::OverlaysEnabled => &OVERLAYS_ENABLED_ORIGINAL,
         HookTarget::OverlayTestMode | HookTarget::DisableIndependentFlip => {
             unreachable!("global patch target is not a function hook")
         }
@@ -106,6 +125,7 @@ pub(super) fn detour_for_target(target: HookTarget) -> *mut c_void {
         HookTarget::IsAdvancedDirectFlipCompatible => {
             is_advanced_direct_flip_compatible_detour as *mut c_void
         }
+        HookTarget::OverlaysEnabled => overlays_enabled_detour as *mut c_void,
         HookTarget::OverlayTestMode | HookTarget::DisableIndependentFlip => {
             unreachable!("global patch target is not a function hook")
         }
@@ -311,6 +331,25 @@ unsafe extern "system" fn is_advanced_direct_flip_compatible_detour(this: usize)
     )
 }
 
+// DWM callers retain volatile registers across this internal leaf function.
+// Keep the detour transparent except for the original AL result and flags.
+#[unsafe(naked)]
+unsafe extern "system" fn overlays_enabled_detour(_this: usize) -> u8 {
+    core::arch::naked_asm!(
+        "cmp byte ptr [rip + {override_state}], {original_behavior}",
+        "je 2f",
+        "cmp byte ptr [rip + {override_state}], {force_true}",
+        "sete al",
+        "ret",
+        "2:",
+        "jmp qword ptr [rip + {original_slot}]",
+        override_state = sym OVERLAYS_ENABLED_OVERRIDE,
+        original_slot = sym OVERLAYS_ENABLED_ORIGINAL,
+        original_behavior = const OVERLAYS_ENABLED_ORIGINAL_BEHAVIOR,
+        force_true = const OVERLAYS_ENABLED_FORCE_TRUE,
+    );
+}
+
 const fn bool_to_u8(value: bool) -> u8 {
     value as u8
 }
@@ -318,6 +357,7 @@ const fn bool_to_u8(value: bool) -> u8 {
 #[cfg(test)]
 mod tests {
     use std::ffi::c_void;
+    use std::ptr;
     use std::sync::atomic::Ordering;
 
     use dwm_lut_payload::{
@@ -373,6 +413,112 @@ mod tests {
         _a4: usize,
     ) -> u8 {
         1
+    }
+
+    #[unsafe(naked)]
+    unsafe extern "system" fn returns_true_overlays_enabled_original(_this: usize) -> u8 {
+        core::arch::naked_asm!("mov al, 1", "ret");
+    }
+
+    #[unsafe(naked)]
+    unsafe extern "system" fn overlays_enabled_register_probe() -> u8 {
+        core::arch::naked_asm!(
+            "sub rsp, 40",
+            "mov rax, 0x1122334455667701",
+            "mov [rsp + 32], rax",
+            "mov rax, 0x1122334455667700",
+            "mov ecx, 0x11111111",
+            "mov edx, 0x22222222",
+            "mov r8d, 0x33333333",
+            "mov r9d, 0x44444444",
+            "mov r10d, 0x55555555",
+            "mov r11d, 0x66666666",
+            "pcmpeqb xmm0, xmm0",
+            "movdqa xmm1, xmm0",
+            "movdqa xmm2, xmm0",
+            "movdqa xmm3, xmm0",
+            "movdqa xmm4, xmm0",
+            "movdqa xmm5, xmm0",
+            "call {detour}",
+            "cmp rax, [rsp + 32]",
+            "jne 3f",
+            "cmp ecx, 0x11111111",
+            "jne 3f",
+            "cmp edx, 0x22222222",
+            "jne 3f",
+            "cmp r8d, 0x33333333",
+            "jne 3f",
+            "cmp r9d, 0x44444444",
+            "jne 3f",
+            "cmp r10d, 0x55555555",
+            "jne 3f",
+            "cmp r11d, 0x66666666",
+            "jne 3f",
+            "pmovmskb eax, xmm0",
+            "cmp eax, 0xffff",
+            "jne 3f",
+            "pmovmskb eax, xmm1",
+            "cmp eax, 0xffff",
+            "jne 3f",
+            "pmovmskb eax, xmm2",
+            "cmp eax, 0xffff",
+            "jne 3f",
+            "pmovmskb eax, xmm3",
+            "cmp eax, 0xffff",
+            "jne 3f",
+            "pmovmskb eax, xmm4",
+            "cmp eax, 0xffff",
+            "jne 3f",
+            "pmovmskb eax, xmm5",
+            "cmp eax, 0xffff",
+            "jne 3f",
+            "mov eax, 1",
+            "add rsp, 40",
+            "ret",
+            "3:",
+            "xor eax, eax",
+            "add rsp, 40",
+            "ret",
+            detour = sym super::overlays_enabled_detour,
+        );
+    }
+
+    #[test]
+    fn overlays_enabled_detour_forwards_or_returns_atomic_override() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        super::OVERLAYS_ENABLED_ORIGINAL.store(
+            returns_true_overlays_enabled_original as *mut c_void,
+            Ordering::Release,
+        );
+        super::set_overlays_enabled_override(None);
+
+        assert_eq!(unsafe { super::overlays_enabled_detour(0) }, 1);
+
+        super::set_overlays_enabled_override(Some(false));
+        assert_eq!(unsafe { super::overlays_enabled_detour(0) }, 0);
+
+        super::set_overlays_enabled_override(Some(true));
+        assert_eq!(unsafe { super::overlays_enabled_detour(0) }, 1);
+
+        super::set_overlays_enabled_override(None);
+        super::OVERLAYS_ENABLED_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    }
+
+    #[test]
+    fn overlays_enabled_override_preserves_original_volatile_registers() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        super::set_overlays_enabled_override(Some(true));
+
+        assert_eq!(unsafe { overlays_enabled_register_probe() }, 1);
+
+        super::OVERLAYS_ENABLED_ORIGINAL.store(
+            returns_true_overlays_enabled_original as *mut c_void,
+            Ordering::Release,
+        );
+        super::set_overlays_enabled_override(None);
+        assert_eq!(unsafe { overlays_enabled_register_probe() }, 1);
+
+        super::OVERLAYS_ENABLED_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
     }
 
     fn test_monitor_identity() -> MonitorIdentity {
