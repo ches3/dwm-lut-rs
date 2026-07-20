@@ -92,10 +92,7 @@ impl HookTarget {
     }
 
     pub const fn is_required_signature(self) -> bool {
-        matches!(
-            self,
-            Self::Present | Self::IsCandidateDirectFlipCompatible | Self::OverlayTestMode
-        )
+        matches!(self, Self::Present | Self::OverlayTestMode)
     }
 }
 
@@ -206,11 +203,7 @@ mod tests {
     fn versioned_profile_entries_build_required_signatures() {
         for entry in VERSIONED_PROFILES {
             let profile = (entry.build)();
-            for target in [
-                HookTarget::Present,
-                HookTarget::IsCandidateDirectFlipCompatible,
-                HookTarget::OverlayTestMode,
-            ] {
+            for target in [HookTarget::Present, HookTarget::OverlayTestMode] {
                 assert!(
                     profile
                         .signatures
