@@ -10,9 +10,15 @@ pub enum FlipGateKind {
     CompSwapChainDirectFlip,
     CompSwapChainIndependentFlip,
     CompVisualPromotion,
+    DirectFlipInfoEnsureIndependentFlip,
+    IsDirectFlipSupportedOnTarget,
+    LegacySwapChainCheckDirectFlip,
+    IsAdvancedDirectFlipCompatible,
 }
 
 impl FlipGateKind {
+    const COUNT: usize = 9;
+
     const fn label(self) -> &'static str {
         match self {
             Self::OverlayContextDirectFlip => "overlay_context_direct_flip",
@@ -20,6 +26,10 @@ impl FlipGateKind {
             Self::CompSwapChainDirectFlip => "comp_swap_chain_direct_flip",
             Self::CompSwapChainIndependentFlip => "comp_swap_chain_independent_flip",
             Self::CompVisualPromotion => "comp_visual_promotion",
+            Self::DirectFlipInfoEnsureIndependentFlip => "direct_flip_info_ensure_independent_flip",
+            Self::IsDirectFlipSupportedOnTarget => "is_direct_flip_supported_on_target",
+            Self::LegacySwapChainCheckDirectFlip => "legacy_swap_chain_check_direct_flip",
+            Self::IsAdvancedDirectFlipCompatible => "is_advanced_direct_flip_compatible",
         }
     }
 
@@ -154,14 +164,22 @@ mod imp {
     static PRESENT_LOCK_MISSES: AtomicU64 = AtomicU64::new(0);
     static PRESENT_LUT_APPLIED: AtomicU64 = AtomicU64::new(0);
     static PRESENT_LUT_NOT_APPLIED: AtomicU64 = AtomicU64::new(0);
-    static FLIP_GATE_CALLS: [AtomicU64; 5] = [
+    static FLIP_GATE_CALLS: [AtomicU64; FlipGateKind::COUNT] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
     ];
-    static FLIP_GATE_DENIED: [AtomicU64; 5] = [
+    static FLIP_GATE_DENIED: [AtomicU64; FlipGateKind::COUNT] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
         AtomicU64::new(0),
@@ -188,7 +206,7 @@ mod imp {
         comp_direct_flip_call_summary_count: u64,
         protected_flip_gate_sequence: u64,
         protected_flip_gate_log_count: u64,
-        protected_flip_gate_stats: [FlipGateSequenceGateStats; 5],
+        protected_flip_gate_stats: [FlipGateSequenceGateStats; FlipGateKind::COUNT],
         protected_present_resource_result_summary_count: u64,
         protected_present_resource_result_last_original_result: Option<i64>,
         protected_lut_resource_candidate_count: u64,
@@ -421,7 +439,8 @@ mod imp {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if state.protected_flip_gate_sequence != sequence_key {
                 state.protected_flip_gate_sequence = sequence_key;
-                state.protected_flip_gate_stats = [FlipGateSequenceGateStats::new(); 5];
+                state.protected_flip_gate_stats =
+                    [FlipGateSequenceGateStats::new(); FlipGateKind::COUNT];
             }
 
             let comp_direct_flip_summary_count = state.comp_direct_flip_call_summary_count + 1;
@@ -468,8 +487,16 @@ mod imp {
         let independent =
             state.protected_flip_gate_stats[FlipGateKind::CompSwapChainIndependentFlip.index()];
         let visual = state.protected_flip_gate_stats[FlipGateKind::CompVisualPromotion.index()];
+        let ensure = state.protected_flip_gate_stats
+            [FlipGateKind::DirectFlipInfoEnsureIndependentFlip.index()];
+        let df_supported =
+            state.protected_flip_gate_stats[FlipGateKind::IsDirectFlipSupportedOnTarget.index()];
+        let legacy =
+            state.protected_flip_gate_stats[FlipGateKind::LegacySwapChainCheckDirectFlip.index()];
+        let advanced =
+            state.protected_flip_gate_stats[FlipGateKind::IsAdvancedDirectFlipCompatible.index()];
         trace_log!(
-            "event=protected_flip_gate_sequence_summary last_present_sequence={:?} last_target_id={:?} last_hardware_protected={:?} last_present_age_ms={:?} overlay_context_direct_flip_calls={} overlay_context_direct_flip_original_true={} overlay_context_direct_flip_returned_true={} overlay_context_direct_flip_denied={} window_context_direct_flip_calls={} window_context_direct_flip_original_true={} window_context_direct_flip_returned_true={} window_context_direct_flip_denied={} comp_swap_chain_direct_flip_calls={} comp_swap_chain_direct_flip_original_true={} comp_swap_chain_direct_flip_returned_true={} comp_swap_chain_direct_flip_denied={} comp_swap_chain_independent_flip_calls={} comp_swap_chain_independent_flip_original_true={} comp_swap_chain_independent_flip_returned_true={} comp_swap_chain_independent_flip_denied={} comp_visual_promotion_calls={} comp_visual_promotion_original_true={} comp_visual_promotion_returned_true={} comp_visual_promotion_denied={}",
+            "event=protected_flip_gate_sequence_summary last_present_sequence={:?} last_target_id={:?} last_hardware_protected={:?} last_present_age_ms={:?} overlay_context_direct_flip_calls={} overlay_context_direct_flip_original_true={} overlay_context_direct_flip_returned_true={} overlay_context_direct_flip_denied={} window_context_direct_flip_calls={} window_context_direct_flip_original_true={} window_context_direct_flip_returned_true={} window_context_direct_flip_denied={} comp_swap_chain_direct_flip_calls={} comp_swap_chain_direct_flip_original_true={} comp_swap_chain_direct_flip_returned_true={} comp_swap_chain_direct_flip_denied={} comp_swap_chain_independent_flip_calls={} comp_swap_chain_independent_flip_original_true={} comp_swap_chain_independent_flip_returned_true={} comp_swap_chain_independent_flip_denied={} comp_visual_promotion_calls={} comp_visual_promotion_original_true={} comp_visual_promotion_returned_true={} comp_visual_promotion_denied={} ensure_independent_flip_calls={} ensure_independent_flip_original_true={} ensure_independent_flip_returned_true={} ensure_independent_flip_denied={} df_supported_calls={} df_supported_original_true={} df_supported_returned_true={} df_supported_denied={} legacy_df_calls={} legacy_df_original_true={} legacy_df_returned_true={} legacy_df_denied={} advanced_df_calls={} advanced_df_original_true={} advanced_df_returned_true={} advanced_df_denied={}",
             last_present_sequence,
             last_target_id,
             last_hardware_protected,
@@ -493,7 +520,23 @@ mod imp {
             visual.calls,
             visual.original_true,
             visual.returned_true,
-            visual.denied
+            visual.denied,
+            ensure.calls,
+            ensure.original_true,
+            ensure.returned_true,
+            ensure.denied,
+            df_supported.calls,
+            df_supported.original_true,
+            df_supported.returned_true,
+            df_supported.denied,
+            legacy.calls,
+            legacy.original_true,
+            legacy.returned_true,
+            legacy.denied,
+            advanced.calls,
+            advanced.original_true,
+            advanced.returned_true,
+            advanced.denied
         );
     }
 
@@ -720,7 +763,7 @@ mod imp {
 
     pub fn flush_summary(reason: &str) {
         trace_log!(
-            "event=route_trace_summary reason={} present_enters={} present_hw_protected={} present_lock_misses={} present_lut_applied={} present_lut_not_applied={} overlay_df_calls={} overlay_df_denied={} window_df_calls={} window_df_denied={} comp_df_calls={} comp_df_denied={} comp_if_calls={} comp_if_denied={} comp_vis_calls={} comp_vis_denied={}",
+            "event=route_trace_summary reason={} present_enters={} present_hw_protected={} present_lock_misses={} present_lut_applied={} present_lut_not_applied={} overlay_df_calls={} overlay_df_denied={} window_df_calls={} window_df_denied={} comp_df_calls={} comp_df_denied={} comp_if_calls={} comp_if_denied={} comp_vis_calls={} comp_vis_denied={} ensure_if_calls={} ensure_if_denied={} df_supported_calls={} df_supported_denied={} legacy_df_calls={} legacy_df_denied={} advanced_df_calls={} advanced_df_denied={}",
             crate::debug_log::quoted(reason),
             PRESENT_ENTERS.load(Ordering::Relaxed),
             PRESENT_HARDWARE_PROTECTED.load(Ordering::Relaxed),
@@ -740,6 +783,22 @@ mod imp {
                 .load(Ordering::Relaxed),
             FLIP_GATE_CALLS[FlipGateKind::CompVisualPromotion.index()].load(Ordering::Relaxed),
             FLIP_GATE_DENIED[FlipGateKind::CompVisualPromotion.index()].load(Ordering::Relaxed),
+            FLIP_GATE_CALLS[FlipGateKind::DirectFlipInfoEnsureIndependentFlip.index()]
+                .load(Ordering::Relaxed),
+            FLIP_GATE_DENIED[FlipGateKind::DirectFlipInfoEnsureIndependentFlip.index()]
+                .load(Ordering::Relaxed),
+            FLIP_GATE_CALLS[FlipGateKind::IsDirectFlipSupportedOnTarget.index()]
+                .load(Ordering::Relaxed),
+            FLIP_GATE_DENIED[FlipGateKind::IsDirectFlipSupportedOnTarget.index()]
+                .load(Ordering::Relaxed),
+            FLIP_GATE_CALLS[FlipGateKind::LegacySwapChainCheckDirectFlip.index()]
+                .load(Ordering::Relaxed),
+            FLIP_GATE_DENIED[FlipGateKind::LegacySwapChainCheckDirectFlip.index()]
+                .load(Ordering::Relaxed),
+            FLIP_GATE_CALLS[FlipGateKind::IsAdvancedDirectFlipCompatible.index()]
+                .load(Ordering::Relaxed),
+            FLIP_GATE_DENIED[FlipGateKind::IsAdvancedDirectFlipCompatible.index()]
+                .load(Ordering::Relaxed),
         );
     }
 
@@ -752,7 +811,7 @@ mod imp {
                 comp_direct_flip_call_summary_count: 0,
                 protected_flip_gate_sequence: 0,
                 protected_flip_gate_log_count: 0,
-                protected_flip_gate_stats: [FlipGateSequenceGateStats::new(); 5],
+                protected_flip_gate_stats: [FlipGateSequenceGateStats::new(); FlipGateKind::COUNT],
                 protected_present_resource_result_summary_count: 0,
                 protected_present_resource_result_last_original_result: None,
                 protected_lut_resource_candidate_count: 0,

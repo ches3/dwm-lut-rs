@@ -572,6 +572,19 @@ pub fn evaluate_comp_visual_candidate_for_promotion(original_candidate: bool) ->
     })
 }
 
+pub fn evaluate_ensure_independent_flip_state() -> Option<i32> {
+    with_state(|state| state.runtime.lut_bypass.ensure_independent_flip_state()).flatten()
+}
+
+pub fn evaluate_direct_flip_support_compatible(original_compatible: bool) -> Option<bool> {
+    with_state(|state| {
+        state
+            .runtime
+            .lut_bypass
+            .direct_flip_support_compatible(original_compatible)
+    })
+}
+
 pub fn evaluate_overlay_test_mode(original_mode: i32) -> Option<i32> {
     with_state(|state| state.runtime.lut_bypass.overlay_test_mode(original_mode))
 }

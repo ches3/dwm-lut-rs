@@ -600,9 +600,24 @@ fn finalize_initial_state(
         .targets
         .iter()
         .find(|target| target.target == crate::profile::HookTarget::OverlayTestMode)
-        .map(|target| target.address);
-    let lut_bypass =
-        LutBypassRuntime::new(!payload.assignments.is_empty(), overlay_test_mode_address);
+        .map(|target| target.address)
+        .filter(|address| *address != 0);
+    let disable_independent_flip_address = resolution
+        .targets
+        .iter()
+        .find(|target| target.target == crate::profile::HookTarget::DisableIndependentFlip)
+        .map(|target| target.address)
+        .filter(|address| *address != 0);
+    debug_log!(
+        "event=disable_independent_flip_address present={} address=0x{:x}",
+        disable_independent_flip_address.is_some(),
+        disable_independent_flip_address.unwrap_or(0)
+    );
+    let lut_bypass = LutBypassRuntime::new(
+        !payload.assignments.is_empty(),
+        overlay_test_mode_address,
+        disable_independent_flip_address,
+    );
 
     Ok(HookState {
         payload,
@@ -639,8 +654,23 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible => {
                 InitializeStatus::CompSwapChainIndependentFlipSignatureNotFound
             }
+            crate::profile::HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
+                InitializeStatus::DirectFlipInfoEnsureIndependentFlipSignatureNotFound
+            }
+            crate::profile::HookTarget::IsDirectFlipSupportedOnTarget => {
+                InitializeStatus::IsDirectFlipSupportedOnTargetSignatureNotFound
+            }
+            crate::profile::HookTarget::LegacySwapChainCheckDirectFlipSupport => {
+                InitializeStatus::LegacySwapChainCheckDirectFlipSignatureNotFound
+            }
+            crate::profile::HookTarget::IsAdvancedDirectFlipCompatible => {
+                InitializeStatus::IsAdvancedDirectFlipCompatibleSignatureNotFound
+            }
             crate::profile::HookTarget::OverlayTestMode => {
                 InitializeStatus::OverlayTestModeNotFound
+            }
+            crate::profile::HookTarget::DisableIndependentFlip => {
+                InitializeStatus::DisableIndependentFlipNotFound
             }
         },
         HookResolveError::SignatureAmbiguous { target, .. } => match target {
@@ -660,8 +690,23 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible => {
                 InitializeStatus::CompSwapChainIndependentFlipSignatureAmbiguous
             }
+            crate::profile::HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
+                InitializeStatus::DirectFlipInfoEnsureIndependentFlipSignatureAmbiguous
+            }
+            crate::profile::HookTarget::IsDirectFlipSupportedOnTarget => {
+                InitializeStatus::IsDirectFlipSupportedOnTargetSignatureAmbiguous
+            }
+            crate::profile::HookTarget::LegacySwapChainCheckDirectFlipSupport => {
+                InitializeStatus::LegacySwapChainCheckDirectFlipSignatureAmbiguous
+            }
+            crate::profile::HookTarget::IsAdvancedDirectFlipCompatible => {
+                InitializeStatus::IsAdvancedDirectFlipCompatibleSignatureAmbiguous
+            }
             crate::profile::HookTarget::OverlayTestMode => {
                 InitializeStatus::OverlayTestModeAmbiguous
+            }
+            crate::profile::HookTarget::DisableIndependentFlip => {
+                InitializeStatus::DisableIndependentFlipAmbiguous
             }
         },
         HookResolveError::ConflictingPrologue { target, .. } => match target {
@@ -681,7 +726,22 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible => {
                 InitializeStatus::CompSwapChainIndependentFlipPrologueConflict
             }
-            crate::profile::HookTarget::OverlayTestMode => InitializeStatus::DwmcoreImageInvalid,
+            crate::profile::HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
+                InitializeStatus::DirectFlipInfoEnsureIndependentFlipPrologueConflict
+            }
+            crate::profile::HookTarget::IsDirectFlipSupportedOnTarget => {
+                InitializeStatus::IsDirectFlipSupportedOnTargetPrologueConflict
+            }
+            crate::profile::HookTarget::LegacySwapChainCheckDirectFlipSupport => {
+                InitializeStatus::LegacySwapChainCheckDirectFlipPrologueConflict
+            }
+            crate::profile::HookTarget::IsAdvancedDirectFlipCompatible => {
+                InitializeStatus::IsAdvancedDirectFlipCompatiblePrologueConflict
+            }
+            crate::profile::HookTarget::OverlayTestMode
+            | crate::profile::HookTarget::DisableIndependentFlip => {
+                InitializeStatus::DwmcoreImageInvalid
+            }
         },
     }
 }
@@ -782,10 +842,10 @@ mod tests {
                 .enumerate()
                 .map(|(index, signature)| ResolvedTarget {
                     target: signature.target,
-                    address: if signature.target == HookTarget::OverlayTestMode {
-                        0
-                    } else {
+                    address: if signature.target.is_function_hook_target() {
                         base_address + 0x1000 + index * 0x100
+                    } else {
+                        0
                     },
                 })
                 .collect(),

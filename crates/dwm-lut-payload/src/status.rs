@@ -39,6 +39,20 @@ pub enum InitializeStatus {
     CompSwapChainIndependentFlipPrologueConflict = 36,
     DwmcoreImageAccessFailed = 37,
     UnsupportedOsBuild = 38,
+    DisableIndependentFlipNotFound = 39,
+    DisableIndependentFlipAmbiguous = 40,
+    DirectFlipInfoEnsureIndependentFlipSignatureNotFound = 41,
+    DirectFlipInfoEnsureIndependentFlipSignatureAmbiguous = 42,
+    DirectFlipInfoEnsureIndependentFlipPrologueConflict = 43,
+    IsDirectFlipSupportedOnTargetSignatureNotFound = 44,
+    IsDirectFlipSupportedOnTargetSignatureAmbiguous = 45,
+    IsDirectFlipSupportedOnTargetPrologueConflict = 46,
+    LegacySwapChainCheckDirectFlipSignatureNotFound = 47,
+    LegacySwapChainCheckDirectFlipSignatureAmbiguous = 48,
+    LegacySwapChainCheckDirectFlipPrologueConflict = 49,
+    IsAdvancedDirectFlipCompatibleSignatureNotFound = 50,
+    IsAdvancedDirectFlipCompatibleSignatureAmbiguous = 51,
+    IsAdvancedDirectFlipCompatiblePrologueConflict = 52,
 }
 
 impl InitializeStatus {
@@ -80,6 +94,20 @@ impl InitializeStatus {
             36 => Self::CompSwapChainIndependentFlipPrologueConflict,
             37 => Self::DwmcoreImageAccessFailed,
             38 => Self::UnsupportedOsBuild,
+            39 => Self::DisableIndependentFlipNotFound,
+            40 => Self::DisableIndependentFlipAmbiguous,
+            41 => Self::DirectFlipInfoEnsureIndependentFlipSignatureNotFound,
+            42 => Self::DirectFlipInfoEnsureIndependentFlipSignatureAmbiguous,
+            43 => Self::DirectFlipInfoEnsureIndependentFlipPrologueConflict,
+            44 => Self::IsDirectFlipSupportedOnTargetSignatureNotFound,
+            45 => Self::IsDirectFlipSupportedOnTargetSignatureAmbiguous,
+            46 => Self::IsDirectFlipSupportedOnTargetPrologueConflict,
+            47 => Self::LegacySwapChainCheckDirectFlipSignatureNotFound,
+            48 => Self::LegacySwapChainCheckDirectFlipSignatureAmbiguous,
+            49 => Self::LegacySwapChainCheckDirectFlipPrologueConflict,
+            50 => Self::IsAdvancedDirectFlipCompatibleSignatureNotFound,
+            51 => Self::IsAdvancedDirectFlipCompatibleSignatureAmbiguous,
+            52 => Self::IsAdvancedDirectFlipCompatiblePrologueConflict,
             _ => return None,
         })
     }
@@ -182,6 +210,63 @@ impl fmt::Display for InitializeStatus {
             Self::UnsupportedOsBuild => {
                 write!(f, "OS build is below the minimum supported hook profile")
             }
+            Self::DisableIndependentFlipNotFound => {
+                write!(f, "DisableIndependentFlip reference was not found")
+            }
+            Self::DisableIndependentFlipAmbiguous => {
+                write!(
+                    f,
+                    "DisableIndependentFlip reference matched multiple locations"
+                )
+            }
+            Self::DirectFlipInfoEnsureIndependentFlipSignatureNotFound => write!(
+                f,
+                "CDirectFlipInfo::EnsureIndependentFlipState signature was not found"
+            ),
+            Self::DirectFlipInfoEnsureIndependentFlipSignatureAmbiguous => write!(
+                f,
+                "CDirectFlipInfo::EnsureIndependentFlipState signature matched multiple locations"
+            ),
+            Self::DirectFlipInfoEnsureIndependentFlipPrologueConflict => write!(
+                f,
+                "CDirectFlipInfo::EnsureIndependentFlipState prologue is modified by a conflicting hook"
+            ),
+            Self::IsDirectFlipSupportedOnTargetSignatureNotFound => write!(
+                f,
+                "COverlayContext::IsDirectFlipSupportedOnTarget signature was not found"
+            ),
+            Self::IsDirectFlipSupportedOnTargetSignatureAmbiguous => write!(
+                f,
+                "COverlayContext::IsDirectFlipSupportedOnTarget signature matched multiple locations"
+            ),
+            Self::IsDirectFlipSupportedOnTargetPrologueConflict => write!(
+                f,
+                "COverlayContext::IsDirectFlipSupportedOnTarget prologue is modified by a conflicting hook"
+            ),
+            Self::LegacySwapChainCheckDirectFlipSignatureNotFound => write!(
+                f,
+                "CLegacySwapChain::CheckDirectFlipSupport signature was not found"
+            ),
+            Self::LegacySwapChainCheckDirectFlipSignatureAmbiguous => write!(
+                f,
+                "CLegacySwapChain::CheckDirectFlipSupport signature matched multiple locations"
+            ),
+            Self::LegacySwapChainCheckDirectFlipPrologueConflict => write!(
+                f,
+                "CLegacySwapChain::CheckDirectFlipSupport prologue is modified by a conflicting hook"
+            ),
+            Self::IsAdvancedDirectFlipCompatibleSignatureNotFound => write!(
+                f,
+                "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible signature was not found"
+            ),
+            Self::IsAdvancedDirectFlipCompatibleSignatureAmbiguous => write!(
+                f,
+                "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible signature matched multiple locations"
+            ),
+            Self::IsAdvancedDirectFlipCompatiblePrologueConflict => write!(
+                f,
+                "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible prologue is modified by a conflicting hook"
+            ),
         }
     }
 }

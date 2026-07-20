@@ -14,7 +14,8 @@ mod state;
 
 pub use bootstrap::HookError;
 pub use lut_bypass::{
-    ContextLutState, LutBypassRuntime, OverlayTestModeControl, PresentHookOutcome,
+    ContextLutState, DisableIndependentFlipPatch, LutBypassRuntime, OverlayTestModeControl,
+    OverlayTestModePatch, PresentHookOutcome,
 };
 pub use lut_pipeline::{
     BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -38,6 +39,7 @@ pub use state::{
     evaluate_comp_swap_chain_direct_flip_compatible,
     evaluate_comp_swap_chain_independent_flip_compatible,
     evaluate_comp_visual_candidate_for_promotion, evaluate_direct_flip_compatible,
+    evaluate_direct_flip_support_compatible, evaluate_ensure_independent_flip_state,
     evaluate_overlay_test_mode, evaluate_window_context_direct_flip_compatible, hook_profile,
     is_initialized, lut_bypass_runtime,
 };
@@ -125,6 +127,20 @@ pub extern "system" fn dwm_lut_comp_visual_candidate_for_promotion(original_cand
     i32::from(
         state::evaluate_comp_visual_candidate_for_promotion(original_candidate)
             .unwrap_or(original_candidate),
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn dwm_lut_ensure_independent_flip_state(original_status: i32) -> i32 {
+    state::evaluate_ensure_independent_flip_state().unwrap_or(original_status)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn dwm_lut_direct_flip_support_compatible(original_compatible: i32) -> i32 {
+    let original_compatible = original_compatible != 0;
+    i32::from(
+        state::evaluate_direct_flip_support_compatible(original_compatible)
+            .unwrap_or(original_compatible),
     )
 }
 

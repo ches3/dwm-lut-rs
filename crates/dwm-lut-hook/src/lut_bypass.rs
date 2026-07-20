@@ -1,4 +1,14 @@
 use std::collections::BTreeMap;
+#[cfg(not(test))]
+use std::ffi::c_void;
+#[cfg(not(test))]
+use std::mem::size_of;
+
+#[cfg(not(test))]
+use windows::Win32::System::Memory::{
+    MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
+    PAGE_GUARD, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
+};
 
 use crate::lut_pipeline::{BackBufferFormat, ClipBox, DirtyRect, LutPipeline, LutRenderPlan};
 use dwm_lut_payload::MonitorIdentity;
@@ -49,15 +59,28 @@ pub struct OverlayTestModePatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisableIndependentFlipPatch {
+    pub address: usize,
+    pub original_value: Option<i32>,
+    pub applied: bool,
+    pub rejected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LutBypassRuntime {
     pub overlay_test_mode_control: OverlayTestModeControl,
     pub overlay_test_mode_patch: Option<OverlayTestModePatch>,
+    pub disable_independent_flip_patch: Option<DisableIndependentFlipPatch>,
     pub has_lut_assignments: bool,
     pub contexts: BTreeMap<usize, ContextLutState>,
 }
 
 impl LutBypassRuntime {
-    pub fn new(has_lut_assignments: bool, overlay_test_mode_address: Option<usize>) -> Self {
+    pub fn new(
+        has_lut_assignments: bool,
+        overlay_test_mode_address: Option<usize>,
+        disable_independent_flip_address: Option<usize>,
+    ) -> Self {
         Self {
             overlay_test_mode_control: OverlayTestModeControl::Unmodified,
             overlay_test_mode_patch: overlay_test_mode_address
@@ -66,6 +89,14 @@ impl LutBypassRuntime {
                     address,
                     original_mode: None,
                     applied: false,
+                }),
+            disable_independent_flip_patch: disable_independent_flip_address
+                .filter(|address| *address != 0)
+                .map(|address| DisableIndependentFlipPatch {
+                    address,
+                    original_value: None,
+                    applied: false,
+                    rejected: false,
                 }),
             has_lut_assignments,
             contexts: BTreeMap::new(),
@@ -139,6 +170,7 @@ impl LutBypassRuntime {
         }
 
         self.set_overlay_test_mode_control(self.overlay_test_mode_control());
+        self.set_disable_independent_flip_enabled(self.has_active_contexts());
 
         PresentHookOutcome {
             plan,
@@ -191,12 +223,29 @@ impl LutBypassRuntime {
         }
     }
 
+    pub fn ensure_independent_flip_state(&self) -> Option<i32> {
+        if self.has_lut_assignments {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    pub fn direct_flip_support_compatible(&self, original_compatible: bool) -> bool {
+        if self.has_lut_assignments {
+            false
+        } else {
+            original_compatible
+        }
+    }
+
     pub fn overlay_test_mode(&self, original_mode: i32) -> i32 {
         self.overlay_test_mode_control().apply(original_mode)
     }
 
     pub fn restore_overlay_test_mode(&mut self) {
         self.set_overlay_test_mode_control(OverlayTestModeControl::Unmodified);
+        self.set_disable_independent_flip_enabled(false);
     }
 
     pub fn reload_for_new_payload(&mut self, has_lut_assignments: bool) {
@@ -229,32 +278,100 @@ impl LutBypassRuntime {
 
         match control {
             OverlayTestModeControl::ForceMode5 if !patch.applied => {
-                let original_mode = unsafe { read_overlay_test_mode(patch.address) };
+                let original_mode = unsafe { read_i32(patch.address) };
                 patch.original_mode = Some(original_mode);
-                unsafe { write_overlay_test_mode(patch.address, 5) };
+                unsafe { write_i32(patch.address, 5) };
                 patch.applied = true;
             }
             OverlayTestModeControl::Unmodified if patch.applied => {
-                unsafe { write_overlay_test_mode(patch.address, patch.original_mode.unwrap_or(0)) };
+                unsafe { write_i32(patch.address, patch.original_mode.unwrap_or(0)) };
                 patch.applied = false;
             }
             _ => {}
+        }
+    }
+
+    fn set_disable_independent_flip_enabled(&mut self, enabled: bool) {
+        let Some(patch) = &mut self.disable_independent_flip_patch else {
+            return;
+        };
+        if patch.rejected {
+            return;
+        }
+
+        if enabled && !patch.applied {
+            if !is_writable_i32(patch.address) {
+                patch.rejected = true;
+                debug_log!(
+                    "event=disable_independent_flip_rejected reason={}",
+                    crate::debug_log::quoted("page_not_writable")
+                );
+                return;
+            }
+            let original_value = unsafe { read_i32(patch.address) };
+            if original_value != 0 && original_value != 1 {
+                patch.rejected = true;
+                debug_log!(
+                    "event=disable_independent_flip_rejected reason={} value={}",
+                    crate::debug_log::quoted("unexpected_value"),
+                    original_value
+                );
+                return;
+            }
+            patch.original_value = Some(original_value);
+            unsafe { write_i32(patch.address, 1) };
+            patch.applied = true;
+            debug_log!("event=disable_independent_flip_applied value=1");
+        } else if !enabled && patch.applied {
+            unsafe { write_i32(patch.address, patch.original_value.unwrap_or(0)) };
+            patch.applied = false;
+            debug_log!("event=disable_independent_flip_restored");
         }
     }
 }
 
 impl Default for LutBypassRuntime {
     fn default() -> Self {
-        Self::new(false, None)
+        Self::new(false, None, None)
     }
 }
 
-unsafe fn read_overlay_test_mode(address: usize) -> i32 {
+unsafe fn read_i32(address: usize) -> i32 {
     unsafe { (address as *const i32).read_volatile() }
 }
 
-unsafe fn write_overlay_test_mode(address: usize, mode: i32) {
-    unsafe { (address as *mut i32).write_volatile(mode) };
+unsafe fn write_i32(address: usize, value: i32) {
+    unsafe { (address as *mut i32).write_volatile(value) };
+}
+
+fn is_writable_i32(address: usize) -> bool {
+    #[cfg(test)]
+    {
+        let _ = address;
+        true
+    }
+    #[cfg(not(test))]
+    {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        let written = unsafe {
+            VirtualQuery(
+                Some(address as *const c_void),
+                &mut info,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if written == 0 || info.State != MEM_COMMIT || (info.Protect.0 & PAGE_GUARD.0) != 0 {
+            return false;
+        }
+        matches!(
+            info.Protect.0
+                & (PAGE_READWRITE.0
+                    | PAGE_WRITECOPY.0
+                    | PAGE_EXECUTE_READWRITE.0
+                    | PAGE_EXECUTE_WRITECOPY.0),
+            value if value != 0
+        )
+    }
 }
 
 #[cfg(test)]
@@ -297,7 +414,7 @@ mod tests {
     #[test]
     fn present_activation_blocks_promotion_for_same_context_only() {
         let pipeline = pipeline_for_single_sdr_monitor();
-        let mut runtime = LutBypassRuntime::new(true, None);
+        let mut runtime = LutBypassRuntime::new(true, None, None);
 
         let outcome = runtime.update_present(
             &pipeline,
@@ -343,7 +460,7 @@ mod tests {
     #[test]
     fn present_deactivation_clears_promotion_block_for_that_context() {
         let pipeline = pipeline_for_single_sdr_monitor();
-        let mut runtime = LutBypassRuntime::new(true, None);
+        let mut runtime = LutBypassRuntime::new(true, None, None);
 
         let _ = runtime.update_present(
             &pipeline,
@@ -386,7 +503,7 @@ mod tests {
     #[test]
     fn plan_keeps_bypass_state_even_when_render_misses_a_frame() {
         let pipeline = pipeline_for_single_sdr_monitor();
-        let mut runtime = LutBypassRuntime::new(true, None);
+        let mut runtime = LutBypassRuntime::new(true, None, None);
 
         let outcome = runtime.update_present(
             &pipeline,
@@ -420,7 +537,7 @@ mod tests {
     #[test]
     fn active_context_persists_until_explicit_deactivation() {
         let pipeline = pipeline_for_single_sdr_monitor();
-        let mut runtime = LutBypassRuntime::new(true, None);
+        let mut runtime = LutBypassRuntime::new(true, None, None);
 
         let _ = runtime.update_present(
             &pipeline,
@@ -450,8 +567,11 @@ mod tests {
     fn overlay_test_mode_global_is_patched_only_while_context_is_active() {
         let pipeline = pipeline_for_single_sdr_monitor();
         let mut overlay_test_mode = 0i32;
-        let mut runtime =
-            LutBypassRuntime::new(true, Some((&mut overlay_test_mode as *mut i32) as usize));
+        let mut runtime = LutBypassRuntime::new(
+            true,
+            Some((&mut overlay_test_mode as *mut i32) as usize),
+            None,
+        );
 
         let _ = runtime.update_present(
             &pipeline,
@@ -487,11 +607,109 @@ mod tests {
     }
 
     #[test]
+    fn ensure_independent_flip_state_blocks_only_with_lut_assignments() {
+        let mut without_assignments = LutBypassRuntime::new(false, None, None);
+        assert_eq!(without_assignments.ensure_independent_flip_state(), None);
+
+        let with_assignments = LutBypassRuntime::new(true, None, None);
+        assert_eq!(with_assignments.ensure_independent_flip_state(), Some(0));
+
+        without_assignments.reload_for_new_payload(true);
+        assert_eq!(without_assignments.ensure_independent_flip_state(), Some(0));
+    }
+
+    #[test]
+    fn disable_independent_flip_is_patched_only_while_context_is_active() {
+        let pipeline = pipeline_for_single_sdr_monitor();
+        let mut disable_independent_flip = 0i32;
+        let mut runtime = LutBypassRuntime::new(
+            true,
+            None,
+            Some((&mut disable_independent_flip as *mut i32) as usize),
+        );
+
+        let _ = runtime.update_present(
+            &pipeline,
+            0x1234,
+            Some(test_identity()),
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            &[],
+        );
+
+        assert_eq!(disable_independent_flip, 1);
+        assert!(
+            runtime
+                .disable_independent_flip_patch
+                .as_ref()
+                .is_some_and(|patch| patch.applied)
+        );
+
+        let _ = runtime.update_present(
+            &pipeline,
+            0x1234,
+            None,
+            ClipBox {
+                left: 100,
+                top: 100,
+                right: 1920,
+                bottom: 1080,
+            },
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            &[],
+        );
+
+        assert_eq!(disable_independent_flip, 0);
+    }
+
+    #[test]
+    fn disable_independent_flip_rejects_unexpected_value() {
+        let pipeline = pipeline_for_single_sdr_monitor();
+        let mut disable_independent_flip = 7i32;
+        let mut runtime = LutBypassRuntime::new(
+            true,
+            None,
+            Some((&mut disable_independent_flip as *mut i32) as usize),
+        );
+
+        let _ = runtime.update_present(
+            &pipeline,
+            0x1234,
+            Some(test_identity()),
+            ClipBox {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            &[],
+        );
+
+        assert_eq!(disable_independent_flip, 7);
+        assert!(
+            runtime
+                .disable_independent_flip_patch
+                .as_ref()
+                .is_some_and(|patch| patch.rejected && !patch.applied)
+        );
+    }
+
+    #[test]
     fn reload_for_new_payload_clears_active_contexts_and_restores_overlay_test_mode() {
         let pipeline = pipeline_for_single_sdr_monitor();
         let mut overlay_test_mode = 0i32;
-        let mut runtime =
-            LutBypassRuntime::new(true, Some((&mut overlay_test_mode as *mut i32) as usize));
+        let mut disable_independent_flip = 0i32;
+        let mut runtime = LutBypassRuntime::new(
+            true,
+            Some((&mut overlay_test_mode as *mut i32) as usize),
+            Some((&mut disable_independent_flip as *mut i32) as usize),
+        );
 
         let _ = runtime.update_present(
             &pipeline,
@@ -509,11 +727,13 @@ mod tests {
 
         assert!(runtime.has_active_contexts());
         assert_eq!(overlay_test_mode, 5);
+        assert_eq!(disable_independent_flip, 1);
 
         runtime.reload_for_new_payload(true);
 
         assert!(!runtime.has_active_contexts());
         assert_eq!(overlay_test_mode, 0);
+        assert_eq!(disable_independent_flip, 0);
         assert_eq!(runtime.overlay_test_mode(0), 0);
     }
 }

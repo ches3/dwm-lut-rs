@@ -49,7 +49,12 @@ pub enum HookTarget {
     CompSwapChainIsCandidateDirectFlipCompatible,
     CompSwapChainIsCandidateIndependentFlipCompatible,
     CompVisualIsCandidateForPromotion,
+    DirectFlipInfoEnsureIndependentFlipState,
+    IsDirectFlipSupportedOnTarget,
+    LegacySwapChainCheckDirectFlipSupport,
+    IsAdvancedDirectFlipCompatible,
     OverlayTestMode,
+    DisableIndependentFlip,
 }
 
 impl HookTarget {
@@ -67,12 +72,23 @@ impl HookTarget {
                 "CCompSwapChain::IsCandidateIndependentFlipCompatible"
             }
             Self::CompVisualIsCandidateForPromotion => "CCompVisual::IsCandidateForPromotion",
+            Self::DirectFlipInfoEnsureIndependentFlipState => {
+                "CDirectFlipInfo::EnsureIndependentFlipState"
+            }
+            Self::IsDirectFlipSupportedOnTarget => "COverlayContext::IsDirectFlipSupportedOnTarget",
+            Self::LegacySwapChainCheckDirectFlipSupport => {
+                "CLegacySwapChain::CheckDirectFlipSupport"
+            }
+            Self::IsAdvancedDirectFlipCompatible => {
+                "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible"
+            }
             Self::OverlayTestMode => "OverlayTestMode",
+            Self::DisableIndependentFlip => "DisableIndependentFlip",
         }
     }
 
     pub const fn is_function_hook_target(self) -> bool {
-        !matches!(self, Self::OverlayTestMode)
+        !matches!(self, Self::OverlayTestMode | Self::DisableIndependentFlip)
     }
 
     pub const fn is_required_signature(self) -> bool {

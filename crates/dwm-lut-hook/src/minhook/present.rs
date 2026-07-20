@@ -716,7 +716,7 @@ mod tests {
                 .enumerate()
                 .map(|(index, signature)| ResolvedTarget {
                     target: signature.target,
-                    address: if signature.target == HookTarget::OverlayTestMode {
+                    address: if !signature.target.is_function_hook_target() {
                         0
                     } else {
                         base_address + 0x1000 + index * 0x100

@@ -11,6 +11,10 @@ use super::present::present_detour;
 
 type ForwardBool1 = unsafe extern "system" fn(usize) -> u8;
 type ForwardBool3 = unsafe extern "system" fn(usize, usize, u8) -> u8;
+type ForwardBoolThis2 = unsafe extern "system" fn(usize, usize, usize) -> u8;
+type ForwardCheckDirectFlipSupport =
+    unsafe extern "system" fn(usize, usize, u32, usize, usize) -> u8;
+type ForwardHresult1 = unsafe extern "system" fn(usize) -> i32;
 type ForwardOverlayDirectFlip =
     unsafe extern "system" fn(usize, usize, usize, usize, u32, u8) -> u8;
 type ForwardCompVisual = unsafe extern "system" fn(usize, usize, usize) -> u8;
@@ -22,6 +26,11 @@ static COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(
 static COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL: AtomicPtr<c_void> =
     AtomicPtr::new(ptr::null_mut());
 static COMP_VISUAL_PROMOTION_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL: AtomicPtr<c_void> =
+    AtomicPtr::new(ptr::null_mut());
+static LEGACY_CHECK_DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static IS_ADVANCED_DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 pub(super) fn present_original() -> *mut c_void {
     PRESENT_ORIGINAL.load(Ordering::Acquire)
@@ -35,6 +44,10 @@ pub(super) fn reset_test_original_slots() {
     COMP_SWAP_CHAIN_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
     COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
     COMP_VISUAL_PROMOTION_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    LEGACY_CHECK_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
+    IS_ADVANCED_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
 }
 
 pub(super) fn original_pointer_for_target(target: HookTarget) -> &'static AtomicPtr<c_void> {
@@ -49,7 +62,15 @@ pub(super) fn original_pointer_for_target(target: HookTarget) -> &'static Atomic
             &COMP_SWAP_CHAIN_INDEPENDENT_FLIP_ORIGINAL
         }
         HookTarget::CompVisualIsCandidateForPromotion => &COMP_VISUAL_PROMOTION_ORIGINAL,
-        HookTarget::OverlayTestMode => unreachable!("OverlayTestMode is not a function hook"),
+        HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
+            &ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL
+        }
+        HookTarget::IsDirectFlipSupportedOnTarget => &IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL,
+        HookTarget::LegacySwapChainCheckDirectFlipSupport => &LEGACY_CHECK_DIRECT_FLIP_ORIGINAL,
+        HookTarget::IsAdvancedDirectFlipCompatible => &IS_ADVANCED_DIRECT_FLIP_ORIGINAL,
+        HookTarget::OverlayTestMode | HookTarget::DisableIndependentFlip => {
+            unreachable!("global patch target is not a function hook")
+        }
     }
 }
 
@@ -73,7 +94,21 @@ pub(super) fn detour_for_target(target: HookTarget) -> *mut c_void {
         HookTarget::CompVisualIsCandidateForPromotion => {
             comp_visual_promotion_detour as *mut c_void
         }
-        HookTarget::OverlayTestMode => unreachable!("OverlayTestMode is not a function hook"),
+        HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
+            ensure_independent_flip_state_detour as *mut c_void
+        }
+        HookTarget::IsDirectFlipSupportedOnTarget => {
+            is_direct_flip_supported_on_target_detour as *mut c_void
+        }
+        HookTarget::LegacySwapChainCheckDirectFlipSupport => {
+            legacy_check_direct_flip_support_detour as *mut c_void
+        }
+        HookTarget::IsAdvancedDirectFlipCompatible => {
+            is_advanced_direct_flip_compatible_detour as *mut c_void
+        }
+        HookTarget::OverlayTestMode | HookTarget::DisableIndependentFlip => {
+            unreachable!("global patch target is not a function hook")
+        }
     }
 }
 
@@ -197,6 +232,85 @@ unsafe extern "system" fn comp_visual_promotion_detour(this: usize, a2: usize, a
     )
 }
 
+unsafe extern "system" fn ensure_independent_flip_state_detour(this: usize) -> i32 {
+    if state::is_runtime_active()
+        && let Some(blocked_status) = state::evaluate_ensure_independent_flip_state()
+    {
+        #[cfg(debug_assertions)]
+        record_flip_gate(
+            FlipGateKind::DirectFlipInfoEnsureIndependentFlip,
+            true,
+            false,
+        );
+        return blocked_status;
+    }
+
+    let original = ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL.load(Ordering::Acquire);
+    if original.is_null() {
+        return 0;
+    }
+
+    let original_fn: ForwardHresult1 = unsafe { std::mem::transmute(original) };
+    let status = unsafe { original_fn(this) };
+    #[cfg(debug_assertions)]
+    record_flip_gate(
+        FlipGateKind::DirectFlipInfoEnsureIndependentFlip,
+        true,
+        true,
+    );
+    status
+}
+
+unsafe extern "system" fn is_direct_flip_supported_on_target_detour(
+    this: usize,
+    a2: usize,
+    a3: usize,
+) -> u8 {
+    let original = IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL.load(Ordering::Acquire);
+    if original.is_null() {
+        return 0;
+    }
+    let original_fn: ForwardBoolThis2 = unsafe { std::mem::transmute(original) };
+    let original = unsafe { original_fn(this, a2, a3) };
+    evaluate_bool_detour(
+        #[cfg(debug_assertions)]
+        FlipGateKind::IsDirectFlipSupportedOnTarget,
+        original,
+        state::evaluate_direct_flip_support_compatible,
+    )
+}
+
+unsafe extern "system" fn legacy_check_direct_flip_support_detour(
+    this: usize,
+    a2: usize,
+    a3: u32,
+    a4: usize,
+    a5: usize,
+) -> u8 {
+    let original = LEGACY_CHECK_DIRECT_FLIP_ORIGINAL.load(Ordering::Acquire);
+    if original.is_null() {
+        return 0;
+    }
+    let original_fn: ForwardCheckDirectFlipSupport = unsafe { std::mem::transmute(original) };
+    let original = unsafe { original_fn(this, a2, a3, a4, a5) };
+    evaluate_bool_detour(
+        #[cfg(debug_assertions)]
+        FlipGateKind::LegacySwapChainCheckDirectFlip,
+        original,
+        state::evaluate_direct_flip_support_compatible,
+    )
+}
+
+unsafe extern "system" fn is_advanced_direct_flip_compatible_detour(this: usize) -> u8 {
+    let original = unsafe { forward_bool1(&IS_ADVANCED_DIRECT_FLIP_ORIGINAL, this) };
+    evaluate_bool_detour(
+        #[cfg(debug_assertions)]
+        FlipGateKind::IsAdvancedDirectFlipCompatible,
+        original,
+        state::evaluate_direct_flip_support_compatible,
+    )
+}
+
 const fn bool_to_u8(value: bool) -> u8 {
     value as u8
 }
@@ -211,7 +325,6 @@ mod tests {
         PayloadLut,
     };
 
-    use crate::profile::HookTarget;
     use crate::profile::VERSIONED_PROFILES;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
@@ -241,6 +354,24 @@ mod tests {
     }
 
     unsafe extern "system" fn returns_true_comp_visual(_a0: usize, _a1: usize, _a2: usize) -> u8 {
+        1
+    }
+
+    unsafe extern "system" fn returns_hresult_fail(_a0: usize) -> i32 {
+        -1
+    }
+
+    unsafe extern "system" fn returns_true_this2(_a0: usize, _a1: usize, _a2: usize) -> u8 {
+        1
+    }
+
+    unsafe extern "system" fn returns_true_check_direct_flip(
+        _a0: usize,
+        _a1: usize,
+        _a2: u32,
+        _a3: usize,
+        _a4: usize,
+    ) -> u8 {
         1
     }
 
@@ -301,10 +432,10 @@ mod tests {
                 .enumerate()
                 .map(|(index, signature)| ResolvedTarget {
                     target: signature.target,
-                    address: if signature.target == HookTarget::OverlayTestMode {
-                        0
-                    } else {
+                    address: if signature.target.is_function_hook_target() {
                         base_address + 0x1000 + index * 0x100
+                    } else {
+                        0
                     },
                 })
                 .collect(),
@@ -379,6 +510,16 @@ mod tests {
             .store(returns_true_1 as *mut c_void, Ordering::Release);
         super::COMP_VISUAL_PROMOTION_ORIGINAL
             .store(returns_true_comp_visual as *mut c_void, Ordering::Release);
+        super::ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL
+            .store(returns_hresult_fail as *mut c_void, Ordering::Release);
+        super::IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL
+            .store(returns_true_this2 as *mut c_void, Ordering::Release);
+        super::LEGACY_CHECK_DIRECT_FLIP_ORIGINAL.store(
+            returns_true_check_direct_flip as *mut c_void,
+            Ordering::Release,
+        );
+        super::IS_ADVANCED_DIRECT_FLIP_ORIGINAL
+            .store(returns_true_1 as *mut c_void, Ordering::Release);
 
         assert_eq!(unsafe { super::window_direct_flip_detour(0, 0, 0) }, 1);
         assert_eq!(
@@ -390,6 +531,22 @@ mod tests {
             1
         );
         assert_eq!(unsafe { super::comp_visual_promotion_detour(0, 0, 0) }, 1);
+        assert_eq!(
+            unsafe { super::ensure_independent_flip_state_detour(0) },
+            -1
+        );
+        assert_eq!(
+            unsafe { super::is_direct_flip_supported_on_target_detour(0, 0, 0) },
+            1
+        );
+        assert_eq!(
+            unsafe { super::legacy_check_direct_flip_support_detour(0, 0, 0, 0, 0) },
+            1
+        );
+        assert_eq!(
+            unsafe { super::is_advanced_direct_flip_compatible_detour(0) },
+            1
+        );
     }
 
     #[test]
@@ -403,6 +560,16 @@ mod tests {
             .store(returns_true_1 as *mut c_void, Ordering::Release);
         super::COMP_VISUAL_PROMOTION_ORIGINAL
             .store(returns_true_comp_visual as *mut c_void, Ordering::Release);
+        super::ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL
+            .store(returns_hresult_fail as *mut c_void, Ordering::Release);
+        super::IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL
+            .store(returns_true_this2 as *mut c_void, Ordering::Release);
+        super::LEGACY_CHECK_DIRECT_FLIP_ORIGINAL.store(
+            returns_true_check_direct_flip as *mut c_void,
+            Ordering::Release,
+        );
+        super::IS_ADVANCED_DIRECT_FLIP_ORIGINAL
+            .store(returns_true_1 as *mut c_void, Ordering::Release);
 
         assert_eq!(unsafe { super::window_direct_flip_detour(0, 0, 0) }, 0);
         assert_eq!(
@@ -414,5 +581,18 @@ mod tests {
             0
         );
         assert_eq!(unsafe { super::comp_visual_promotion_detour(0, 0, 0) }, 0);
+        assert_eq!(unsafe { super::ensure_independent_flip_state_detour(0) }, 0);
+        assert_eq!(
+            unsafe { super::is_direct_flip_supported_on_target_detour(0, 0, 0) },
+            0
+        );
+        assert_eq!(
+            unsafe { super::legacy_check_direct_flip_support_detour(0, 0, 0, 0, 0) },
+            0
+        );
+        assert_eq!(
+            unsafe { super::is_advanced_direct_flip_compatible_detour(0) },
+            0
+        );
     }
 }
