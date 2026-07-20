@@ -30,6 +30,14 @@ pub enum InitializeStatus {
     MinHookInitializeFailed = 27,
     MinHookCreateHookFailed = 28,
     MinHookEnableHookFailed = 29,
+    DwmcoreImageMismatch = 30,
+    PresentPrologueConflict = 31,
+    DirectFlipPrologueConflict = 32,
+    WindowDirectFlipPrologueConflict = 33,
+    CompSwapChainDirectFlipPrologueConflict = 34,
+    CompVisualPromotionPrologueConflict = 35,
+    CompSwapChainIndependentFlipPrologueConflict = 36,
+    DwmcoreImageAccessFailed = 37,
 }
 
 impl InitializeStatus {
@@ -62,6 +70,14 @@ impl InitializeStatus {
             27 => Self::MinHookInitializeFailed,
             28 => Self::MinHookCreateHookFailed,
             29 => Self::MinHookEnableHookFailed,
+            30 => Self::DwmcoreImageMismatch,
+            31 => Self::PresentPrologueConflict,
+            32 => Self::DirectFlipPrologueConflict,
+            33 => Self::WindowDirectFlipPrologueConflict,
+            34 => Self::CompSwapChainDirectFlipPrologueConflict,
+            35 => Self::CompVisualPromotionPrologueConflict,
+            36 => Self::CompSwapChainIndependentFlipPrologueConflict,
+            37 => Self::DwmcoreImageAccessFailed,
             _ => return None,
         })
     }
@@ -132,6 +148,35 @@ impl fmt::Display for InitializeStatus {
             Self::MinHookInitializeFailed => write!(f, "MH_Initialize failed"),
             Self::MinHookCreateHookFailed => write!(f, "MH_CreateHook failed"),
             Self::MinHookEnableHookFailed => write!(f, "MH_EnableHook failed"),
+            Self::DwmcoreImageMismatch => {
+                write!(f, "loaded dwmcore.dll does not match its backing file")
+            }
+            Self::PresentPrologueConflict => {
+                write!(f, "Present prologue is modified by a conflicting hook")
+            }
+            Self::DirectFlipPrologueConflict => write!(
+                f,
+                "IsCandidateDirectFlipCompatible prologue is modified by a conflicting hook"
+            ),
+            Self::WindowDirectFlipPrologueConflict => write!(
+                f,
+                "CWindowContext::IsCandidateDirectFlipCompatible prologue is modified by a conflicting hook"
+            ),
+            Self::CompSwapChainDirectFlipPrologueConflict => write!(
+                f,
+                "CCompSwapChain::IsCandidateDirectFlipCompatible prologue is modified by a conflicting hook"
+            ),
+            Self::CompVisualPromotionPrologueConflict => write!(
+                f,
+                "CCompVisual::IsCandidateForPromotion prologue is modified by a conflicting hook"
+            ),
+            Self::CompSwapChainIndependentFlipPrologueConflict => write!(
+                f,
+                "CCompSwapChain::IsCandidateIndependentFlipCompatible prologue is modified by a conflicting hook"
+            ),
+            Self::DwmcoreImageAccessFailed => {
+                write!(f, "dwmcore.dll backing image could not be accessed")
+            }
         }
     }
 }

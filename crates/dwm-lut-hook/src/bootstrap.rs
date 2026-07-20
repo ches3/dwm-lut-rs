@@ -619,6 +619,8 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
     match error {
         HookResolveError::ModuleNotLoaded { .. } => InitializeStatus::DwmcoreModuleNotLoaded,
         HookResolveError::InvalidModuleImage { .. } => InitializeStatus::DwmcoreImageInvalid,
+        HookResolveError::ModuleAccessFailed { .. } => InitializeStatus::DwmcoreImageAccessFailed,
+        HookResolveError::ModuleImageMismatch { .. } => InitializeStatus::DwmcoreImageMismatch,
         HookResolveError::SignatureNotFound { target, .. } => match target {
             crate::profile::HookTarget::Present => InitializeStatus::PresentSignatureNotFound,
             crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
@@ -660,6 +662,25 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
             crate::profile::HookTarget::OverlayTestMode => {
                 InitializeStatus::OverlayTestModeAmbiguous
             }
+        },
+        HookResolveError::ConflictingPrologue { target, .. } => match target {
+            crate::profile::HookTarget::Present => InitializeStatus::PresentPrologueConflict,
+            crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
+                InitializeStatus::DirectFlipPrologueConflict
+            }
+            crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible => {
+                InitializeStatus::WindowDirectFlipPrologueConflict
+            }
+            crate::profile::HookTarget::CompSwapChainIsCandidateDirectFlipCompatible => {
+                InitializeStatus::CompSwapChainDirectFlipPrologueConflict
+            }
+            crate::profile::HookTarget::CompVisualIsCandidateForPromotion => {
+                InitializeStatus::CompVisualPromotionPrologueConflict
+            }
+            crate::profile::HookTarget::CompSwapChainIsCandidateIndependentFlipCompatible => {
+                InitializeStatus::CompSwapChainIndependentFlipPrologueConflict
+            }
+            crate::profile::HookTarget::OverlayTestMode => InitializeStatus::DwmcoreImageInvalid,
         },
     }
 }
@@ -713,7 +734,9 @@ mod tests {
     };
 
     use crate::profile::{BuildProfile, HookProfile, HookTarget};
-    use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
+    use crate::resolver::{
+        HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport,
+    };
     use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK};
 
     fn test_payload() -> HookPayload {
@@ -763,6 +786,52 @@ mod tests {
                 .collect(),
             skipped_signatures: Vec::new(),
         }
+    }
+
+    #[test]
+    fn prologue_conflict_stops_before_minhook_registration() {
+        crate::minhook::reset_test_minhook_behavior(None, None, None, None);
+
+        let error = super::prepare_initial_state_from_payload_with_profile_resolver(
+            BuildProfile::Windows11_25H2,
+            test_payload(),
+            |_| {
+                Err(HookResolveError::ConflictingPrologue {
+                    target: HookTarget::Present,
+                    capture_key: "present_25h2",
+                    rva: 0x1000,
+                    mismatch_offset: 0,
+                    expected: 0x40,
+                    actual: 0xE9,
+                })
+            },
+        )
+        .expect_err("prologue conflict should stop initialization");
+
+        assert!(matches!(
+            error,
+            super::HookError::Resolve(HookResolveError::ConflictingPrologue {
+                target: HookTarget::Present,
+                ..
+            })
+        ));
+        let calls = crate::minhook::test_minhook_call_counts();
+        assert_eq!(calls.create_calls, 0);
+        assert_eq!(calls.enable_calls, 0);
+    }
+
+    #[test]
+    fn module_access_failure_has_distinct_initialize_status() {
+        let status = super::map_resolve_status(HookResolveError::ModuleAccessFailed {
+            module_name: "dwmcore.dll",
+            operation: "map image view",
+            error_code: 5,
+        });
+
+        assert_eq!(
+            status,
+            dwm_lut_payload::InitializeStatus::DwmcoreImageAccessFailed
+        );
     }
 
     #[test]

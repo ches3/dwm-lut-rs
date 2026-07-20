@@ -1,8 +1,18 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs::File;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::AsRawHandle;
+use std::path::{Path, PathBuf};
+use std::ptr;
 
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
+use windows_sys::Win32::System::Memory::{
+    CreateFileMappingW, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READONLY,
+    SEC_IMAGE_NO_EXECUTE, UnmapViewOfFile,
+};
 
 use crate::profile::{AobToken, HookProfile, HookSignature, HookTarget, SignatureLocator};
 
@@ -10,6 +20,84 @@ const IMAGE_DOS_SIGNATURE: u16 = 0x5A4D;
 const IMAGE_NT_SIGNATURE: u32 = 0x0000_4550;
 const IMAGE_OPTIONAL_HDR32_MAGIC: u16 = 0x010B;
 const IMAGE_OPTIONAL_HDR64_MAGIC: u16 = 0x020B;
+const MAX_MODULE_PATH_CHARS: usize = 32_768;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageIdentity {
+    timestamp: u32,
+    size: usize,
+}
+
+struct MappedImage {
+    mapping: HANDLE,
+    view: MEMORY_MAPPED_VIEW_ADDRESS,
+    size: usize,
+}
+
+impl MappedImage {
+    fn open(path: &Path, module_name: &'static str) -> Result<Self, HookResolveError> {
+        let file = File::open(path).map_err(|error| HookResolveError::ModuleAccessFailed {
+            module_name,
+            operation: "open backing file",
+            error_code: error.raw_os_error().unwrap_or_default(),
+        })?;
+        let mapping = unsafe {
+            CreateFileMappingW(
+                file.as_raw_handle() as HANDLE,
+                ptr::null(),
+                PAGE_READONLY | SEC_IMAGE_NO_EXECUTE,
+                0,
+                0,
+                ptr::null(),
+            )
+        };
+        if mapping.is_null() {
+            return Err(last_module_access_error(
+                module_name,
+                "create image mapping",
+            ));
+        }
+
+        let view = unsafe { MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0) };
+        if view.Value.is_null() {
+            let error = last_module_access_error(module_name, "map image view");
+            unsafe {
+                CloseHandle(mapping);
+            }
+            return Err(error);
+        }
+
+        let identity = match image_identity(view.Value.cast(), module_name) {
+            Ok(identity) => identity,
+            Err(error) => {
+                unsafe {
+                    UnmapViewOfFile(view);
+                    CloseHandle(mapping);
+                }
+                return Err(error);
+            }
+        };
+
+        Ok(Self {
+            mapping,
+            view,
+            size: identity.size,
+        })
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.view.Value.cast(), self.size) }
+    }
+}
+
+impl Drop for MappedImage {
+    fn drop(&mut self) {
+        unsafe {
+            UnmapViewOfFile(self.view);
+            CloseHandle(self.mapping);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadedModule {
@@ -54,6 +142,18 @@ pub enum HookResolveError {
         module_name: &'static str,
         detail: &'static str,
     },
+    ModuleAccessFailed {
+        module_name: &'static str,
+        operation: &'static str,
+        error_code: i32,
+    },
+    ModuleImageMismatch {
+        module_name: &'static str,
+        live_timestamp: u32,
+        backing_timestamp: u32,
+        live_size: usize,
+        backing_size: usize,
+    },
     SignatureNotFound {
         target: HookTarget,
         capture_key: &'static str,
@@ -62,6 +162,14 @@ pub enum HookResolveError {
         target: HookTarget,
         capture_key: &'static str,
         matches: usize,
+    },
+    ConflictingPrologue {
+        target: HookTarget,
+        capture_key: &'static str,
+        rva: usize,
+        mismatch_offset: usize,
+        expected: u8,
+        actual: u8,
     },
 }
 
@@ -75,6 +183,24 @@ impl fmt::Display for HookResolveError {
                 module_name,
                 detail,
             } => write!(f, "module {module_name} is not a valid PE image: {detail}"),
+            Self::ModuleAccessFailed {
+                module_name,
+                operation,
+                error_code,
+            } => write!(
+                f,
+                "module {module_name} backing image {operation} failed with OS error {error_code}"
+            ),
+            Self::ModuleImageMismatch {
+                module_name,
+                live_timestamp,
+                backing_timestamp,
+                live_size,
+                backing_size,
+            } => write!(
+                f,
+                "module {module_name} live image does not match its backing file: timestamp {live_timestamp:#x}/{backing_timestamp:#x}, size {live_size:#x}/{backing_size:#x}"
+            ),
             Self::SignatureNotFound {
                 target,
                 capture_key,
@@ -92,6 +218,18 @@ impl fmt::Display for HookResolveError {
                 "signature {} ({capture_key}) matched {matches} locations",
                 target.label()
             ),
+            Self::ConflictingPrologue {
+                target,
+                capture_key,
+                rva,
+                mismatch_offset,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "conflicting modification at {} ({capture_key}) prologue RVA {rva:#x}+{mismatch_offset:#x}: expected {expected:#04x}, found {actual:#04x}",
+                target.label()
+            ),
         }
     }
 }
@@ -102,9 +240,35 @@ pub fn resolve_profile(
     profile: &HookProfile,
 ) -> Result<SignatureResolutionReport, HookResolveError> {
     let module = load_module(profile.module_name)?;
-    let image =
+    let live_image =
         unsafe { std::slice::from_raw_parts(module.base_address as *const u8, module.size) };
-    resolve_profile_from_image(profile, module, image)
+    let live_identity = image_identity(module.base_address as *const u8, module.module_name)?;
+    let module_path = module_path(module)?;
+    let backing_image = MappedImage::open(&module_path, module.module_name)?;
+    let backing_identity = image_identity(backing_image.view.Value.cast(), module.module_name)?;
+
+    if live_identity != backing_identity {
+        return Err(HookResolveError::ModuleImageMismatch {
+            module_name: module.module_name,
+            live_timestamp: live_identity.timestamp,
+            backing_timestamp: backing_identity.timestamp,
+            live_size: live_identity.size,
+            backing_size: backing_identity.size,
+        });
+    }
+
+    resolve_profile_from_clean_image(profile, module, live_image, backing_image.as_slice())
+}
+
+fn resolve_profile_from_clean_image(
+    profile: &HookProfile,
+    module: LoadedModule,
+    live_image: &[u8],
+    clean_image: &[u8],
+) -> Result<SignatureResolutionReport, HookResolveError> {
+    let resolution = resolve_profile_from_image(profile, module, clean_image)?;
+    validate_live_prologues(profile, &resolution, live_image)?;
+    Ok(resolution)
 }
 
 pub(crate) fn resolve_profile_from_image(
@@ -155,6 +319,71 @@ fn skipped_signature_from_error(
         }),
         error => Err(error),
     }
+}
+
+fn validate_live_prologues(
+    profile: &HookProfile,
+    resolution: &SignatureResolutionReport,
+    live_image: &[u8],
+) -> Result<(), HookResolveError> {
+    for target in resolution
+        .targets
+        .iter()
+        .filter(|target| target.target.is_function_hook_target())
+    {
+        let signature = profile
+            .signatures
+            .iter()
+            .find(|signature| {
+                signature.target == target.target
+                    && signature.locator.capture_key() == target.capture_key
+            })
+            .ok_or(HookResolveError::InvalidModuleImage {
+                module_name: resolution.module.module_name,
+                detail: "resolved target had no matching profile signature",
+            })?;
+        let SignatureLocator::Aob { tokens, .. } = signature.locator else {
+            return Err(HookResolveError::InvalidModuleImage {
+                module_name: resolution.module.module_name,
+                detail: "function hook target did not use an AOB locator",
+            });
+        };
+        let rva = target
+            .address
+            .checked_sub(resolution.module.base_address)
+            .ok_or(HookResolveError::InvalidModuleImage {
+                module_name: resolution.module.module_name,
+                detail: "resolved target address was below the live module base",
+            })?;
+        let prologue = live_image
+            .get(rva..rva.saturating_add(tokens.len()))
+            .ok_or(HookResolveError::InvalidModuleImage {
+                module_name: resolution.module.module_name,
+                detail: "resolved target prologue was outside the live image",
+            })?;
+
+        if let Some((mismatch_offset, expected, actual)) =
+            tokens.iter().zip(prologue).enumerate().find_map(
+                |(offset, (token, actual))| match token {
+                    AobToken::Exact(expected) if expected != actual => {
+                        Some((offset, *expected, *actual))
+                    }
+                    _ => None,
+                },
+            )
+        {
+            return Err(HookResolveError::ConflictingPrologue {
+                target: target.target,
+                capture_key: target.capture_key,
+                rva,
+                mismatch_offset,
+                expected,
+                actual,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_signature(
@@ -236,7 +465,7 @@ fn load_module(module_name: &'static str) -> Result<LoadedModule, HookResolveErr
     }
 
     let base_address = handle as usize;
-    let size = module_image_size(base_address as *const u8, module_name)?;
+    let size = image_identity(base_address as *const u8, module_name)?.size;
 
     Ok(LoadedModule {
         module_name,
@@ -245,14 +474,54 @@ fn load_module(module_name: &'static str) -> Result<LoadedModule, HookResolveErr
     })
 }
 
+fn module_path(module: LoadedModule) -> Result<PathBuf, HookResolveError> {
+    let mut buffer = vec![0u16; MAX_MODULE_PATH_CHARS];
+    let len = unsafe {
+        GetModuleFileNameW(
+            module.base_address as _,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+        )
+    } as usize;
+    if len == 0 {
+        return Err(last_module_access_error(
+            module.module_name,
+            "path resolution",
+        ));
+    }
+    if len == buffer.len() {
+        return Err(HookResolveError::ModuleAccessFailed {
+            module_name: module.module_name,
+            operation: "path resolution",
+            error_code: 122,
+        });
+    }
+
+    buffer.truncate(len);
+    Ok(PathBuf::from(OsString::from_wide(&buffer)))
+}
+
+fn last_module_access_error(
+    module_name: &'static str,
+    operation: &'static str,
+) -> HookResolveError {
+    HookResolveError::ModuleAccessFailed {
+        module_name,
+        operation,
+        error_code: std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or_default(),
+    }
+}
+
 fn wide_null(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain([0]).collect()
 }
 
-fn module_image_size(
+fn image_identity(
     base_address: *const u8,
     module_name: &'static str,
-) -> Result<usize, HookResolveError> {
+) -> Result<ImageIdentity, HookResolveError> {
     if base_address.is_null() {
         return Err(HookResolveError::InvalidModuleImage {
             module_name,
@@ -277,6 +546,8 @@ fn module_image_size(
         });
     }
 
+    let timestamp = unsafe { read_u32(base_address, pe_offset + 0x08) };
+
     let optional_header_offset = pe_offset + 0x18;
     let optional_magic = unsafe { read_u16(base_address, optional_header_offset) };
     if optional_magic != IMAGE_OPTIONAL_HDR32_MAGIC && optional_magic != IMAGE_OPTIONAL_HDR64_MAGIC
@@ -295,7 +566,10 @@ fn module_image_size(
         });
     }
 
-    Ok(size_of_image)
+    Ok(ImageIdentity {
+        timestamp,
+        size: size_of_image,
+    })
 }
 
 fn find_signature_offsets(image: &[u8], tokens: &[AobToken]) -> Vec<usize> {
@@ -353,9 +627,12 @@ unsafe fn read_u32(base: *const u8, offset: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        HookResolveError, LoadedModule, find_signature_offsets, resolve_profile_from_image,
+        HookResolveError, LoadedModule, find_signature_offsets, resolve_profile_from_clean_image,
+        resolve_profile_from_image,
     };
-    use crate::profile::{AobToken, BuildProfile, HookProfile};
+    use crate::profile::{
+        AobToken, BuildProfile, HookProfile, HookSignature, HookTarget, SignatureLocator,
+    };
 
     #[test]
     fn aob_scan_honors_wildcards() {
@@ -368,6 +645,72 @@ mod tests {
         let image = [0x90, 0x40, 0x55, 0xAA, 0x57, 0x90];
 
         assert_eq!(find_signature_offsets(&image, &tokens), vec![1]);
+    }
+
+    #[test]
+    fn clean_image_resolution_uses_live_address_after_prologue_validation() {
+        let clean_image = [0x90, 0x40, 0x55, 0xAA, 0x57, 0x90];
+        let live_image = clean_image;
+        let module = LoadedModule {
+            module_name: "dwmcore.dll",
+            base_address: 0x1000_0000,
+            size: live_image.len(),
+        };
+        let profile = prologue_test_profile();
+
+        let report = resolve_profile_from_clean_image(&profile, module, &live_image, &clean_image)
+            .expect("matching live prologue should resolve");
+
+        assert_eq!(report.targets[0].address, module.base_address + 1);
+    }
+
+    #[test]
+    fn clean_image_resolution_reports_modified_live_prologue() {
+        let clean_image = [0x90, 0x40, 0x55, 0xAA, 0x57, 0x90];
+        let live_image = [0x90, 0xE9, 0x11, 0x22, 0x33, 0x44];
+        let module = LoadedModule {
+            module_name: "dwmcore.dll",
+            base_address: 0x1000_0000,
+            size: live_image.len(),
+        };
+        let profile = prologue_test_profile();
+
+        let error = resolve_profile_from_clean_image(&profile, module, &live_image, &clean_image)
+            .expect_err("modified live prologue must be rejected");
+
+        assert_eq!(
+            error,
+            HookResolveError::ConflictingPrologue {
+                target: HookTarget::Present,
+                capture_key: "test_present",
+                rva: 1,
+                mismatch_offset: 0,
+                expected: 0x40,
+                actual: 0xE9,
+            }
+        );
+    }
+
+    fn prologue_test_profile() -> HookProfile {
+        HookProfile {
+            build: BuildProfile::Windows11_25H2,
+            module_name: "dwmcore.dll",
+            signatures: vec![HookSignature {
+                target: HookTarget::Present,
+                locator: SignatureLocator::Aob {
+                    module_name: "dwmcore.dll",
+                    capture_key: "test_present",
+                    tokens: &[
+                        AobToken::Exact(0x40),
+                        AobToken::Exact(0x55),
+                        AobToken::Wildcard,
+                        AobToken::Exact(0x57),
+                    ],
+                },
+                note: "",
+            }],
+            hypotheses: HookProfile::for_build(BuildProfile::Windows11_25H2).hypotheses,
+        }
     }
 
     #[test]
