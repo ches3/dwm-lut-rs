@@ -208,6 +208,13 @@ pub(crate) fn enable_registered_hooks(runtime: &MinHookRuntime) -> Result<(), Mi
     enable_created_hooks_with_apis(runtime.apis)
 }
 
+pub(crate) fn disable_registered_hooks(
+    runtime: &MinHookRuntime,
+    hooks: &[RegisteredHook],
+) -> Vec<MinHookCleanupFailure> {
+    disable_registered_hooks_with_apis(hooks, runtime.apis)
+}
+
 #[cfg(test)]
 pub(crate) fn reset_test_original_slots() {
     detours::reset_test_original_slots();
@@ -307,17 +314,7 @@ pub(crate) fn unregister_registered_hooks_with_apis(
     hooks: &[RegisteredHook],
     apis: MinHookApis,
 ) -> Vec<MinHookCleanupFailure> {
-    let mut failures = Vec::new();
-    for hook in hooks.iter().rev() {
-        let status = unsafe { (apis.disable_hook)(hook.target_address as *mut c_void) };
-        if status != MH_OK {
-            failures.push(MinHookCleanupFailure {
-                operation: MinHookCleanupOperation::DisableHook,
-                target: hook.target,
-                status,
-            });
-        }
-    }
+    let mut failures = disable_registered_hooks_with_apis(hooks, apis);
 
     for hook in hooks.iter().rev() {
         let status = unsafe { (apis.remove_hook)(hook.target_address as *mut c_void) };
@@ -332,6 +329,24 @@ pub(crate) fn unregister_registered_hooks_with_apis(
         original_pointer_for_target(hook.target).store(ptr::null_mut(), Ordering::Release);
     }
 
+    failures
+}
+
+fn disable_registered_hooks_with_apis(
+    hooks: &[RegisteredHook],
+    apis: MinHookApis,
+) -> Vec<MinHookCleanupFailure> {
+    let mut failures = Vec::new();
+    for hook in hooks.iter().rev() {
+        let status = unsafe { (apis.disable_hook)(hook.target_address as *mut c_void) };
+        if status != MH_OK {
+            failures.push(MinHookCleanupFailure {
+                operation: MinHookCleanupOperation::DisableHook,
+                target: hook.target,
+                status,
+            });
+        }
+    }
     failures
 }
 
@@ -393,12 +408,12 @@ struct TestMinHookBehavior {
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TestMinHookCallCounts {
-    uninitialize_calls: usize,
-    create_calls: usize,
-    enable_calls: usize,
-    disable_calls: usize,
-    remove_calls: usize,
+pub(crate) struct TestMinHookCallCounts {
+    pub(crate) uninitialize_calls: usize,
+    pub(crate) create_calls: usize,
+    pub(crate) enable_calls: usize,
+    pub(crate) disable_calls: usize,
+    pub(crate) remove_calls: usize,
 }
 
 #[cfg(test)]
@@ -438,7 +453,7 @@ fn set_test_minhook_cleanup_failures(
 }
 
 #[cfg(test)]
-fn test_minhook_call_counts() -> TestMinHookCallCounts {
+pub(crate) fn test_minhook_call_counts() -> TestMinHookCallCounts {
     TEST_MINHOOK_BEHAVIOR.with(|behavior| {
         let behavior = behavior.borrow();
         TestMinHookCallCounts {
@@ -564,8 +579,8 @@ mod tests {
 
     use super::{
         MinHookCleanupOperation, MinHookOperation, MinHookRuntime, MinHookState, detours,
-        enable_registered_hooks, register_plan, register_plan_with_apis, test_minhook_apis,
-        test_minhook_call_counts, unregister_registered_hooks,
+        disable_registered_hooks, enable_registered_hooks, register_plan, register_plan_with_apis,
+        test_minhook_apis, test_minhook_call_counts, unregister_registered_hooks,
         unregister_registered_hooks_with_apis,
     };
 
@@ -823,6 +838,43 @@ mod tests {
                 .load(Ordering::Acquire)
                 .is_null()
         );
+    }
+
+    #[test]
+    fn disable_keeps_registered_hooks_and_original_slots() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        reset_controlled_behavior(None, None);
+        let plan = plan_with_targets(&[
+            (HookTarget::Present, 0x1800_1000),
+            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
+        ]);
+        let apis = test_minhook_apis();
+        let registered = register_plan_with_apis(&plan, apis).expect("registration should succeed");
+        let runtime = MinHookRuntime {
+            state: MinHookState {
+                owns_initialization: true,
+            },
+            apis,
+        };
+
+        let cleanup_failures = disable_registered_hooks(&runtime, &registered);
+
+        let calls = test_minhook_call_counts();
+        assert!(cleanup_failures.is_empty());
+        assert_eq!(calls.disable_calls, 2);
+        assert_eq!(calls.remove_calls, 0);
+        assert_eq!(calls.uninitialize_calls, 0);
+        assert_eq!(
+            detours::original_pointer_for_target(HookTarget::Present).load(Ordering::Acquire)
+                as usize,
+            0x1800_1000
+        );
+        assert_eq!(
+            detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
+                .load(Ordering::Acquire) as usize,
+            0x1800_2000
+        );
+        detours::reset_test_original_slots();
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::lut_pipeline::LutPipeline;
 use crate::minhook::{
-    MinHookCleanupOperation, MinHookError, enable_registered_hooks, register_plan,
+    MinHookError, disable_registered_hooks, enable_registered_hooks, register_plan,
     unregister_registered_hooks,
 };
 use crate::profile::{BuildProfile, HookProfile};
@@ -23,8 +23,9 @@ use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profi
 use crate::state::{
     HookRegistrationPlan, HookRuntime, HookState, ReplaceAssignmentsStart,
     ReplacePayloadPipelineError, ShutdownStart, begin_replace_assignments, begin_shutdown,
-    clear_state_after_shutdown, finish_failed_shutdown, finish_replace_assignments, install_state,
-    is_initialized, lock_present_runtime, minhook_cleanup_plan, replace_payload_pipeline,
+    can_initialize, clear_state_after_shutdown, finish_reactivation, finish_replace_assignments,
+    finish_shutdown, has_retained_state, install_state, lock_present_runtime, minhook_cleanup_plan,
+    reactivate_retained_state, replace_payload_pipeline, retain_state_after_shutdown,
 };
 
 #[cfg(not(test))]
@@ -52,7 +53,7 @@ impl Drop for ReplaceAssignmentsGuard {
 }
 
 fn enter_initialization() -> Result<InitializationGuard, HookError> {
-    if is_initialized() {
+    if !can_initialize() {
         return Err(HookError::AlreadyInitialized);
     }
 
@@ -60,7 +61,7 @@ fn enter_initialization() -> Result<InitializationGuard, HookError> {
         return Err(HookError::AlreadyInitialized);
     }
 
-    if is_initialized() {
+    if !can_initialize() {
         clear_initialization_in_progress();
         return Err(HookError::AlreadyInitialized);
     }
@@ -209,6 +210,9 @@ pub(crate) fn initialize_with_resolution(
     resolution: SignatureResolutionReport,
 ) -> Result<(), HookError> {
     let _guard = enter_initialization()?;
+    if has_retained_state() {
+        return reactivate_from_payload(payload);
+    }
     let state = prepare_initial_state_with_resolution(build_profile, payload, resolution)?;
     install_prepared_state(state)
 }
@@ -302,7 +306,7 @@ pub(crate) fn ffi_shutdown() -> u32 {
             renderer_device_count
         );
         crate::desktop_redraw::request_desktop_redraw();
-        unregister_registered_hooks(&minhook, &hooks)
+        disable_registered_hooks(&minhook, &hooks)
     };
     #[cfg(debug_assertions)]
     {
@@ -316,11 +320,9 @@ pub(crate) fn ffi_shutdown() -> u32 {
         }
     }
 
-    if cleanup_failures
-        .iter()
-        .any(|failure| failure.operation == MinHookCleanupOperation::RemoveHook)
-    {
-        finish_failed_shutdown();
+    retain_state_after_shutdown();
+    finish_shutdown();
+    if !cleanup_failures.is_empty() {
         debug_log!(
             "event=shutdown_finished status={} cleanup_failure_count={}",
             ShutdownStatus::MinHookCleanupFailed as u32,
@@ -328,7 +330,6 @@ pub(crate) fn ffi_shutdown() -> u32 {
         );
         ShutdownStatus::MinHookCleanupFailed as u32
     } else {
-        clear_state_after_shutdown();
         debug_log!(
             "event=shutdown_finished status={} cleanup_failure_count={}",
             ShutdownStatus::Success as u32,
@@ -451,8 +452,36 @@ fn initialize_from_payload(
 ) -> Result<(), HookError> {
     let _guard = enter_initialization()?;
 
+    if has_retained_state() {
+        return reactivate_from_payload(payload);
+    }
+
     let state = prepare_initial_state_from_payload(build_profile, payload)?;
     install_prepared_state(state)
+}
+
+fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
+    debug_log!(
+        "event=payload_decoded assignment_count={}",
+        payload.assignments.len()
+    );
+
+    let lut_pipeline = LutPipeline::from_payload(&payload);
+    debug_log!(
+        "event=lut_pipeline_prepared lut_count={}",
+        lut_pipeline.luts.len()
+    );
+
+    let Some((minhook, _hooks)) = reactivate_retained_state(payload, lut_pipeline) else {
+        return Err(HookError::AlreadyInitialized);
+    };
+    if let Err(error) = enable_registered_hooks(&minhook) {
+        retain_state_after_shutdown();
+        return Err(HookError::MinHook(error));
+    }
+    finish_reactivation();
+    debug_log!("event=hooks_reenabled");
+    Ok(())
 }
 
 fn install_prepared_state(state: HookState) -> Result<(), HookError> {
@@ -467,8 +496,9 @@ fn install_prepared_state(state: HookState) -> Result<(), HookError> {
     })?;
 
     if let Err(error) = enable_registered_hooks(&minhook) {
-        clear_state_after_shutdown();
-        unregister_registered_hooks(&minhook, &hooks);
+        finish_shutdown();
+        disable_registered_hooks(&minhook, &hooks);
+        retain_state_after_shutdown();
         return Err(HookError::MinHook(error));
     }
 
@@ -672,5 +702,123 @@ fn map_payload_error_to_replace_assignments_status(
         }
         PayloadError::NoAssignments => ReplaceAssignmentsStatus::PayloadHasNoAssignments,
         _ => ReplaceAssignmentsStatus::PayloadDecodeFailed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dwm_lut_payload::{
+        AdapterLuid, ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadAssignment,
+        PayloadLut, ShutdownStatus,
+    };
+
+    use crate::profile::{BuildProfile, HookProfile, HookTarget};
+    use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
+    use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK};
+
+    fn test_payload() -> HookPayload {
+        HookPayload {
+            assignments: vec![PayloadAssignment {
+                target: MonitorTarget {
+                    identity: MonitorIdentity {
+                        adapter_luid: AdapterLuid {
+                            high_part: 0,
+                            low_part: 1,
+                        },
+                        target_id: 2,
+                    },
+                    color_mode: ColorMode::Sdr,
+                },
+                lut: PayloadLut {
+                    size: 2,
+                    domain_min: [0.0, 0.0, 0.0],
+                    domain_max: [1.0, 1.0, 1.0],
+                    values: vec![[0.0, 0.0, 0.0]; 8],
+                },
+            }],
+        }
+    }
+
+    fn synthetic_resolution(profile: &HookProfile) -> SignatureResolutionReport {
+        let base_address = 0x1800_0000usize;
+        SignatureResolutionReport {
+            module: LoadedModule {
+                module_name: profile.module_name,
+                base_address,
+                size: 0x20_0000,
+            },
+            targets: profile
+                .signatures
+                .iter()
+                .enumerate()
+                .map(|(index, signature)| ResolvedTarget {
+                    target: signature.target,
+                    capture_key: signature.locator.capture_key(),
+                    address: if signature.target == HookTarget::OverlayTestMode {
+                        0
+                    } else {
+                        base_address + 0x1000 + index * 0x100
+                    },
+                })
+                .collect(),
+            skipped_signatures: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn shutdown_disables_hooks_and_reinitialization_reuses_registration() {
+        let _guard = PRESENT_RUNTIME_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        state::reset_state_for_tests();
+        let build_profile = BuildProfile::Windows11_25H2;
+        let profile = HookProfile::for_build(build_profile);
+
+        super::initialize_with_resolution(
+            build_profile,
+            test_payload(),
+            synthetic_resolution(&profile),
+        )
+        .expect("initial initialization should succeed");
+        let initialized_calls = crate::minhook::test_minhook_call_counts();
+
+        assert_eq!(super::ffi_shutdown(), ShutdownStatus::Success as u32);
+        let shutdown_calls = crate::minhook::test_minhook_call_counts();
+        assert!(!state::is_initialized());
+        assert!(state::hook_profile().is_none());
+        assert!(state::lut_bypass_runtime().is_none());
+        assert_eq!(shutdown_calls.disable_calls, initialized_calls.create_calls);
+        assert_eq!(shutdown_calls.remove_calls, 0);
+        assert_eq!(shutdown_calls.uninitialize_calls, 0);
+
+        super::initialize_with_resolution(
+            build_profile,
+            test_payload(),
+            synthetic_resolution(&profile),
+        )
+        .expect("reinitialization should reuse registered hooks");
+        let reinitialized_calls = crate::minhook::test_minhook_call_counts();
+        assert!(state::is_initialized());
+        assert_eq!(
+            reinitialized_calls.create_calls,
+            initialized_calls.create_calls
+        );
+        assert_eq!(
+            reinitialized_calls.enable_calls,
+            initialized_calls.enable_calls + 1
+        );
+        assert_eq!(reinitialized_calls.remove_calls, 0);
+        assert_eq!(reinitialized_calls.uninitialize_calls, 0);
+
+        assert_eq!(super::ffi_shutdown(), ShutdownStatus::Success as u32);
+        let repeated_shutdown_calls = crate::minhook::test_minhook_call_counts();
+        assert_eq!(
+            repeated_shutdown_calls.create_calls,
+            initialized_calls.create_calls
+        );
+        assert_eq!(repeated_shutdown_calls.remove_calls, 0);
+        assert_eq!(repeated_shutdown_calls.uninitialize_calls, 0);
+
+        state::reset_state_for_tests();
     }
 }

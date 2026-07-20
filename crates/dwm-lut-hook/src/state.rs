@@ -66,6 +66,9 @@ pub struct HookState {
 #[cfg(not(test))]
 static STATE: OnceLock<Mutex<Option<HookState>>> = OnceLock::new();
 
+#[cfg(not(test))]
+static RETAINED_STATE: OnceLock<Mutex<Option<HookState>>> = OnceLock::new();
+
 static PRESENT_RUNTIME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(test)]
@@ -83,6 +86,7 @@ const LIFECYCLE_REPLACING_ASSIGNMENTS: u8 = 4;
 #[cfg(test)]
 thread_local! {
     static STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
+    static RETAINED_STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
     static LIFECYCLE: RefCell<u8> = const { RefCell::new(LIFECYCLE_IDLE) };
 }
 
@@ -132,9 +136,29 @@ pub(crate) fn install_state(state: HookState) -> Result<(), Box<HookState>> {
 }
 
 pub fn is_initialized() -> bool {
+    is_runtime_active()
+}
+
+pub(crate) fn can_initialize() -> bool {
     #[cfg(not(test))]
     {
-        STATE
+        matches!(
+            LIFECYCLE.load(Ordering::Acquire),
+            LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN
+        )
+    }
+
+    #[cfg(test)]
+    {
+        LIFECYCLE
+            .with(|lifecycle| matches!(*lifecycle.borrow(), LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN))
+    }
+}
+
+pub(crate) fn has_retained_state() -> bool {
+    #[cfg(not(test))]
+    {
+        RETAINED_STATE
             .get()
             .and_then(|state| state.lock().ok().map(|guard| guard.is_some()))
             .unwrap_or(false)
@@ -142,7 +166,7 @@ pub fn is_initialized() -> bool {
 
     #[cfg(test)]
     {
-        STATE.with(|slot| slot.borrow().is_some())
+        RETAINED_STATE.with(|slot| slot.borrow().is_some())
     }
 }
 
@@ -343,6 +367,11 @@ pub(crate) fn clear_state_after_shutdown() {
         {
             *guard = None;
         }
+        if let Some(state) = RETAINED_STATE.get()
+            && let Ok(mut guard) = state.lock()
+        {
+            *guard = None;
+        }
         LIFECYCLE.store(LIFECYCLE_IDLE, Ordering::Release);
     }
 
@@ -351,11 +380,31 @@ pub(crate) fn clear_state_after_shutdown() {
         STATE.with(|slot| {
             *slot.borrow_mut() = None;
         });
+        RETAINED_STATE.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
         LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_IDLE);
     }
 }
 
-pub(crate) fn finish_failed_shutdown() {
+pub(crate) fn retain_state_after_shutdown() {
+    #[cfg(not(test))]
+    {
+        let active = STATE.get_or_init(|| Mutex::new(None));
+        let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
+        if let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock()) {
+            *retained = active.take();
+        }
+    }
+
+    #[cfg(test)]
+    {
+        let state = STATE.with(|slot| slot.borrow_mut().take());
+        RETAINED_STATE.with(|slot| *slot.borrow_mut() = state);
+    }
+}
+
+pub(crate) fn finish_shutdown() {
     #[cfg(not(test))]
     {
         LIFECYCLE.store(LIFECYCLE_SHUT_DOWN, Ordering::Release);
@@ -364,6 +413,49 @@ pub(crate) fn finish_failed_shutdown() {
     #[cfg(test)]
     {
         LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_SHUT_DOWN);
+    }
+}
+
+pub(crate) fn finish_reactivation() {
+    #[cfg(not(test))]
+    {
+        LIFECYCLE.store(LIFECYCLE_RUNNING, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    {
+        LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_RUNNING);
+    }
+}
+
+pub(crate) fn reactivate_retained_state(
+    payload: HookPayload,
+    lut_pipeline: LutPipeline,
+) -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
+    #[cfg(not(test))]
+    {
+        let active = STATE.get_or_init(|| Mutex::new(None));
+        let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
+        let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock()) else {
+            return None;
+        };
+        if active.is_some() {
+            return None;
+        }
+        let mut state = retained.take()?;
+        update_payload_pipeline(&mut state, payload, lut_pipeline);
+        let plan = (state.runtime.minhook, state.runtime.hooks.clone());
+        *active = Some(state);
+        Some(plan)
+    }
+
+    #[cfg(test)]
+    {
+        let mut state = RETAINED_STATE.with(|slot| slot.borrow_mut().take())?;
+        update_payload_pipeline(&mut state, payload, lut_pipeline);
+        let plan = (state.runtime.minhook, state.runtime.hooks.clone());
+        STATE.with(|slot| *slot.borrow_mut() = Some(state));
+        Some(plan)
     }
 }
 
@@ -499,17 +591,20 @@ pub fn replace_payload_pipeline(
     payload: HookPayload,
     lut_pipeline: LutPipeline,
 ) -> Result<(), ReplacePayloadPipelineError> {
-    let has_lut_assignments = !payload.assignments.is_empty();
-
     with_state_mut(|state| {
-        state.payload = payload;
-        state.runtime.lut_pipeline = Arc::new(lut_pipeline);
-        state
-            .runtime
-            .lut_bypass
-            .reload_for_new_payload(has_lut_assignments);
+        update_payload_pipeline(state, payload, lut_pipeline);
     })
     .ok_or(ReplacePayloadPipelineError::NotInitialized)
+}
+
+fn update_payload_pipeline(state: &mut HookState, payload: HookPayload, lut_pipeline: LutPipeline) {
+    let has_lut_assignments = !payload.assignments.is_empty();
+    state.payload = payload;
+    state.runtime.lut_pipeline = Arc::new(lut_pipeline);
+    state
+        .runtime
+        .lut_bypass
+        .reload_for_new_payload(has_lut_assignments);
 }
 
 #[cfg(not(test))]
@@ -542,6 +637,9 @@ fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
 #[cfg(test)]
 pub(crate) fn reset_state_for_tests() {
     STATE.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+    RETAINED_STATE.with(|slot| {
         *slot.borrow_mut() = None;
     });
     LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_IDLE);
