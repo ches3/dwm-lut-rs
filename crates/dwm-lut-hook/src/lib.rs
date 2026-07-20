@@ -12,7 +12,7 @@ mod resolver;
 mod route_trace;
 mod state;
 
-pub use bootstrap::{HookError, build_profile};
+pub use bootstrap::HookError;
 pub use lut_bypass::{
     ContextLutState, LutBypassRuntime, OverlayTestModeControl, PresentHookOutcome,
 };
@@ -24,9 +24,10 @@ pub use lut_pipeline::{
 };
 pub use minhook::{MinHookError, MinHookRuntime, MinHookState, RegisteredHook};
 pub use profile::{
-    AobToken, BuildProfile, ClipBoxOwner, ClipBoxPathHypothesis, HardwareProtectedPathHypothesis,
-    HookProfile, HookSignature, HookTarget, ProfileHypotheses, SignatureLocator,
-    SwapChainPathHypothesis,
+    AobToken, ClipBoxPathHypothesis, HOOK_MODULE_NAME, HardwareProtectedPathHypothesis,
+    HookProfile, HookSignature, HookTarget, MinBuild, MonitorIdentityPathHypothesis,
+    ProfileHypotheses, ProfileSelectError, SignatureLocator, SwapChainPathHypothesis,
+    VERSIONED_PROFILES, VersionedProfile, os_build_number, select_versioned_profile,
 };
 pub use resolver::{
     HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport, SkippedSignature,

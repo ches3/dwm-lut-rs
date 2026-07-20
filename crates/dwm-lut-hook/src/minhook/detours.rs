@@ -212,9 +212,14 @@ mod tests {
     };
 
     use crate::profile::HookTarget;
+    use crate::profile::VERSIONED_PROFILES;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
-    use crate::{BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookProfile};
+    use crate::{ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookProfile};
+
+    fn test_profile() -> HookProfile {
+        (VERSIONED_PROFILES[0].build)()
+    }
 
     unsafe extern "system" fn returns_true_overlay_direct_flip(
         _a0: usize,
@@ -286,7 +291,7 @@ mod tests {
         let base_address = 0x1800_0000usize;
         SignatureResolutionReport {
             module: LoadedModule {
-                module_name: profile.module_name,
+                module_name: crate::profile::HOOK_MODULE_NAME,
                 base_address,
                 size: 0x20_0000,
             },
@@ -294,18 +299,13 @@ mod tests {
                 .signatures
                 .iter()
                 .enumerate()
-                .map(|(index, signature)| {
-                    let capture_key = signature.locator.capture_key();
-
-                    ResolvedTarget {
-                        target: signature.target,
-                        capture_key,
-                        address: if signature.target == HookTarget::OverlayTestMode {
-                            0
-                        } else {
-                            base_address + 0x1000 + index * 0x100
-                        },
-                    }
+                .map(|(index, signature)| ResolvedTarget {
+                    target: signature.target,
+                    address: if signature.target == HookTarget::OverlayTestMode {
+                        0
+                    } else {
+                        base_address + 0x1000 + index * 0x100
+                    },
                 })
                 .collect(),
             skipped_signatures: Vec::new(),
@@ -314,10 +314,10 @@ mod tests {
 
     fn initialize_test_state() {
         state::reset_state_for_tests();
-        let build_profile = BuildProfile::Windows11_25H2;
-        let resolution = synthetic_resolution(&HookProfile::for_build(build_profile));
+        let profile = test_profile();
+        let resolution = synthetic_resolution(&profile);
         crate::bootstrap::initialize_with_resolution(
-            build_profile,
+            profile,
             test_payload(&[ColorMode::Sdr]),
             resolution,
         )

@@ -9,7 +9,7 @@ use std::ptr;
 #[cfg(debug_assertions)]
 use std::sync::{Mutex, OnceLock};
 
-use crate::profile::HookProfile;
+use crate::profile::{HookProfile, MonitorIdentityPathHypothesis};
 use crate::route_trace;
 use crate::{ClipBox, DirtyRect, state};
 use dwm_lut_payload::{AdapterLuid, MonitorIdentity};
@@ -31,9 +31,6 @@ use super::detours;
 type PresentOriginal = unsafe extern "system" fn(usize, usize, u32, usize, i32, usize, u8) -> i64;
 
 const MAX_DIRTY_RECTS: usize = 4096;
-const OVERLAY_SWAP_CHAIN_ADAPTER_LUID_LOW_OFFSET: usize = 0x34;
-const OVERLAY_SWAP_CHAIN_ADAPTER_LUID_HIGH_OFFSET: usize = 0x38;
-const OVERLAY_SWAP_CHAIN_TARGET_ID_OFFSET: usize = 0x3c;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,7 +195,8 @@ unsafe fn collect_present_inputs_with_profile(
             hypotheses.clip_box.offset,
         )?
     };
-    let monitor_identity = unsafe { read_monitor_identity(overlay_swap_chain) };
+    let monitor_identity =
+        unsafe { read_monitor_identity(overlay_swap_chain, hypotheses.monitor_identity) };
     let dirty_rects = unsafe { read_dirty_rects(rect_vec)? };
     Ok(PresentInputsWithoutFormat {
         monitor_identity,
@@ -208,32 +206,25 @@ unsafe fn collect_present_inputs_with_profile(
     })
 }
 
-unsafe fn read_monitor_identity(overlay_swap_chain: usize) -> Option<MonitorIdentity> {
+unsafe fn read_monitor_identity(
+    overlay_swap_chain: usize,
+    hypothesis: MonitorIdentityPathHypothesis,
+) -> Option<MonitorIdentity> {
     let low_part = unsafe {
         read_memory::<u32>(
-            checked_address(
-                overlay_swap_chain,
-                OVERLAY_SWAP_CHAIN_ADAPTER_LUID_LOW_OFFSET,
-            )
-            .ok()?,
+            checked_address(overlay_swap_chain, hypothesis.adapter_luid_low_offset).ok()?,
         )
         .ok()?
     };
     let high_part = unsafe {
         read_memory::<i32>(
-            checked_address(
-                overlay_swap_chain,
-                OVERLAY_SWAP_CHAIN_ADAPTER_LUID_HIGH_OFFSET,
-            )
-            .ok()?,
+            checked_address(overlay_swap_chain, hypothesis.adapter_luid_high_offset).ok()?,
         )
         .ok()?
     };
     let target_id = unsafe {
-        read_memory::<u32>(
-            checked_address(overlay_swap_chain, OVERLAY_SWAP_CHAIN_TARGET_ID_OFFSET).ok()?,
-        )
-        .ok()?
+        read_memory::<u32>(checked_address(overlay_swap_chain, hypothesis.target_id_offset).ok()?)
+            .ok()?
     };
 
     Some(MonitorIdentity {
@@ -655,12 +646,17 @@ mod tests {
     };
 
     use crate::profile::HookTarget;
+    use crate::profile::VERSIONED_PROFILES;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
     use crate::{
-        BackBufferFormat, BuildProfile, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM,
-        DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect, HookProfile,
+        BackBufferFormat, ClipBox, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        DirtyRect, HookProfile,
     };
+
+    fn test_profile() -> HookProfile {
+        (VERSIONED_PROFILES[0].build)()
+    }
 
     static LAST_ORIGINAL_PRESENT_RECTS: Mutex<Option<Vec<DirtyRect>>> = Mutex::new(None);
 
@@ -706,15 +702,11 @@ mod tests {
         }
     }
 
-    const TEST_ADAPTER_LUID_LOW_OFFSET: usize = 0x34;
-    const TEST_ADAPTER_LUID_HIGH_OFFSET: usize = 0x38;
-    const TEST_TARGET_ID_OFFSET: usize = 0x3c;
-
     fn synthetic_resolution(profile: &HookProfile) -> SignatureResolutionReport {
         let base_address = 0x1800_0000usize;
         SignatureResolutionReport {
             module: LoadedModule {
-                module_name: profile.module_name,
+                module_name: crate::profile::HOOK_MODULE_NAME,
                 base_address,
                 size: 0x20_0000,
             },
@@ -722,18 +714,13 @@ mod tests {
                 .signatures
                 .iter()
                 .enumerate()
-                .map(|(index, signature)| {
-                    let capture_key = signature.locator.capture_key();
-
-                    ResolvedTarget {
-                        target: signature.target,
-                        capture_key,
-                        address: if signature.target == HookTarget::OverlayTestMode {
-                            0
-                        } else {
-                            base_address + 0x1000 + index * 0x100
-                        },
-                    }
+                .map(|(index, signature)| ResolvedTarget {
+                    target: signature.target,
+                    address: if signature.target == HookTarget::OverlayTestMode {
+                        0
+                    } else {
+                        base_address + 0x1000 + index * 0x100
+                    },
                 })
                 .collect(),
             skipped_signatures: Vec::new(),
@@ -779,9 +766,9 @@ mod tests {
     }
 
     fn initialize_test_state_from_payload(payload: HookPayload) {
-        let build_profile = BuildProfile::Windows11_25H2;
-        let resolution = synthetic_resolution(&HookProfile::for_build(build_profile));
-        crate::bootstrap::initialize_with_resolution(build_profile, payload, resolution)
+        let profile = test_profile();
+        let resolution = synthetic_resolution(&profile);
+        crate::bootstrap::initialize_with_resolution(profile, payload, resolution)
             .expect("initialization should succeed with synthetic resolution");
     }
 
@@ -818,7 +805,7 @@ mod tests {
 
     impl FakePresentObjects {
         fn new(clip_box: ClipBox, dirty_rects: Vec<DirtyRect>, hardware_protected: bool) -> Self {
-            let profile = HookProfile::for_build(BuildProfile::Windows11_25H2);
+            let profile = test_profile();
             let context_state_len = (profile.hypotheses.clip_box.offset + size_of::<ClipBox>())
                 .div_ceil(size_of::<usize>());
             let mut context_state = vec![0usize; context_state_len];
@@ -830,11 +817,12 @@ mod tests {
 
             let context = Box::new(context_state.as_ptr() as usize);
 
+            let identity = profile.hypotheses.monitor_identity;
             let overlay_swap_chain_len = (profile
                 .hypotheses
                 .hardware_protected
                 .offset
-                .max(super::OVERLAY_SWAP_CHAIN_TARGET_ID_OFFSET + size_of::<u32>())
+                .max(identity.target_id_offset + size_of::<u32>())
                 + 1)
             .div_ceil(size_of::<usize>());
             let mut overlay_swap_chain = vec![0usize; overlay_swap_chain_len];
@@ -842,13 +830,13 @@ mod tests {
                 (overlay_swap_chain.as_mut_ptr() as *mut u8)
                     .add(profile.hypotheses.hardware_protected.offset)
                     .write(u8::from(hardware_protected));
-                ((overlay_swap_chain.as_mut_ptr() as *mut u8).add(TEST_ADAPTER_LUID_LOW_OFFSET)
+                ((overlay_swap_chain.as_mut_ptr() as *mut u8).add(identity.adapter_luid_low_offset)
                     as *mut u32)
                     .write(test_monitor_identity().adapter_luid.low_part);
-                ((overlay_swap_chain.as_mut_ptr() as *mut u8).add(TEST_ADAPTER_LUID_HIGH_OFFSET)
-                    as *mut i32)
+                ((overlay_swap_chain.as_mut_ptr() as *mut u8)
+                    .add(identity.adapter_luid_high_offset) as *mut i32)
                     .write(test_monitor_identity().adapter_luid.high_part);
-                ((overlay_swap_chain.as_mut_ptr() as *mut u8).add(TEST_TARGET_ID_OFFSET)
+                ((overlay_swap_chain.as_mut_ptr() as *mut u8).add(identity.target_id_offset)
                     as *mut u32)
                     .write(test_monitor_identity().target_id);
             }
@@ -912,7 +900,7 @@ mod tests {
 
         let inputs = unsafe {
             super::collect_present_inputs_with_profile(
-                &HookProfile::for_build(BuildProfile::Windows11_25H2),
+                &test_profile(),
                 fake.context_address(),
                 fake.overlay_swap_chain_address(),
                 fake.rect_vec_address(),
@@ -949,7 +937,7 @@ mod tests {
 
         let inputs = unsafe {
             super::collect_present_inputs_with_profile(
-                &HookProfile::for_build(BuildProfile::Windows11_25H2),
+                &test_profile(),
                 fake.context_address(),
                 fake.overlay_swap_chain_address(),
                 fake.rect_vec_address(),
@@ -1041,18 +1029,11 @@ mod tests {
 
     #[test]
     fn monitor_identity_offsets_match_overlay_swap_chain_fixture() {
-        assert_eq!(
-            super::OVERLAY_SWAP_CHAIN_ADAPTER_LUID_LOW_OFFSET,
-            TEST_ADAPTER_LUID_LOW_OFFSET
-        );
-        assert_eq!(
-            super::OVERLAY_SWAP_CHAIN_ADAPTER_LUID_HIGH_OFFSET,
-            TEST_ADAPTER_LUID_HIGH_OFFSET
-        );
-        assert_eq!(
-            super::OVERLAY_SWAP_CHAIN_TARGET_ID_OFFSET,
-            TEST_TARGET_ID_OFFSET
-        );
+        let profile = test_profile();
+        let hypothesis = profile.hypotheses.monitor_identity;
+        assert_eq!(hypothesis.adapter_luid_low_offset, 0x34);
+        assert_eq!(hypothesis.adapter_luid_high_offset, 0x38);
+        assert_eq!(hypothesis.target_id_offset, 0x3c);
 
         let fake = FakePresentObjects::new(
             ClipBox {
@@ -1065,7 +1046,8 @@ mod tests {
             false,
         );
 
-        let identity = unsafe { super::read_monitor_identity(fake.overlay_swap_chain_address()) };
+        let identity =
+            unsafe { super::read_monitor_identity(fake.overlay_swap_chain_address(), hypothesis) };
 
         assert_eq!(identity, Some(test_monitor_identity()));
     }

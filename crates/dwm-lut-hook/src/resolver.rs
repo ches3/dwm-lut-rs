@@ -14,7 +14,9 @@ use windows_sys::Win32::System::Memory::{
     SEC_IMAGE_NO_EXECUTE, UnmapViewOfFile,
 };
 
-use crate::profile::{AobToken, HookProfile, HookSignature, HookTarget, SignatureLocator};
+use crate::profile::{
+    AobToken, HOOK_MODULE_NAME, HookProfile, HookSignature, HookTarget, SignatureLocator,
+};
 
 const IMAGE_DOS_SIGNATURE: u16 = 0x5A4D;
 const IMAGE_NT_SIGNATURE: u32 = 0x0000_4550;
@@ -109,7 +111,6 @@ pub struct LoadedModule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedTarget {
     pub target: HookTarget,
-    pub capture_key: &'static str,
     pub address: usize,
 }
 
@@ -122,7 +123,6 @@ pub enum SkippedSignatureReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkippedSignature {
     pub target: HookTarget,
-    pub capture_key: &'static str,
     pub reason: SkippedSignatureReason,
 }
 
@@ -156,16 +156,13 @@ pub enum HookResolveError {
     },
     SignatureNotFound {
         target: HookTarget,
-        capture_key: &'static str,
     },
     SignatureAmbiguous {
         target: HookTarget,
-        capture_key: &'static str,
         matches: usize,
     },
     ConflictingPrologue {
         target: HookTarget,
-        capture_key: &'static str,
         rva: usize,
         mismatch_offset: usize,
         expected: u8,
@@ -201,33 +198,23 @@ impl fmt::Display for HookResolveError {
                 f,
                 "module {module_name} live image does not match its backing file: timestamp {live_timestamp:#x}/{backing_timestamp:#x}, size {live_size:#x}/{backing_size:#x}"
             ),
-            Self::SignatureNotFound {
-                target,
-                capture_key,
-            } => write!(
+            Self::SignatureNotFound { target } => {
+                write!(f, "signature {} was not found", target.label())
+            }
+            Self::SignatureAmbiguous { target, matches } => write!(
                 f,
-                "signature {} ({capture_key}) was not found",
-                target.label()
-            ),
-            Self::SignatureAmbiguous {
-                target,
-                capture_key,
-                matches,
-            } => write!(
-                f,
-                "signature {} ({capture_key}) matched {matches} locations",
+                "signature {} matched {matches} locations",
                 target.label()
             ),
             Self::ConflictingPrologue {
                 target,
-                capture_key,
                 rva,
                 mismatch_offset,
                 expected,
                 actual,
             } => write!(
                 f,
-                "conflicting modification at {} ({capture_key}) prologue RVA {rva:#x}+{mismatch_offset:#x}: expected {expected:#04x}, found {actual:#04x}",
+                "conflicting modification at {} prologue RVA {rva:#x}+{mismatch_offset:#x}: expected {expected:#04x}, found {actual:#04x}",
                 target.label()
             ),
         }
@@ -239,7 +226,7 @@ impl std::error::Error for HookResolveError {}
 pub fn resolve_profile(
     profile: &HookProfile,
 ) -> Result<SignatureResolutionReport, HookResolveError> {
-    let module = load_module(profile.module_name)?;
+    let module = load_module(HOOK_MODULE_NAME)?;
     let live_image =
         unsafe { std::slice::from_raw_parts(module.base_address as *const u8, module.size) };
     let live_identity = image_identity(module.base_address as *const u8, module.module_name)?;
@@ -279,7 +266,7 @@ pub(crate) fn resolve_profile_from_image(
     let mut targets = Vec::with_capacity(profile.signatures.len());
     let mut skipped_signatures = Vec::new();
 
-    for signature in &profile.signatures {
+    for signature in profile.signatures {
         match resolve_signature(module, image, signature) {
             Ok(target) => targets.push(target),
             Err(error) if !signature.target.is_required_signature() => {
@@ -300,21 +287,12 @@ fn skipped_signature_from_error(
     error: HookResolveError,
 ) -> Result<SkippedSignature, HookResolveError> {
     match error {
-        HookResolveError::SignatureNotFound {
+        HookResolveError::SignatureNotFound { target } => Ok(SkippedSignature {
             target,
-            capture_key,
-        } => Ok(SkippedSignature {
-            target,
-            capture_key,
             reason: SkippedSignatureReason::NotFound,
         }),
-        HookResolveError::SignatureAmbiguous {
+        HookResolveError::SignatureAmbiguous { target, matches } => Ok(SkippedSignature {
             target,
-            capture_key,
-            matches,
-        } => Ok(SkippedSignature {
-            target,
-            capture_key,
             reason: SkippedSignatureReason::Ambiguous { matches },
         }),
         error => Err(error),
@@ -334,10 +312,7 @@ fn validate_live_prologues(
         let signature = profile
             .signatures
             .iter()
-            .find(|signature| {
-                signature.target == target.target
-                    && signature.locator.capture_key() == target.capture_key
-            })
+            .find(|signature| signature.target == target.target)
             .ok_or(HookResolveError::InvalidModuleImage {
                 module_name: resolution.module.module_name,
                 detail: "resolved target had no matching profile signature",
@@ -374,7 +349,6 @@ fn validate_live_prologues(
         {
             return Err(HookResolveError::ConflictingPrologue {
                 target: target.target,
-                capture_key: target.capture_key,
                 rva,
                 mismatch_offset,
                 expected,
@@ -391,14 +365,10 @@ fn resolve_signature(
     image: &[u8],
     signature: &HookSignature,
 ) -> Result<ResolvedTarget, HookResolveError> {
-    debug_assert_eq!(module.module_name, signature.locator.module_name());
-
-    let capture_key = signature.locator.capture_key();
     match signature.locator {
         SignatureLocator::Aob { tokens, .. } => resolve_unique_match(
             module,
             signature.target,
-            capture_key,
             find_signature_offsets(image, tokens),
         ),
         SignatureLocator::RipRelativeGlobalAob {
@@ -409,7 +379,6 @@ fn resolve_signature(
         } => match find_signature_offsets(image, tokens).as_slice() {
             [] => Err(HookResolveError::SignatureNotFound {
                 target: signature.target,
-                capture_key,
             }),
             [offset] => {
                 let displacement =
@@ -420,13 +389,11 @@ fn resolve_signature(
 
                 Ok(ResolvedTarget {
                     target: signature.target,
-                    capture_key,
                     address,
                 })
             }
             many => Err(HookResolveError::SignatureAmbiguous {
                 target: signature.target,
-                capture_key,
                 matches: many.len(),
             }),
         },
@@ -436,22 +403,16 @@ fn resolve_signature(
 fn resolve_unique_match(
     module: LoadedModule,
     target: HookTarget,
-    capture_key: &'static str,
     matches: Vec<usize>,
 ) -> Result<ResolvedTarget, HookResolveError> {
     match matches.as_slice() {
-        [] => Err(HookResolveError::SignatureNotFound {
-            target,
-            capture_key,
-        }),
+        [] => Err(HookResolveError::SignatureNotFound { target }),
         [offset] => Ok(ResolvedTarget {
             target,
-            capture_key,
             address: module.base_address + offset,
         }),
         many => Err(HookResolveError::SignatureAmbiguous {
             target,
-            capture_key,
             matches: many.len(),
         }),
     }
@@ -631,8 +592,13 @@ mod tests {
         resolve_profile_from_image,
     };
     use crate::profile::{
-        AobToken, BuildProfile, HookProfile, HookSignature, HookTarget, SignatureLocator,
+        AobToken, HOOK_MODULE_NAME, HookProfile, HookSignature, HookTarget, SignatureLocator,
+        VERSIONED_PROFILES,
     };
+
+    fn test_profile() -> HookProfile {
+        (VERSIONED_PROFILES[0].build)()
+    }
 
     #[test]
     fn aob_scan_honors_wildcards() {
@@ -652,7 +618,7 @@ mod tests {
         let clean_image = [0x90, 0x40, 0x55, 0xAA, 0x57, 0x90];
         let live_image = clean_image;
         let module = LoadedModule {
-            module_name: "dwmcore.dll",
+            module_name: HOOK_MODULE_NAME,
             base_address: 0x1000_0000,
             size: live_image.len(),
         };
@@ -669,7 +635,7 @@ mod tests {
         let clean_image = [0x90, 0x40, 0x55, 0xAA, 0x57, 0x90];
         let live_image = [0x90, 0xE9, 0x11, 0x22, 0x33, 0x44];
         let module = LoadedModule {
-            module_name: "dwmcore.dll",
+            module_name: HOOK_MODULE_NAME,
             base_address: 0x1000_0000,
             size: live_image.len(),
         };
@@ -682,7 +648,6 @@ mod tests {
             error,
             HookResolveError::ConflictingPrologue {
                 target: HookTarget::Present,
-                capture_key: "test_present",
                 rva: 1,
                 mismatch_offset: 0,
                 expected: 0x40,
@@ -691,34 +656,31 @@ mod tests {
         );
     }
 
+    const PROLOGUE_TEST_SIGNATURES: &[HookSignature] = &[HookSignature {
+        target: HookTarget::Present,
+        locator: SignatureLocator::Aob {
+            tokens: &[
+                AobToken::Exact(0x40),
+                AobToken::Exact(0x55),
+                AobToken::Wildcard,
+                AobToken::Exact(0x57),
+            ],
+        },
+    }];
+
     fn prologue_test_profile() -> HookProfile {
         HookProfile {
-            build: BuildProfile::Windows11_25H2,
-            module_name: "dwmcore.dll",
-            signatures: vec![HookSignature {
-                target: HookTarget::Present,
-                locator: SignatureLocator::Aob {
-                    module_name: "dwmcore.dll",
-                    capture_key: "test_present",
-                    tokens: &[
-                        AobToken::Exact(0x40),
-                        AobToken::Exact(0x55),
-                        AobToken::Wildcard,
-                        AobToken::Exact(0x57),
-                    ],
-                },
-                note: "",
-            }],
-            hypotheses: HookProfile::for_build(BuildProfile::Windows11_25H2).hypotheses,
+            signatures: PROLOGUE_TEST_SIGNATURES,
+            hypotheses: test_profile().hypotheses,
         }
     }
 
     #[test]
     fn resolve_profile_reports_missing_signature_by_target() {
-        let profile = HookProfile::for_build(BuildProfile::Windows11_25H2);
+        let profile = test_profile();
         let image = [0u8; 16];
         let module = LoadedModule {
-            module_name: "dwmcore.dll",
+            module_name: HOOK_MODULE_NAME,
             base_address: 0x1000_0000,
             size: image.len(),
         };
@@ -730,7 +692,6 @@ mod tests {
             error,
             HookResolveError::SignatureNotFound {
                 target: crate::profile::HookTarget::Present,
-                capture_key: "present_25h2",
             }
         );
     }
@@ -739,35 +700,27 @@ mod tests {
     fn resolve_profile_records_missing_optional_signature() {
         let image = [0xAA, 0xBB, 0xCC];
         let module = LoadedModule {
-            module_name: "dwmcore.dll",
+            module_name: HOOK_MODULE_NAME,
             base_address: 0x2000_0000,
             size: image.len(),
         };
+        const SIGNATURES: &[HookSignature] = &[
+            HookSignature {
+                target: HookTarget::Present,
+                locator: SignatureLocator::Aob {
+                    tokens: &[AobToken::Exact(0xAA)],
+                },
+            },
+            HookSignature {
+                target: HookTarget::WindowContextIsCandidateDirectFlipCompatible,
+                locator: SignatureLocator::Aob {
+                    tokens: &[AobToken::Exact(0xDD)],
+                },
+            },
+        ];
         let profile = HookProfile {
-            build: BuildProfile::Windows11_25H2,
-            module_name: "dwmcore.dll",
-            signatures: vec![
-                crate::profile::HookSignature {
-                    target: crate::profile::HookTarget::Present,
-                    locator: crate::profile::SignatureLocator::Aob {
-                        module_name: "dwmcore.dll",
-                        capture_key: "required_present",
-                        tokens: &[AobToken::Exact(0xAA)],
-                    },
-                    note: "",
-                },
-                crate::profile::HookSignature {
-                    target:
-                        crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible,
-                    locator: crate::profile::SignatureLocator::Aob {
-                        module_name: "dwmcore.dll",
-                        capture_key: "optional_window_gate",
-                        tokens: &[AobToken::Exact(0xDD)],
-                    },
-                    note: "",
-                },
-            ],
-            hypotheses: HookProfile::for_build(BuildProfile::Windows11_25H2).hypotheses,
+            signatures: SIGNATURES,
+            hypotheses: test_profile().hypotheses,
         };
 
         let report =
@@ -778,7 +731,6 @@ mod tests {
             report.skipped_signatures,
             vec![crate::resolver::SkippedSignature {
                 target: crate::profile::HookTarget::WindowContextIsCandidateDirectFlipCompatible,
-                capture_key: "optional_window_gate",
                 reason: crate::resolver::SkippedSignatureReason::NotFound,
             }]
         );
@@ -788,34 +740,27 @@ mod tests {
     fn resolve_profile_records_ambiguous_optional_signature() {
         let image = [0xAA, 0xDD, 0xDD];
         let module = LoadedModule {
-            module_name: "dwmcore.dll",
+            module_name: HOOK_MODULE_NAME,
             base_address: 0x2000_0000,
             size: image.len(),
         };
+        const SIGNATURES: &[HookSignature] = &[
+            HookSignature {
+                target: HookTarget::Present,
+                locator: SignatureLocator::Aob {
+                    tokens: &[AobToken::Exact(0xAA)],
+                },
+            },
+            HookSignature {
+                target: HookTarget::CompVisualIsCandidateForPromotion,
+                locator: SignatureLocator::Aob {
+                    tokens: &[AobToken::Exact(0xDD)],
+                },
+            },
+        ];
         let profile = HookProfile {
-            build: BuildProfile::Windows11_25H2,
-            module_name: "dwmcore.dll",
-            signatures: vec![
-                crate::profile::HookSignature {
-                    target: crate::profile::HookTarget::Present,
-                    locator: crate::profile::SignatureLocator::Aob {
-                        module_name: "dwmcore.dll",
-                        capture_key: "required_present",
-                        tokens: &[AobToken::Exact(0xAA)],
-                    },
-                    note: "",
-                },
-                crate::profile::HookSignature {
-                    target: crate::profile::HookTarget::CompVisualIsCandidateForPromotion,
-                    locator: crate::profile::SignatureLocator::Aob {
-                        module_name: "dwmcore.dll",
-                        capture_key: "optional_comp_visual_gate",
-                        tokens: &[AobToken::Exact(0xDD)],
-                    },
-                    note: "",
-                },
-            ],
-            hypotheses: HookProfile::for_build(BuildProfile::Windows11_25H2).hypotheses,
+            signatures: SIGNATURES,
+            hypotheses: test_profile().hypotheses,
         };
 
         let report = resolve_profile_from_image(&profile, module, &image)
@@ -826,7 +771,6 @@ mod tests {
             report.skipped_signatures,
             vec![crate::resolver::SkippedSignature {
                 target: crate::profile::HookTarget::CompVisualIsCandidateForPromotion,
-                capture_key: "optional_comp_visual_gate",
                 reason: crate::resolver::SkippedSignatureReason::Ambiguous { matches: 2 },
             }]
         );
@@ -836,27 +780,23 @@ mod tests {
     fn resolve_profile_rejects_ambiguous_match() {
         let image = [0x83, 0x10, 0x20, 0x83, 0x30, 0x40];
         let module = LoadedModule {
-            module_name: "dwmcore.dll",
+            module_name: HOOK_MODULE_NAME,
             base_address: 0x2000_0000,
             size: image.len(),
         };
+        const SIGNATURES: &[HookSignature] = &[HookSignature {
+            target: HookTarget::OverlayTestMode,
+            locator: SignatureLocator::Aob {
+                tokens: &[
+                    AobToken::Exact(0x83),
+                    AobToken::Wildcard,
+                    AobToken::Wildcard,
+                ],
+            },
+        }];
         let profile = HookProfile {
-            build: BuildProfile::Windows11_25H2,
-            module_name: "dwmcore.dll",
-            signatures: vec![crate::profile::HookSignature {
-                target: crate::profile::HookTarget::OverlayTestMode,
-                locator: crate::profile::SignatureLocator::Aob {
-                    module_name: "dwmcore.dll",
-                    capture_key: "overlay_test",
-                    tokens: &[
-                        AobToken::Exact(0x83),
-                        AobToken::Wildcard,
-                        AobToken::Wildcard,
-                    ],
-                },
-                note: "",
-            }],
-            hypotheses: HookProfile::for_build(BuildProfile::Windows11_25H2).hypotheses,
+            signatures: SIGNATURES,
+            hypotheses: test_profile().hypotheses,
         };
 
         let error = resolve_profile_from_image(&profile, module, &image)
@@ -866,7 +806,6 @@ mod tests {
             error,
             HookResolveError::SignatureAmbiguous {
                 target: crate::profile::HookTarget::OverlayTestMode,
-                capture_key: "overlay_test",
                 matches: 2,
             }
         );

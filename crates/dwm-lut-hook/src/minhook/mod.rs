@@ -588,14 +588,13 @@ mod tests {
 
     fn plan_with_targets(targets: &[(HookTarget, usize)]) -> HookRegistrationPlan {
         HookRegistrationPlan {
-            module_name: "dwmcore.dll",
+            module_name: crate::profile::HOOK_MODULE_NAME,
             module_base_address: 0x1800_0000,
             module_size: 0x20_0000,
             targets: targets
                 .iter()
                 .map(|(target, address)| HookRegistrationTarget {
                     target: *target,
-                    capture_key: "test",
                     address: *address,
                 })
                 .collect(),

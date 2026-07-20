@@ -16,7 +16,6 @@ use crate::{ClipBox, DirtyRect};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookRegistrationTarget {
     pub target: HookTarget,
-    pub capture_key: &'static str,
     pub address: usize,
 }
 
@@ -40,7 +39,6 @@ impl HookRegistrationPlan {
                 .filter(|target| target.target.is_function_hook_target())
                 .map(|target| HookRegistrationTarget {
                     target: target.target,
-                    capture_key: target.capture_key,
                     address: target.address,
                 })
                 .collect(),
@@ -171,7 +169,7 @@ pub(crate) fn has_retained_state() -> bool {
 }
 
 pub fn hook_profile() -> Option<HookProfile> {
-    with_state(|state| state.profile.clone())
+    with_state(|state| state.profile)
 }
 
 pub fn lut_bypass_runtime() -> Option<LutBypassRuntime> {

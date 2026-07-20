@@ -17,7 +17,7 @@ use crate::minhook::{
     MinHookError, disable_registered_hooks, enable_registered_hooks, register_plan,
     unregister_registered_hooks,
 };
-use crate::profile::{BuildProfile, HookProfile};
+use crate::profile::{HookProfile, ProfileSelectError, os_build_number, select_versioned_profile};
 
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
@@ -128,6 +128,7 @@ pub(crate) fn reset_initialization_guard_for_tests() {
 #[derive(Debug)]
 pub enum HookError {
     AlreadyInitialized,
+    UnsupportedOsBuild(ProfileSelectError),
     Payload(PayloadError),
     MinHook(MinHookError),
     Resolve(HookResolveError),
@@ -137,6 +138,7 @@ impl fmt::Display for HookError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyInitialized => write!(f, "hook is already initialized"),
+            Self::UnsupportedOsBuild(error) => write!(f, "{error}"),
             Self::Payload(error) => write!(f, "{error}"),
             Self::MinHook(error) => write!(f, "{error}"),
             Self::Resolve(error) => write!(f, "{error}"),
@@ -161,6 +163,12 @@ impl From<PayloadError> for HookError {
 impl From<MinHookError> for HookError {
     fn from(value: MinHookError) -> Self {
         Self::MinHook(value)
+    }
+}
+
+impl From<ProfileSelectError> for HookError {
+    fn from(value: ProfileSelectError) -> Self {
+        Self::UnsupportedOsBuild(value)
     }
 }
 
@@ -199,13 +207,9 @@ impl From<ReplacePayloadPipelineError> for ReplaceAssignmentsError {
     }
 }
 
-pub fn build_profile() -> BuildProfile {
-    BuildProfile::Windows11_25H2
-}
-
 #[cfg(test)]
 pub(crate) fn initialize_with_resolution(
-    build_profile: BuildProfile,
+    profile: HookProfile,
     payload: HookPayload,
     resolution: SignatureResolutionReport,
 ) -> Result<(), HookError> {
@@ -213,12 +217,12 @@ pub(crate) fn initialize_with_resolution(
     if has_retained_state() {
         return reactivate_from_payload(payload);
     }
-    let state = prepare_initial_state_with_resolution(build_profile, payload, resolution)?;
+    let state = prepare_initial_state_with_resolution(profile, payload, resolution)?;
     install_prepared_state(state)
 }
 
 pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) -> u32 {
-    debug_log!("event=initialize_start profile={:?}", build_profile());
+    debug_log!("event=initialize_start");
 
     if payload_buffer.is_null() {
         return InitializeStatus::NullPayload as u32;
@@ -237,7 +241,7 @@ pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) 
         }
     };
 
-    match initialize_from_payload(build_profile(), payload) {
+    match initialize_from_payload(payload) {
         Ok(()) => {
             crate::desktop_redraw::request_desktop_redraw();
             debug_log!("event=initialize_success");
@@ -446,18 +450,27 @@ fn finish_initialize_error(error: HookError) -> u32 {
     map_hook_error(error) as u32
 }
 
-fn initialize_from_payload(
-    build_profile: BuildProfile,
-    payload: HookPayload,
-) -> Result<(), HookError> {
+fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
     let _guard = enter_initialization()?;
 
     if has_retained_state() {
         return reactivate_from_payload(payload);
     }
 
-    let state = prepare_initial_state_from_payload(build_profile, payload)?;
+    let state = prepare_initial_state_from_payload(payload)?;
     install_prepared_state(state)
+}
+
+fn selected_profile() -> Result<HookProfile, HookError> {
+    let os_build = os_build_number()?;
+    let entry = select_versioned_profile(os_build)?;
+    debug_log!(
+        "event=profile_selected id={} min_build={} os_build={}",
+        crate::debug_log::quoted(entry.id),
+        entry.min_build.0,
+        os_build
+    );
+    Ok((entry.build)())
 }
 
 fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
@@ -510,19 +523,13 @@ fn rollback_registered_state_hooks(state: &HookState) {
     unregister_registered_hooks(&state.runtime.minhook, &state.runtime.hooks);
 }
 
-fn prepare_initial_state_from_payload(
-    build_profile: BuildProfile,
-    payload: HookPayload,
-) -> Result<HookState, HookError> {
-    prepare_initial_state_from_payload_with_profile_resolver(
-        build_profile,
-        payload,
-        resolve_profile,
-    )
+fn prepare_initial_state_from_payload(payload: HookPayload) -> Result<HookState, HookError> {
+    let profile = selected_profile()?;
+    prepare_initial_state_from_payload_with_profile_resolver(profile, payload, resolve_profile)
 }
 
 fn prepare_initial_state_from_payload_with_profile_resolver<F>(
-    build_profile: BuildProfile,
+    profile: HookProfile,
     payload: HookPayload,
     resolver: F,
 ) -> Result<HookState, HookError>
@@ -540,8 +547,6 @@ where
         lut_pipeline.luts.len()
     );
 
-    let profile = HookProfile::for_build(build_profile);
-
     let resolution = resolver(&profile)?;
     debug_log!(
         "event=signatures_resolved module={} module_base=0x{:x} module_size=0x{:x} target_count={} skipped_count={}",
@@ -555,17 +560,15 @@ where
     {
         for target in &resolution.targets {
             debug_log!(
-                "event=signature_resolved target={} capture_key={} address=0x{:x}",
+                "event=signature_resolved target={} address=0x{:x}",
                 crate::debug_log::quoted(target.target.label()),
-                crate::debug_log::quoted(target.capture_key),
                 target.address
             );
         }
         for skipped in &resolution.skipped_signatures {
             debug_log!(
-                "event=signature_skipped target={} capture_key={} reason={:?}",
+                "event=signature_skipped target={} reason={:?}",
                 crate::debug_log::quoted(skipped.target.label()),
-                crate::debug_log::quoted(skipped.capture_key),
                 skipped.reason
             );
         }
@@ -576,13 +579,11 @@ where
 
 #[cfg(test)]
 pub(crate) fn prepare_initial_state_with_resolution(
-    build_profile: BuildProfile,
+    profile: HookProfile,
     payload: HookPayload,
     resolution: SignatureResolutionReport,
 ) -> Result<HookState, HookError> {
-    prepare_initial_state_from_payload_with_profile_resolver(build_profile, payload, |_| {
-        Ok(resolution)
-    })
+    prepare_initial_state_from_payload_with_profile_resolver(profile, payload, |_| Ok(resolution))
 }
 
 fn finalize_initial_state(
@@ -688,6 +689,7 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
 fn map_hook_error(error: HookError) -> InitializeStatus {
     match error {
         HookError::AlreadyInitialized => InitializeStatus::AlreadyInitialized,
+        HookError::UnsupportedOsBuild(_) => InitializeStatus::UnsupportedOsBuild,
         HookError::Resolve(error) => map_resolve_status(error),
         HookError::Payload(error) => map_payload_error_to_initialize_status(&error),
         HookError::MinHook(error) => match error.operation {
@@ -733,11 +735,15 @@ mod tests {
         PayloadLut, ShutdownStatus,
     };
 
-    use crate::profile::{BuildProfile, HookProfile, HookTarget};
+    use crate::profile::{HookProfile, HookTarget, VERSIONED_PROFILES};
     use crate::resolver::{
         HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport,
     };
     use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK};
+
+    fn test_profile() -> HookProfile {
+        (VERSIONED_PROFILES[0].build)()
+    }
 
     fn test_payload() -> HookPayload {
         HookPayload {
@@ -766,7 +772,7 @@ mod tests {
         let base_address = 0x1800_0000usize;
         SignatureResolutionReport {
             module: LoadedModule {
-                module_name: profile.module_name,
+                module_name: crate::profile::HOOK_MODULE_NAME,
                 base_address,
                 size: 0x20_0000,
             },
@@ -776,7 +782,6 @@ mod tests {
                 .enumerate()
                 .map(|(index, signature)| ResolvedTarget {
                     target: signature.target,
-                    capture_key: signature.locator.capture_key(),
                     address: if signature.target == HookTarget::OverlayTestMode {
                         0
                     } else {
@@ -793,12 +798,11 @@ mod tests {
         crate::minhook::reset_test_minhook_behavior(None, None, None, None);
 
         let error = super::prepare_initial_state_from_payload_with_profile_resolver(
-            BuildProfile::Windows11_25H2,
+            test_profile(),
             test_payload(),
             |_| {
                 Err(HookResolveError::ConflictingPrologue {
                     target: HookTarget::Present,
-                    capture_key: "present_25h2",
                     rva: 0x1000,
                     mismatch_offset: 0,
                     expected: 0x40,
@@ -823,7 +827,7 @@ mod tests {
     #[test]
     fn module_access_failure_has_distinct_initialize_status() {
         let status = super::map_resolve_status(HookResolveError::ModuleAccessFailed {
-            module_name: "dwmcore.dll",
+            module_name: crate::profile::HOOK_MODULE_NAME,
             operation: "map image view",
             error_code: 5,
         });
@@ -840,15 +844,10 @@ mod tests {
             .lock()
             .expect("test mutex should lock");
         state::reset_state_for_tests();
-        let build_profile = BuildProfile::Windows11_25H2;
-        let profile = HookProfile::for_build(build_profile);
+        let profile = test_profile();
 
-        super::initialize_with_resolution(
-            build_profile,
-            test_payload(),
-            synthetic_resolution(&profile),
-        )
-        .expect("initial initialization should succeed");
+        super::initialize_with_resolution(profile, test_payload(), synthetic_resolution(&profile))
+            .expect("initial initialization should succeed");
         let initialized_calls = crate::minhook::test_minhook_call_counts();
 
         assert_eq!(super::ffi_shutdown(), ShutdownStatus::Success as u32);
@@ -860,12 +859,8 @@ mod tests {
         assert_eq!(shutdown_calls.remove_calls, 0);
         assert_eq!(shutdown_calls.uninitialize_calls, 0);
 
-        super::initialize_with_resolution(
-            build_profile,
-            test_payload(),
-            synthetic_resolution(&profile),
-        )
-        .expect("reinitialization should reuse registered hooks");
+        super::initialize_with_resolution(profile, test_payload(), synthetic_resolution(&profile))
+            .expect("reinitialization should reuse registered hooks");
         let reinitialized_calls = crate::minhook::test_minhook_call_counts();
         assert!(state::is_initialized());
         assert_eq!(

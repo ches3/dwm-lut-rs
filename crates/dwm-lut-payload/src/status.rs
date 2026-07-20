@@ -38,6 +38,7 @@ pub enum InitializeStatus {
     CompVisualPromotionPrologueConflict = 35,
     CompSwapChainIndependentFlipPrologueConflict = 36,
     DwmcoreImageAccessFailed = 37,
+    UnsupportedOsBuild = 38,
 }
 
 impl InitializeStatus {
@@ -78,6 +79,7 @@ impl InitializeStatus {
             35 => Self::CompVisualPromotionPrologueConflict,
             36 => Self::CompSwapChainIndependentFlipPrologueConflict,
             37 => Self::DwmcoreImageAccessFailed,
+            38 => Self::UnsupportedOsBuild,
             _ => return None,
         })
     }
@@ -176,6 +178,9 @@ impl fmt::Display for InitializeStatus {
             ),
             Self::DwmcoreImageAccessFailed => {
                 write!(f, "dwmcore.dll backing image could not be accessed")
+            }
+            Self::UnsupportedOsBuild => {
+                write!(f, "OS build is below the minimum supported hook profile")
             }
         }
     }
