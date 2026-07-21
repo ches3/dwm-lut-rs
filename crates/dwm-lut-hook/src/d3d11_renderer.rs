@@ -152,13 +152,18 @@ impl RenderTargetStates {
     }
 }
 
-#[cfg(not(test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ResourceKey {
     device: usize,
     overlay_swap_chain: usize,
     width: u32,
     height: u32,
+}
+
+const fn keeps_device_resource(key: ResourceKey, current: ResourceKey) -> bool {
+    key.device != current.device
+        || key.overlay_swap_chain != current.overlay_swap_chain
+        || (key.width == current.width && key.height == current.height)
 }
 
 fn prepare_gpu_draw_plan(
@@ -848,6 +853,45 @@ mod tests {
         assert!(states.entries.contains_key(&key(0)));
         assert!(!states.entries.contains_key(&key(1)));
         assert!(states.entries.contains_key(&new_key));
+    }
+
+    #[test]
+    fn device_resource_cache_drops_other_sizes_for_same_swap_chain() {
+        let current = ResourceKey {
+            device: 0x10,
+            overlay_swap_chain: 0x20,
+            width: 1280,
+            height: 720,
+        };
+        let same_size = ResourceKey {
+            device: 0x10,
+            overlay_swap_chain: 0x20,
+            width: 1280,
+            height: 720,
+        };
+        let old_size = ResourceKey {
+            device: 0x10,
+            overlay_swap_chain: 0x20,
+            width: 1920,
+            height: 1080,
+        };
+        let other_swap_chain = ResourceKey {
+            device: 0x10,
+            overlay_swap_chain: 0x21,
+            width: 1920,
+            height: 1080,
+        };
+        let other_device = ResourceKey {
+            device: 0x11,
+            overlay_swap_chain: 0x20,
+            width: 1920,
+            height: 1080,
+        };
+
+        assert!(keeps_device_resource(same_size, current));
+        assert!(!keeps_device_resource(old_size, current));
+        assert!(keeps_device_resource(other_swap_chain, current));
+        assert!(keeps_device_resource(other_device, current));
     }
 
     #[test]

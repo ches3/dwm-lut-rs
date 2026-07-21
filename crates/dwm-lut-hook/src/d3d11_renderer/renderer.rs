@@ -349,6 +349,8 @@ impl D3D11Renderer {
                     draw_plan.lut_index,
                 );
             };
+            self.devices
+                .retain(|key, _| super::keeps_device_resource(*key, resource_key));
             self.devices.insert(resource_key, resources);
         }
 
@@ -517,6 +519,7 @@ struct DeviceResources {
     vertex_buffer: ID3D11Buffer,
     sampler: ID3D11SamplerState,
     constant_buffer: ID3D11Buffer,
+    last_constants: Option<ShaderConstantsCBuffer>,
     copy_textures: CopyTextureResources,
     lut_srvs: Vec<ID3D11ShaderResourceView>,
     draw_states: super::RenderTargetStates,
@@ -600,6 +603,7 @@ impl DeviceResources {
             vertex_buffer,
             sampler,
             constant_buffer,
+            last_constants: None,
             copy_textures: CopyTextureResources::default(),
             lut_srvs,
             draw_states: super::RenderTargetStates::default(),
@@ -635,15 +639,18 @@ impl DeviceResources {
         super::with_restored_state(
             || ContextState::capture(frame.context),
             || {
-                unsafe {
-                    frame.context.UpdateSubresource(
-                        &self.constant_buffer,
-                        0,
-                        None,
-                        (&draw_plan.constants as *const ShaderConstantsCBuffer).cast(),
-                        0,
-                        0,
-                    );
+                if self.last_constants.as_ref() != Some(&draw_plan.constants) {
+                    unsafe {
+                        frame.context.UpdateSubresource(
+                            &self.constant_buffer,
+                            0,
+                            None,
+                            (&draw_plan.constants as *const ShaderConstantsCBuffer).cast(),
+                            0,
+                            0,
+                        );
+                    }
+                    self.last_constants = Some(draw_plan.constants);
                 }
 
                 for rect in &draw_plan.dirty_rects {
