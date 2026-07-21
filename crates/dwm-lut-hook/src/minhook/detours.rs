@@ -2,13 +2,13 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
+use crate::DirtyRect;
 use crate::profile::HookTarget;
 #[cfg(debug_assertions)]
 use crate::route_trace::{FlipGateKind, record_flip_gate};
 use crate::state;
 
-use super::present::present_detour;
-
+type PresentOriginal = unsafe extern "system" fn(usize, usize, u32, usize, i32, usize, u8) -> i64;
 type ForwardBool1 = unsafe extern "system" fn(usize) -> u8;
 type ForwardBoolThis2 = unsafe extern "system" fn(usize, usize, usize) -> u8;
 type ForwardCheckDirectFlipSupport =
@@ -32,7 +32,7 @@ const OVERLAYS_ENABLED_FORCE_TRUE: u8 = 2;
 
 static OVERLAYS_ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(OVERLAYS_ENABLED_ORIGINAL_BEHAVIOR);
 
-pub(super) fn present_original() -> *mut c_void {
+pub(crate) fn present_original() -> *mut c_void {
     PRESENT_ORIGINAL.load(Ordering::Acquire)
 }
 
@@ -57,7 +57,7 @@ pub(super) fn set_overlays_enabled_override(value: Option<bool>) {
     OVERLAYS_ENABLED_OVERRIDE.store(value, Ordering::Release);
 }
 
-pub(super) fn original_pointer_for_target(target: HookTarget) -> &'static AtomicPtr<c_void> {
+pub(crate) fn original_pointer_for_target(target: HookTarget) -> &'static AtomicPtr<c_void> {
     match target {
         HookTarget::Present => &PRESENT_ORIGINAL,
         HookTarget::IsCandidateDirectFlipCompatible => &DIRECT_FLIP_ORIGINAL,
@@ -99,6 +99,45 @@ pub(super) fn detour_for_target(target: HookTarget) -> *mut c_void {
             unreachable!("global patch target is not a function hook")
         }
     }
+}
+
+unsafe extern "system" fn present_detour(
+    this: usize,
+    overlay_swap_chain: usize,
+    a3: u32,
+    rect_vec: usize,
+    a5: i32,
+    a6: usize,
+    a7: u8,
+) -> i64 {
+    let original = present_original();
+    if original.is_null() {
+        return 0;
+    }
+    let original: PresentOriginal = unsafe { std::mem::transmute(original) };
+
+    if !state::is_runtime_active() {
+        return unsafe { original(this, overlay_swap_chain, a3, rect_vec, a5, a6, a7) };
+    }
+
+    let mut present_rect_storage = [DirtyRect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    }];
+    let mut present_rect_vec_storage = crate::present::empty_rect_vec_storage();
+    let prepared = crate::present::prepare_present(
+        this,
+        overlay_swap_chain,
+        rect_vec,
+        &mut present_rect_storage,
+        &mut present_rect_vec_storage,
+    );
+    let original_result =
+        unsafe { original(this, overlay_swap_chain, a3, prepared.rect_vec, a5, a6, a7) };
+    crate::present::finish_present(overlay_swap_chain, &prepared, original_result);
+    original_result
 }
 
 unsafe fn forward_overlay_direct_flip(
@@ -594,5 +633,64 @@ mod tests {
             unsafe { super::is_advanced_direct_flip_compatible_detour(0) },
             0
         );
+    }
+
+    #[test]
+    fn present_detour_forwards_apply_rect_override_to_original() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        use crate::DirtyRect;
+        use crate::present::test_support::{
+            FakePresentObjects, initialize_test_state, install_present_original,
+            last_original_present_rects, reset_last_original_present_rects,
+        };
+
+        reset_last_original_present_rects();
+        initialize_test_state();
+        let fake = FakePresentObjects::new(
+            vec![DirtyRect {
+                left: 10,
+                top: 20,
+                right: 64,
+                bottom: 96,
+            }],
+            false,
+        );
+        let full_rect = DirtyRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        crate::d3d11_renderer::set_fake_render_result(Ok(
+            crate::d3d11_renderer::PresentLutOutcome {
+                decision: crate::lut_pipeline::LutDecision::Apply {
+                    format: crate::BackBufferFormat::Bgra8Unorm,
+                    lut_index: 0,
+                },
+                present_dirty_rect: Some(full_rect),
+                draw: crate::d3d11_renderer::PresentDrawStatus::Applied { full_redraw: true },
+                dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+                width: None,
+                height: None,
+                lut_index: Some(0),
+            },
+        ));
+        install_present_original();
+
+        assert_eq!(
+            unsafe {
+                super::present_detour(
+                    fake.context_address(),
+                    fake.overlay_swap_chain_address(),
+                    0,
+                    fake.rect_vec_address(),
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0x55
+        );
+        assert_eq!(last_original_present_rects(), Some(vec![full_rect]));
     }
 }

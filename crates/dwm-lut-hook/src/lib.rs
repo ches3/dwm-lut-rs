@@ -7,6 +7,7 @@ mod desktop_redraw;
 mod lut_bypass;
 mod lut_pipeline;
 mod minhook;
+mod present;
 mod profile;
 mod resolver;
 mod route_trace;

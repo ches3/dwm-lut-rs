@@ -2,11 +2,20 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr;
+#[cfg(test)]
+use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::Ordering;
-mod detours;
-mod present;
 
-use detours::{detour_for_target, original_pointer_for_target, original_slot_for_target};
+mod detours;
+
+use detours::{detour_for_target, original_slot_for_target};
+
+#[cfg(test)]
+pub(crate) fn original_pointer_for_target(
+    target: crate::profile::HookTarget,
+) -> &'static AtomicPtr<c_void> {
+    detours::original_pointer_for_target(target)
+}
 
 use crate::profile::HookTarget;
 use crate::state::HookRegistrationPlan;
@@ -312,7 +321,7 @@ pub(crate) fn unregister_registered_hooks_with_apis(
             });
             continue;
         }
-        original_pointer_for_target(hook.target).store(ptr::null_mut(), Ordering::Release);
+        detours::original_pointer_for_target(hook.target).store(ptr::null_mut(), Ordering::Release);
     }
 
     failures
@@ -353,7 +362,7 @@ fn remove_created_hooks(apis: &MinHookApis, created: &[CreatedHook]) -> Vec<MinH
             });
             continue;
         }
-        original_pointer_for_target(hook.target).store(ptr::null_mut(), Ordering::Release);
+        detours::original_pointer_for_target(hook.target).store(ptr::null_mut(), Ordering::Release);
     }
     failures
 }
