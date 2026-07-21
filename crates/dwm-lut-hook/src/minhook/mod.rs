@@ -225,25 +225,6 @@ pub(crate) fn reset_test_original_slots() {
     detours::reset_test_original_slots();
 }
 
-#[cfg(test)]
-pub(crate) fn register_plan_with_apis(
-    plan: &HookRegistrationPlan,
-    apis: MinHookApis,
-) -> Result<Vec<RegisteredHook>, MinHookError> {
-    let created = create_hooks_for_plan(plan, apis)?;
-    let status = unsafe { (apis.enable_hook)(MH_ALL_HOOKS) };
-    if status != MH_OK {
-        let cleanup_failures = remove_created_hooks(&apis, &created);
-        return Err(MinHookError::with_cleanup_failures(
-            MinHookOperation::EnableHook,
-            Some(status),
-            cleanup_failures,
-        ));
-    }
-
-    Ok(registered_hooks_from_created(created))
-}
-
 pub(crate) fn create_plan_hooks_with_apis(
     plan: &HookRegistrationPlan,
     apis: MinHookApis,
@@ -584,10 +565,9 @@ mod tests {
     };
 
     use super::{
-        MinHookCleanupOperation, MinHookOperation, MinHookRuntime, MinHookState, detours,
-        disable_registered_hooks, enable_registered_hooks, register_plan, register_plan_with_apis,
-        test_minhook_apis, test_minhook_call_counts, unregister_registered_hooks,
-        unregister_registered_hooks_with_apis,
+        MinHookCleanupOperation, MinHookOperation, detours, disable_registered_hooks,
+        enable_registered_hooks, register_plan, test_minhook_call_counts,
+        unregister_registered_hooks, unregister_registered_hooks_with_apis,
     };
 
     fn plan_with_targets(targets: &[(HookTarget, usize)]) -> HookRegistrationPlan {
@@ -630,8 +610,7 @@ mod tests {
         ]);
 
         super::reset_test_minhook_behavior(None, None, None, None);
-        let registered = register_plan_with_apis(&plan, test_minhook_apis())
-            .expect("registration should succeed");
+        let (_runtime, registered) = register_plan(&plan).expect("registration should succeed");
 
         assert_eq!(registered.len(), 2);
         assert_eq!(registered[0].target, HookTarget::Present);
@@ -651,6 +630,7 @@ mod tests {
                 .load(Ordering::Acquire) as usize,
             0x1800_2000
         );
+        assert_eq!(test_minhook_call_counts().enable_calls, 0);
         detours::original_pointer_for_target(HookTarget::Present)
             .store(std::ptr::null_mut(), Ordering::Release);
         detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
@@ -684,8 +664,7 @@ mod tests {
             (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
         ]);
 
-        let error = register_plan_with_apis(&plan, test_minhook_apis())
-            .expect_err("third create should fail");
+        let error = register_plan(&plan).expect_err("third create should fail");
 
         assert_eq!(
             error.operation,
@@ -700,28 +679,6 @@ mod tests {
     }
 
     #[test]
-    fn enable_failure_removes_created_hooks() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        reset_controlled_behavior(None, Some(1));
-        let plan = plan_with_targets(&[
-            (HookTarget::Present, 0x1800_1000),
-            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
-            (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
-        ]);
-
-        let error =
-            register_plan_with_apis(&plan, test_minhook_apis()).expect_err("enable should fail");
-
-        assert_eq!(error.operation, MinHookOperation::EnableHook);
-        assert!(error.cleanup_failures.is_empty());
-        let calls = test_minhook_call_counts();
-        assert_eq!(calls.create_calls, 3);
-        assert_eq!(calls.enable_calls, 1);
-        assert_eq!(calls.disable_calls, 0);
-        assert_eq!(calls.remove_calls, 3);
-    }
-
-    #[test]
     fn create_failure_reports_cleanup_remove_failure() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_controlled_behavior(Some(3), None);
@@ -732,8 +689,7 @@ mod tests {
             (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
         ]);
 
-        let error = register_plan_with_apis(&plan, test_minhook_apis())
-            .expect_err("third create should fail");
+        let error = register_plan(&plan).expect_err("third create should fail");
 
         assert_eq!(
             error.operation,
@@ -764,50 +720,6 @@ mod tests {
     }
 
     #[test]
-    fn enable_failure_keeps_original_slot_when_cleanup_remove_fails() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        reset_controlled_behavior(None, Some(1));
-        set_controlled_cleanup_failures(None, Some(1));
-        let plan = plan_with_targets(&[
-            (HookTarget::Present, 0x1800_1000),
-            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
-            (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
-        ]);
-
-        let error =
-            register_plan_with_apis(&plan, test_minhook_apis()).expect_err("enable should fail");
-
-        assert_eq!(error.operation, MinHookOperation::EnableHook);
-        assert_eq!(error.cleanup_failures.len(), 1);
-        assert_eq!(
-            error.cleanup_failures[0].operation,
-            MinHookCleanupOperation::RemoveHook
-        );
-        assert_eq!(
-            error.cleanup_failures[0].target,
-            HookTarget::IsDirectFlipSupportedOnTarget
-        );
-        assert_eq!(error.cleanup_failures[0].status, -4);
-        assert!(
-            detours::original_pointer_for_target(HookTarget::Present)
-                .load(Ordering::Acquire)
-                .is_null()
-        );
-        assert!(
-            detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
-                .load(Ordering::Acquire)
-                .is_null()
-        );
-        assert_eq!(
-            detours::original_pointer_for_target(HookTarget::IsDirectFlipSupportedOnTarget)
-                .load(Ordering::Acquire) as usize,
-            0x1800_3000
-        );
-        detours::original_pointer_for_target(HookTarget::IsDirectFlipSupportedOnTarget)
-            .store(std::ptr::null_mut(), Ordering::Release);
-    }
-
-    #[test]
     fn unregister_disables_and_removes_registered_hooks() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_controlled_behavior(None, None);
@@ -816,14 +728,12 @@ mod tests {
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
         ]);
 
-        let registered = register_plan_with_apis(&plan, test_minhook_apis())
-            .expect("registration should succeed");
-        let cleanup_failures =
-            unregister_registered_hooks_with_apis(&registered, test_minhook_apis());
+        let (runtime, registered) = register_plan(&plan).expect("registration should succeed");
+        let cleanup_failures = unregister_registered_hooks_with_apis(&registered, runtime.apis);
 
         let calls = test_minhook_call_counts();
         assert_eq!(calls.create_calls, 2);
-        assert_eq!(calls.enable_calls, 1);
+        assert_eq!(calls.enable_calls, 0);
         assert_eq!(calls.disable_calls, 2);
         assert_eq!(calls.remove_calls, 2);
         assert!(cleanup_failures.is_empty());
@@ -847,14 +757,7 @@ mod tests {
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
         ]);
-        let apis = test_minhook_apis();
-        let registered = register_plan_with_apis(&plan, apis).expect("registration should succeed");
-        let runtime = MinHookRuntime {
-            state: MinHookState {
-                owns_initialization: true,
-            },
-            apis,
-        };
+        let (runtime, registered) = register_plan(&plan).expect("registration should succeed");
 
         let cleanup_failures = disable_registered_hooks(&runtime, &registered);
 
@@ -883,10 +786,8 @@ mod tests {
         set_controlled_cleanup_failures(None, Some(1));
         let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
 
-        let registered = register_plan_with_apis(&plan, test_minhook_apis())
-            .expect("registration should succeed");
-        let cleanup_failures =
-            unregister_registered_hooks_with_apis(&registered, test_minhook_apis());
+        let (runtime, registered) = register_plan(&plan).expect("registration should succeed");
+        let cleanup_failures = unregister_registered_hooks_with_apis(&registered, runtime.apis);
 
         assert_eq!(cleanup_failures.len(), 1);
         assert_eq!(
@@ -909,14 +810,7 @@ mod tests {
         reset_controlled_behavior(None, None);
         set_controlled_cleanup_failures(None, Some(1));
         let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
-        let apis = test_minhook_apis();
-        let registered = register_plan_with_apis(&plan, apis).expect("registration should succeed");
-        let runtime = MinHookRuntime {
-            state: MinHookState {
-                owns_initialization: true,
-            },
-            apis,
-        };
+        let (runtime, registered) = register_plan(&plan).expect("registration should succeed");
 
         let cleanup_failures = unregister_registered_hooks(&runtime, &registered);
 
@@ -932,14 +826,7 @@ mod tests {
         reset_controlled_behavior(None, None);
         set_controlled_cleanup_failures(Some(1), None);
         let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
-        let apis = test_minhook_apis();
-        let registered = register_plan_with_apis(&plan, apis).expect("registration should succeed");
-        let runtime = MinHookRuntime {
-            state: MinHookState {
-                owns_initialization: true,
-            },
-            apis,
-        };
+        let (runtime, registered) = register_plan(&plan).expect("registration should succeed");
 
         let cleanup_failures = unregister_registered_hooks(&runtime, &registered);
 

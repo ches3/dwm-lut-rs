@@ -875,6 +875,34 @@ mod tests {
     }
 
     #[test]
+    fn enable_failure_disables_hooks_and_retains_state() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        state::reset_state_for_tests();
+        crate::minhook::reset_test_minhook_behavior(None, Some(1), None, None);
+        let profile = test_profile();
+
+        let error = super::initialize_with_resolution(
+            profile,
+            test_payload(),
+            synthetic_resolution(&profile),
+        )
+        .expect_err("enable failure should abort initialization");
+
+        assert!(matches!(error, super::HookError::MinHook(_)));
+        let calls = crate::minhook::test_minhook_call_counts();
+        assert!(calls.create_calls > 0);
+        assert_eq!(calls.enable_calls, 1);
+        assert_eq!(calls.disable_calls, calls.create_calls);
+        assert_eq!(calls.remove_calls, 0);
+        assert!(!state::is_initialized());
+        assert!(state::has_retained_state());
+
+        state::reset_state_for_tests();
+    }
+
+    #[test]
     fn shutdown_disables_hooks_and_reinitialization_reuses_registration() {
         let _guard = HOOK_GLOBAL_TEST_LOCK
             .lock()
