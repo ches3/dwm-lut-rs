@@ -91,12 +91,30 @@ pub struct LutPipeline {
     pub luts: Vec<LoadedLut>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct LutRenderPlan {
-    pub format: BackBufferFormat,
-    pub dirty_rects: Vec<DirtyRect>,
-    pub lut_index: usize,
-    pub shader_constants: ShaderConstants,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ResolvedLut {
+    pub(crate) lut_index: usize,
+    pub(crate) format: BackBufferFormat,
+    pub(crate) shader_constants: ShaderConstants,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LutDecision {
+    NotApplicable,
+    Apply {
+        format: BackBufferFormat,
+        lut_index: usize,
+    },
+}
+
+#[cfg(test)]
+impl LutDecision {
+    pub(crate) const fn from_resolved(resolved: ResolvedLut) -> Self {
+        Self::Apply {
+            format: resolved.format,
+            lut_index: resolved.lut_index,
+        }
+    }
 }
 
 impl LutPipeline {
@@ -118,62 +136,24 @@ impl LutPipeline {
         Self { luts }
     }
 
-    pub fn select_lut_index_for_monitor_identity(
+    pub(crate) fn resolve(
         &self,
         identity: MonitorIdentity,
         format: BackBufferFormat,
-    ) -> Option<usize> {
+    ) -> Option<ResolvedLut> {
         let color_mode = match format {
             BackBufferFormat::Bgra8Unorm => ColorMode::Sdr,
             BackBufferFormat::Rgba16Float => ColorMode::Hdr,
         };
-
-        self.luts.iter().position(|lut| {
+        let lut_index = self.luts.iter().position(|lut| {
             let target = &lut.target;
             target.identity == identity && target.color_mode == color_mode
-        })
-    }
-
-    pub fn build_present_plan_for_monitor_identity(
-        &self,
-        identity: MonitorIdentity,
-        dxgi_format: u32,
-        dirty_rects: &[DirtyRect],
-    ) -> Option<LutRenderPlan> {
-        let format = BackBufferFormat::from_dxgi_format(dxgi_format)?;
-        let lut_index = self.select_lut_index_for_monitor_identity(identity, format)?;
-        self.build_present_plan_for_index(format, dirty_rects, lut_index)
-    }
-
-    pub fn build_present_plan_for_lut_index(
-        &self,
-        dxgi_format: u32,
-        dirty_rects: &[DirtyRect],
-        lut_index: usize,
-    ) -> Option<LutRenderPlan> {
-        let format = BackBufferFormat::from_dxgi_format(dxgi_format)?;
-        let lut = self.luts.get(lut_index)?;
-        let color_mode = match format {
-            BackBufferFormat::Bgra8Unorm => ColorMode::Sdr,
-            BackBufferFormat::Rgba16Float => ColorMode::Hdr,
-        };
-        (lut.target.color_mode == color_mode)
-            .then(|| self.build_present_plan_for_index(format, dirty_rects, lut_index))
-            .flatten()
-    }
-
-    fn build_present_plan_for_index(
-        &self,
-        format: BackBufferFormat,
-        dirty_rects: &[DirtyRect],
-        lut_index: usize,
-    ) -> Option<LutRenderPlan> {
+        })?;
         let lut = self.luts.get(lut_index)?;
 
-        Some(LutRenderPlan {
-            format,
-            dirty_rects: dirty_rects.to_vec(),
+        Some(ResolvedLut {
             lut_index,
+            format,
             shader_constants: ShaderConstants {
                 lut_size: lut.metadata.size,
                 hdr: u32::from(format.is_hdr()),
@@ -181,6 +161,18 @@ impl LutPipeline {
                 domain_max: extend_domain(lut.metadata.domain_max),
             },
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decide(
+        &self,
+        identity: MonitorIdentity,
+        format: BackBufferFormat,
+    ) -> LutDecision {
+        match self.resolve(identity, format) {
+            Some(resolved) => LutDecision::from_resolved(resolved),
+            None => LutDecision::NotApplicable,
+        }
     }
 }
 
@@ -432,9 +424,8 @@ mod tests {
     use std::ptr::addr_of;
 
     use super::{
-        BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
-        LutPipeline, ShaderConstants, ShaderConstantsCBuffer, apply_sdr_dither, normalize_sample,
-        pq_to_scrgb, scrgb_to_pq, tetrahedral_interpolation,
+        BackBufferFormat, LutDecision, LutPipeline, ShaderConstants, ShaderConstantsCBuffer,
+        apply_sdr_dither, normalize_sample, pq_to_scrgb, scrgb_to_pq, tetrahedral_interpolation,
     };
 
     fn identity_cube() -> PayloadLut {
@@ -528,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn present_plan_selects_sdr_lut_by_runtime_identity() {
+    fn resolve_selects_sdr_lut_by_runtime_identity() {
         let identity = MonitorIdentity {
             adapter_luid: AdapterLuid {
                 high_part: 0,
@@ -538,29 +529,23 @@ mod tests {
         };
         let runtime =
             LutPipeline::from_payload(&payload([(identity, ColorMode::Sdr, identity_cube())]));
-        let plan = runtime
-            .build_present_plan_for_monitor_identity(
-                identity,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                &[DirtyRect {
-                    left: 0,
-                    top: 0,
-                    right: 64,
-                    bottom: 64,
-                }],
-            )
-            .expect("plan should exist");
+        let resolved = runtime
+            .resolve(identity, BackBufferFormat::Bgra8Unorm)
+            .expect("resolved LUT should exist");
 
-        assert_eq!(plan.format, BackBufferFormat::Bgra8Unorm);
-        assert_eq!(plan.shader_constants.lut_size, 2);
-        assert_eq!(plan.shader_constants.hdr, 0);
-        assert_eq!(plan.shader_constants.domain_min, [0.0, 0.0, 0.0, 0.0]);
-        assert_eq!(plan.shader_constants.domain_max, [1.0, 1.0, 1.0, 0.0]);
-        assert_eq!(plan.dirty_rects.len(), 1);
+        assert_eq!(resolved.format, BackBufferFormat::Bgra8Unorm);
+        assert_eq!(resolved.shader_constants.lut_size, 2);
+        assert_eq!(resolved.shader_constants.hdr, 0);
+        assert_eq!(resolved.shader_constants.domain_min, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(resolved.shader_constants.domain_max, [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(
+            runtime.decide(identity, BackBufferFormat::Bgra8Unorm),
+            LutDecision::from_resolved(resolved)
+        );
     }
 
     #[test]
-    fn present_plan_selects_hdr_lut_for_rgba16_float() {
+    fn resolve_selects_hdr_lut_for_rgba16_float() {
         let identity = MonitorIdentity {
             adapter_luid: AdapterLuid {
                 high_part: 0,
@@ -570,19 +555,16 @@ mod tests {
         };
         let runtime =
             LutPipeline::from_payload(&payload([(identity, ColorMode::Hdr, identity_cube())]));
-        let plan = runtime.build_present_plan_for_monitor_identity(
-            identity,
-            DXGI_FORMAT_R16G16B16A16_FLOAT,
-            &[],
-        );
+        let resolved = runtime
+            .resolve(identity, BackBufferFormat::Rgba16Float)
+            .expect("HDR LUT should exist");
 
-        let plan = plan.expect("HDR plan should exist");
-        assert_eq!(plan.format, BackBufferFormat::Rgba16Float);
-        assert_eq!(plan.shader_constants.hdr, 1);
+        assert_eq!(resolved.format, BackBufferFormat::Rgba16Float);
+        assert_eq!(resolved.shader_constants.hdr, 1);
     }
 
     #[test]
-    fn present_plan_selects_monitor_by_runtime_identity() {
+    fn resolve_selects_monitor_by_runtime_identity() {
         let identity_a = MonitorIdentity {
             adapter_luid: AdapterLuid {
                 high_part: 0,
@@ -603,14 +585,14 @@ mod tests {
         ]));
         assert_eq!(
             runtime
-                .build_present_plan_for_monitor_identity(
-                    identity_b,
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
-                    &[],
-                )
-                .expect("identity should select a plan")
+                .resolve(identity_b, BackBufferFormat::Bgra8Unorm)
+                .expect("identity should select a LUT")
                 .lut_index,
             1
+        );
+        assert_eq!(
+            runtime.decide(identity_a, BackBufferFormat::Rgba16Float),
+            LutDecision::NotApplicable
         );
     }
 
@@ -631,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn present_plan_preserves_non_default_domain_for_shader_constants() {
+    fn resolve_preserves_non_default_domain_for_shader_constants() {
         let identity = MonitorIdentity {
             adapter_luid: AdapterLuid {
                 high_part: 0,
@@ -642,12 +624,12 @@ mod tests {
         let mut lut = identity_cube();
         lut.domain_min = [-1.0, 0.0, 0.0];
         let runtime = LutPipeline::from_payload(&payload([(identity, ColorMode::Sdr, lut)]));
-        let plan = runtime
-            .build_present_plan_for_monitor_identity(identity, DXGI_FORMAT_B8G8R8A8_UNORM, &[])
-            .expect("plan should exist");
+        let resolved = runtime
+            .resolve(identity, BackBufferFormat::Bgra8Unorm)
+            .expect("resolved LUT should exist");
 
-        assert_eq!(plan.shader_constants.domain_min, [-1.0, 0.0, 0.0, 0.0]);
-        assert_eq!(plan.shader_constants.domain_max, [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(resolved.shader_constants.domain_min, [-1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(resolved.shader_constants.domain_max, [1.0, 1.0, 1.0, 0.0]);
     }
 
     #[test]

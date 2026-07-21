@@ -10,8 +10,7 @@ use windows::Win32::System::Memory::{
     PAGE_GUARD, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
 };
 
-use crate::lut_pipeline::{BackBufferFormat, DirtyRect, LutPipeline, LutRenderPlan};
-use dwm_lut_payload::MonitorIdentity;
+use crate::lut_pipeline::{BackBufferFormat, LutDecision};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayTestModeControl {
@@ -36,18 +35,10 @@ impl OverlayTestModeControl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextLutState {
-    pub back_buffer_format: Option<BackBufferFormat>,
-    pub lut_index: Option<usize>,
-    pub dirty_rect_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PresentHookOutcome {
-    pub plan: Option<LutRenderPlan>,
-    pub promotion_blocked: bool,
-    pub overlay_test_mode_control: OverlayTestModeControl,
+    pub back_buffer_format: BackBufferFormat,
+    pub lut_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,68 +95,26 @@ impl LutBypassRuntime {
         }
     }
 
-    pub fn update_present(
-        &mut self,
-        lut_pipeline: &LutPipeline,
-        context_address: usize,
-        monitor_identity: Option<MonitorIdentity>,
-        dxgi_format: u32,
-        dirty_rects: &[DirtyRect],
-    ) -> PresentHookOutcome {
-        let plan = monitor_identity.and_then(|identity| {
-            lut_pipeline.build_present_plan_for_monitor_identity(identity, dxgi_format, dirty_rects)
-        });
-        self.update_context(context_address, dxgi_format, dirty_rects, plan)
-    }
-
-    pub fn update_present_with_lut_index(
-        &mut self,
-        lut_pipeline: &LutPipeline,
-        context_address: usize,
-        dxgi_format: u32,
-        dirty_rects: &[DirtyRect],
-        lut_index: Option<usize>,
-    ) -> PresentHookOutcome {
-        let plan = lut_index.and_then(|lut_index| {
-            lut_pipeline.build_present_plan_for_lut_index(dxgi_format, dirty_rects, lut_index)
-        });
-        self.update_context(context_address, dxgi_format, dirty_rects, plan)
-    }
-
-    fn update_context(
-        &mut self,
-        context_address: usize,
-        dxgi_format: u32,
-        dirty_rects: &[DirtyRect],
-        plan: Option<LutRenderPlan>,
-    ) -> PresentHookOutcome {
-        let back_buffer_format = BackBufferFormat::from_dxgi_format(dxgi_format);
-        let promotion_blocked = plan.is_some();
-        let lut_index = plan.as_ref().map(|plan| plan.lut_index);
-
-        if promotion_blocked {
-            self.contexts.insert(
-                context_address,
-                ContextLutState {
-                    back_buffer_format,
-                    lut_index,
-                    dirty_rect_count: dirty_rects.len(),
-                },
-            );
-        } else {
-            self.contexts.remove(&context_address);
+    pub(crate) fn update_from_decision(&mut self, context_address: usize, decision: LutDecision) {
+        match decision {
+            LutDecision::Apply { format, lut_index } => {
+                self.contexts.insert(
+                    context_address,
+                    ContextLutState {
+                        back_buffer_format: format,
+                        lut_index,
+                    },
+                );
+            }
+            LutDecision::NotApplicable => {
+                self.contexts.remove(&context_address);
+            }
         }
 
         let active = self.has_active_contexts();
         self.set_overlay_test_mode_control(self.overlay_test_mode_control());
         self.set_disable_independent_flip_enabled(active);
         self.set_overlays_enabled_override(active);
-
-        PresentHookOutcome {
-            plan,
-            promotion_blocked,
-            overlay_test_mode_control: self.overlay_test_mode_control,
-        }
     }
 
     pub fn direct_flip_compatible(
@@ -356,7 +305,7 @@ mod tests {
     };
 
     use super::{LutBypassRuntime, OverlayTestModeControl};
-    use crate::lut_pipeline::{DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, LutPipeline};
+    use crate::lut_pipeline::{BackBufferFormat, LutDecision, LutPipeline};
 
     fn test_identity() -> MonitorIdentity {
         MonitorIdentity {
@@ -385,28 +334,20 @@ mod tests {
         })
     }
 
+    fn apply_decision(runtime: &mut LutBypassRuntime, pipeline: &LutPipeline, context: usize) {
+        let decision = pipeline.decide(test_identity(), BackBufferFormat::Bgra8Unorm);
+        runtime.update_from_decision(context, decision);
+    }
+
     #[test]
     fn present_activation_blocks_promotion_for_same_context_only() {
         let pipeline = pipeline_for_single_sdr_monitor();
         let mut runtime = LutBypassRuntime::new(true, None, None);
 
-        let outcome = runtime.update_present(
-            &pipeline,
-            0x1234,
-            Some(test_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[DirtyRect {
-                left: 0,
-                top: 0,
-                right: 64,
-                bottom: 64,
-            }],
-        );
+        apply_decision(&mut runtime, &pipeline, 0x1234);
 
-        assert!(outcome.plan.is_some());
-        assert!(outcome.promotion_blocked);
         assert_eq!(
-            outcome.overlay_test_mode_control,
+            runtime.overlay_test_mode_control,
             OverlayTestModeControl::ForceMode5
         );
         assert!(!runtime.direct_flip_compatible(0x1234, true));
@@ -420,8 +361,8 @@ mod tests {
         );
 
         let context = runtime.context(0x1234).expect("context should exist");
-        assert_eq!(context.lut_index, Some(0));
-        assert_eq!(context.dirty_rect_count, 1);
+        assert_eq!(context.lut_index, 0);
+        assert_eq!(context.back_buffer_format, BackBufferFormat::Bgra8Unorm);
     }
 
     #[test]
@@ -429,19 +370,9 @@ mod tests {
         let pipeline = pipeline_for_single_sdr_monitor();
         let mut runtime = LutBypassRuntime::new(true, None, None);
 
-        let _ = runtime.update_present(
-            &pipeline,
-            0x1234,
-            Some(test_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[],
-        );
+        apply_decision(&mut runtime, &pipeline, 0x1234);
+        runtime.update_from_decision(0x1234, LutDecision::NotApplicable);
 
-        let outcome =
-            runtime.update_present(&pipeline, 0x1234, None, DXGI_FORMAT_B8G8R8A8_UNORM, &[]);
-
-        assert!(outcome.plan.is_none());
-        assert!(!outcome.promotion_blocked);
         assert!(runtime.direct_flip_compatible(0x1234, true));
         assert!(!runtime.direct_flip_support_compatible(true));
         assert_eq!(runtime.ensure_independent_flip_state(), Some(0));
@@ -459,18 +390,10 @@ mod tests {
             None,
         );
 
-        let _ = runtime.update_present(
-            &pipeline,
-            0x1234,
-            Some(test_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[],
-        );
-
+        apply_decision(&mut runtime, &pipeline, 0x1234);
         assert_eq!(overlay_test_mode, 5);
 
-        let _ = runtime.update_present(&pipeline, 0x1234, None, DXGI_FORMAT_B8G8R8A8_UNORM, &[]);
-
+        runtime.update_from_decision(0x1234, LutDecision::NotApplicable);
         assert_eq!(overlay_test_mode, 0);
     }
 
@@ -498,16 +421,10 @@ mod tests {
 
         assert_eq!(disable_independent_flip, 0);
 
-        let _ = runtime.update_present(
-            &pipeline,
-            0x1234,
-            Some(test_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[],
-        );
+        apply_decision(&mut runtime, &pipeline, 0x1234);
         assert_eq!(disable_independent_flip, 1);
 
-        let _ = runtime.update_present(&pipeline, 0x1234, None, DXGI_FORMAT_B8G8R8A8_UNORM, &[]);
+        runtime.update_from_decision(0x1234, LutDecision::NotApplicable);
         assert!(!runtime.has_active_contexts());
         assert_eq!(disable_independent_flip, 0);
     }
@@ -522,13 +439,7 @@ mod tests {
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
-        let _ = runtime.update_present(
-            &pipeline,
-            0x1234,
-            Some(test_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[],
-        );
+        apply_decision(&mut runtime, &pipeline, 0x1234);
 
         assert_eq!(disable_independent_flip, 7);
         assert!(
@@ -549,13 +460,7 @@ mod tests {
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
-        let _ = runtime.update_present(
-            &pipeline,
-            0x1234,
-            Some(test_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[],
-        );
+        apply_decision(&mut runtime, &pipeline, 0x1234);
 
         assert_eq!(disable_independent_flip, 1);
         assert_eq!(runtime.overlays_enabled_override, Some(true));
@@ -566,13 +471,7 @@ mod tests {
         let pipeline = pipeline_for_single_sdr_monitor();
         let mut runtime = LutBypassRuntime::new(true, None, None);
 
-        let _ = runtime.update_present(
-            &pipeline,
-            0x1234,
-            Some(test_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[],
-        );
+        apply_decision(&mut runtime, &pipeline, 0x1234);
 
         assert_eq!(runtime.overlays_enabled_override, Some(false));
     }
@@ -588,13 +487,7 @@ mod tests {
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
-        let _ = runtime.update_present(
-            &pipeline,
-            0x1234,
-            Some(test_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[],
-        );
+        apply_decision(&mut runtime, &pipeline, 0x1234);
 
         assert!(runtime.has_active_contexts());
         assert_eq!(overlay_test_mode, 5);

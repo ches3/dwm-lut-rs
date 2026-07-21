@@ -188,11 +188,11 @@ impl D3D11Renderer {
             dirty_rects,
         ) {
             Ok(draw_plan) => draw_plan,
-            Err(_reason) => {
+            Err(skip) => {
                 #[cfg(debug_assertions)]
                 debug_log!(
                     "event=lut_draw_skip reason={} overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} dxgi_format={} width={} height={} dirty_rect_count={}",
-                    _reason.as_str(),
+                    skip.reason.as_str(),
                     present_context.overlay_swap_chain,
                     back_buffer.as_raw() as usize,
                     frame_adapter_luid,
@@ -207,7 +207,7 @@ impl D3D11Renderer {
                     dxgi_format: Some(desc.Format.0 as u32),
                     width: Some(desc.Width),
                     height: Some(desc.Height),
-                    lut_index: None,
+                    lut_index: skip.resolved.map(|resolved| resolved.lut_index),
                     present_dirty_rect: None,
                 };
             }

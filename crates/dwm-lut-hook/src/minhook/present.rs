@@ -489,7 +489,20 @@ fn is_readable_memory_region(info: &MEMORY_BASIC_INFORMATION) -> bool {
 }
 
 fn deactivate_present_context(context_address: usize) {
-    let _ = state::evaluate_present_hook(context_address, None, 0, &[], false);
+    state::deactivate_present_context(context_address);
+}
+
+fn decision_from_render_result(
+    render_result: crate::d3d11_renderer::RenderPresentLutResult,
+) -> Option<crate::LutDecision> {
+    let dxgi_format = render_result.dxgi_format?;
+    let Some(format) = crate::BackBufferFormat::from_dxgi_format(dxgi_format) else {
+        return Some(crate::LutDecision::NotApplicable);
+    };
+    Some(match render_result.lut_index {
+        Some(lut_index) => crate::LutDecision::Apply { format, lut_index },
+        None => crate::LutDecision::NotApplicable,
+    })
 }
 
 pub(super) unsafe extern "system" fn present_detour(
@@ -597,14 +610,8 @@ pub(super) unsafe extern "system" fn present_detour(
                     }
                     #[cfg(not(debug_assertions))]
                     let _ = present_dirty_rect_source;
-                    if let Some(dxgi_format) = render_result.dxgi_format {
-                        let _ = state::evaluate_rendered_present_hook(
-                            this,
-                            inputs.monitor_identity,
-                            dxgi_format,
-                            &inputs.dirty_rects,
-                            render_result,
-                        );
+                    if let Some(decision) = decision_from_render_result(render_result) {
+                        state::update_present_context(this, decision);
                     }
                 }
             } else {
@@ -708,10 +715,7 @@ mod tests {
     use crate::profile::HookTarget;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK};
-    use crate::{
-        BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
-        HookProfile,
-    };
+    use crate::{BackBufferFormat, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect, HookProfile};
 
     fn test_profile() -> HookProfile {
         crate::profile::latest_registered_profile()
@@ -832,20 +836,13 @@ mod tests {
     }
 
     fn activate_context(context_address: usize) {
-        let dirty_rects = [DirtyRect {
-            left: 0,
-            top: 0,
-            right: 64,
-            bottom: 64,
-        }];
-        state::evaluate_present_hook(
+        state::update_present_context(
             context_address,
-            Some(test_monitor_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &dirty_rects,
-            true,
-        )
-        .expect("present evaluation should run");
+            crate::LutDecision::Apply {
+                format: BackBufferFormat::Bgra8Unorm,
+                lut_index: 0,
+            },
+        );
     }
 
     struct FakePresentObjects {
@@ -1094,8 +1091,8 @@ mod tests {
         let context = state::lut_bypass_runtime()
             .and_then(|runtime| runtime.context(fake.context_address()).cloned())
             .expect("successful LUT render should keep the context active");
-        assert_eq!(context.lut_index, Some(0));
-        assert_eq!(context.dirty_rect_count, 1);
+        assert_eq!(context.lut_index, 0);
+        assert_eq!(context.back_buffer_format, BackBufferFormat::Bgra8Unorm);
         let render_call = crate::d3d11_renderer::fake_render_present_lut_call()
             .expect("renderer should be called with collected present inputs");
         assert_eq!(
@@ -1157,11 +1154,8 @@ mod tests {
         let context = state::lut_bypass_runtime()
             .and_then(|runtime| runtime.context(fake.context_address()).cloned())
             .expect("HDR render plan should keep the context active");
-        assert_eq!(
-            context.back_buffer_format,
-            Some(BackBufferFormat::Rgba16Float)
-        );
-        assert_eq!(context.lut_index, Some(1));
+        assert_eq!(context.back_buffer_format, BackBufferFormat::Rgba16Float);
+        assert_eq!(context.lut_index, 1);
 
         crate::d3d11_renderer::reset_fake_render_result();
     }
@@ -1220,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn present_detour_keeps_context_active_when_render_misses_a_frame() {
+    fn present_detour_keeps_context_active_when_resolved_render_misses_a_frame() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_last_original_present_rects();
         initialize_test_state();
@@ -1234,6 +1228,14 @@ mod tests {
             false,
         );
         activate_context(fake.context_address());
+        crate::d3d11_renderer::set_fake_render_result(
+            crate::d3d11_renderer::RenderPresentLutResult {
+                lut_applied: false,
+                dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+                lut_index: Some(0),
+                ..Default::default()
+            },
+        );
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
 
@@ -1254,40 +1256,58 @@ mod tests {
         let context = state::lut_bypass_runtime()
             .and_then(|runtime| runtime.context(fake.context_address()).cloned())
             .expect("present plan should keep the context active across a missed render");
-        assert_eq!(context.lut_index, Some(0));
-        assert_eq!(context.dirty_rect_count, 1);
+        assert_eq!(context.lut_index, 0);
+        assert_eq!(context.back_buffer_format, BackBufferFormat::Bgra8Unorm);
+        crate::d3d11_renderer::reset_fake_render_result();
     }
 
     #[test]
-    fn rendered_present_clears_context_when_observed_format_has_no_assignment() {
+    fn present_detour_clears_context_when_observed_format_has_no_assignment() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         initialize_test_state();
-        let context_address = 0x1234;
-        let dirty_rects = [DirtyRect {
-            left: 0,
-            top: 0,
-            right: 64,
-            bottom: 64,
-        }];
+        let fake = FakePresentObjects::new(
+            vec![DirtyRect {
+                left: 0,
+                top: 0,
+                right: 64,
+                bottom: 64,
+            }],
+            false,
+        );
 
-        activate_context(context_address);
-        state::evaluate_rendered_present_hook(
-            context_address,
-            Some(test_monitor_identity()),
-            DXGI_FORMAT_R16G16B16A16_FLOAT,
-            &dirty_rects,
+        activate_context(fake.context_address());
+        crate::d3d11_renderer::set_fake_render_result(
             crate::d3d11_renderer::RenderPresentLutResult {
+                lut_applied: false,
                 dxgi_format: Some(DXGI_FORMAT_R16G16B16A16_FLOAT),
+                lut_index: None,
                 ..Default::default()
             },
-        )
-        .expect("post-render present evaluation should run");
+        );
+        super::super::detours::original_pointer_for_target(HookTarget::Present)
+            .store(returns_present_status as *mut c_void, Ordering::Release);
+
+        assert_eq!(
+            unsafe {
+                super::present_detour(
+                    fake.context_address(),
+                    fake.overlay_swap_chain_address(),
+                    0,
+                    fake.rect_vec_address(),
+                    0,
+                    0,
+                    0,
+                )
+            },
+            0x55
+        );
 
         assert!(
             state::lut_bypass_runtime()
-                .and_then(|runtime| runtime.context(context_address).cloned())
+                .and_then(|runtime| runtime.context(fake.context_address()).cloned())
                 .is_none()
         );
+        crate::d3d11_renderer::reset_fake_render_result();
     }
 
     #[test]
@@ -1305,14 +1325,13 @@ mod tests {
             }],
             false,
         );
-        state::evaluate_present_hook(
+        state::update_present_context(
             fake.context_address(),
-            Some(test_monitor_identity()),
-            DXGI_FORMAT_R16G16B16A16_FLOAT,
-            &fake.dirty_rects,
-            true,
-        )
-        .expect("HDR present evaluation should activate the context");
+            crate::LutDecision::Apply {
+                format: BackBufferFormat::Rgba16Float,
+                lut_index: 0,
+            },
+        );
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
 
@@ -1334,11 +1353,8 @@ mod tests {
         let context = state::lut_bypass_runtime()
             .and_then(|runtime| runtime.context(fake.context_address()).cloned())
             .expect("unobserved format must not clear an active HDR context");
-        assert_eq!(
-            context.back_buffer_format,
-            Some(BackBufferFormat::Rgba16Float)
-        );
-        assert_eq!(context.lut_index, Some(0));
+        assert_eq!(context.back_buffer_format, BackBufferFormat::Rgba16Float);
+        assert_eq!(context.lut_index, 0);
     }
 
     #[test]

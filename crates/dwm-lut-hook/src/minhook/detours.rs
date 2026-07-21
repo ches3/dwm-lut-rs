@@ -275,9 +275,9 @@ mod tests {
         PayloadLut,
     };
 
+    use crate::HookProfile;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK};
-    use crate::{DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookProfile};
 
     fn test_profile() -> HookProfile {
         crate::profile::latest_registered_profile()
@@ -503,20 +503,13 @@ mod tests {
     }
 
     fn activate_context(context_address: usize) {
-        let dirty_rects = [DirtyRect {
-            left: 0,
-            top: 0,
-            right: 64,
-            bottom: 64,
-        }];
-        state::evaluate_present_hook(
+        state::update_present_context(
             context_address,
-            Some(test_monitor_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &dirty_rects,
-            true,
-        )
-        .expect("present evaluation should run");
+            crate::LutDecision::Apply {
+                format: crate::BackBufferFormat::Bgra8Unorm,
+                lut_index: 0,
+            },
+        );
     }
 
     #[test]

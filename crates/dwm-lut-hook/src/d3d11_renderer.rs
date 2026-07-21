@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::lut_pipeline::{
     BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
-    LutPipeline, ShaderConstantsCBuffer,
+    LutPipeline, ResolvedLut, ShaderConstantsCBuffer,
 };
 use dwm_lut_payload::MonitorIdentity;
 
@@ -39,6 +39,12 @@ enum DrawPlanSkipReason {
     UnsupportedFormat,
     MissingAssignment,
     EmptyDirtyRects,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DrawPlanSkip {
+    reason: DrawPlanSkipReason,
+    resolved: Option<ResolvedLut>,
 }
 
 #[cfg(all(not(test), debug_assertions))]
@@ -162,32 +168,47 @@ fn prepare_gpu_draw_plan(
     width: u32,
     height: u32,
     dirty_rects: &[DirtyRect],
-) -> Result<GpuDrawPlan, DrawPlanSkipReason> {
-    if width == 0 || height == 0 {
-        return Err(DrawPlanSkipReason::ZeroSize);
-    }
+) -> Result<GpuDrawPlan, DrawPlanSkip> {
+    let format = BackBufferFormat::from_dxgi_format(dxgi_format);
+    let resolved = monitor_identity
+        .zip(format)
+        .and_then(|(identity, format)| pipeline.resolve(identity, format));
 
-    let Some(identity) = monitor_identity else {
-        return Err(DrawPlanSkipReason::MissingMonitorIdentity);
+    if width == 0 || height == 0 {
+        return Err(DrawPlanSkip {
+            reason: DrawPlanSkipReason::ZeroSize,
+            resolved,
+        });
+    }
+    if monitor_identity.is_none() {
+        return Err(DrawPlanSkip {
+            reason: DrawPlanSkipReason::MissingMonitorIdentity,
+            resolved: None,
+        });
+    }
+    if format.is_none() {
+        return Err(DrawPlanSkip {
+            reason: DrawPlanSkipReason::UnsupportedFormat,
+            resolved: None,
+        });
+    }
+    let Some(resolved) = resolved else {
+        return Err(DrawPlanSkip {
+            reason: DrawPlanSkipReason::MissingAssignment,
+            resolved: None,
+        });
     };
-    let Some(format) = BackBufferFormat::from_dxgi_format(dxgi_format) else {
-        return Err(DrawPlanSkipReason::UnsupportedFormat);
-    };
-    let Some(lut_index) = pipeline.select_lut_index_for_monitor_identity(identity, format) else {
-        return Err(DrawPlanSkipReason::MissingAssignment);
-    };
-    let Some(plan) = pipeline.build_present_plan_for_lut_index(dxgi_format, dirty_rects, lut_index)
-    else {
-        return Err(DrawPlanSkipReason::MissingAssignment);
-    };
-    let dirty_rects = draw_rects_for_frame(&plan.dirty_rects, width, height);
+    let dirty_rects = draw_rects_for_frame(dirty_rects, width, height);
     if dirty_rects.is_empty() {
-        return Err(DrawPlanSkipReason::EmptyDirtyRects);
+        return Err(DrawPlanSkip {
+            reason: DrawPlanSkipReason::EmptyDirtyRects,
+            resolved: Some(resolved),
+        });
     }
     Ok(GpuDrawPlan {
-        format: plan.format,
-        lut_index: plan.lut_index,
-        constants: plan.shader_constants.to_cbuffer(),
+        format: resolved.format,
+        lut_index: resolved.lut_index,
+        constants: resolved.shader_constants.to_cbuffer(),
         dirty_rects,
     })
 }
@@ -546,17 +567,45 @@ mod tests {
         assert_eq!(hdr_plan.format, BackBufferFormat::Rgba16Float);
         assert_eq!(hdr_plan.lut_index, 1);
         assert_eq!(hdr_plan.constants.hdr, 1);
-        assert!(
-            prepare_gpu_draw_plan(
-                &pipeline,
-                Some(test_identity()),
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                0,
-                1080,
-                &dirty_rects,
-            )
-            .is_err()
+    }
+
+    #[test]
+    fn gpu_draw_plan_skip_preserves_only_resolved_assignments() {
+        let pipeline = test_pipeline();
+        let zero_size_skip = prepare_gpu_draw_plan(
+            &pipeline,
+            Some(test_identity()),
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            0,
+            1080,
+            &[],
+        )
+        .expect_err("zero-sized frames should skip drawing");
+
+        assert_eq!(zero_size_skip.reason, DrawPlanSkipReason::ZeroSize);
+        let resolved = zero_size_skip
+            .resolved
+            .expect("a matching assignment should remain resolved");
+        assert_eq!(resolved.format, BackBufferFormat::Bgra8Unorm);
+        assert_eq!(resolved.lut_index, 0);
+
+        let mut unmatched_identity = test_identity();
+        unmatched_identity.target_id = unmatched_identity.target_id.saturating_add(1);
+        let missing_assignment_skip = prepare_gpu_draw_plan(
+            &pipeline,
+            Some(unmatched_identity),
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            1920,
+            1080,
+            &[],
+        )
+        .expect_err("an unmatched monitor should skip drawing");
+
+        assert_eq!(
+            missing_assignment_skip.reason,
+            DrawPlanSkipReason::MissingAssignment
         );
+        assert_eq!(missing_assignment_skip.resolved, None);
     }
 
     #[test]
@@ -836,22 +885,27 @@ mod tests {
                 bottom: 20,
             }]
         );
-        assert!(
-            prepare_gpu_draw_plan(
-                &pipeline,
-                Some(test_identity()),
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                1920,
-                1080,
-                &[DirtyRect {
-                    left: 1920,
-                    top: 0,
-                    right: 1940,
-                    bottom: 50,
-                }],
-            )
-            .is_err()
-        );
+        let skip = prepare_gpu_draw_plan(
+            &pipeline,
+            Some(test_identity()),
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            1920,
+            1080,
+            &[DirtyRect {
+                left: 1920,
+                top: 0,
+                right: 1940,
+                bottom: 50,
+            }],
+        )
+        .expect_err("dirty rects outside the frame should skip drawing");
+
+        assert_eq!(skip.reason, DrawPlanSkipReason::EmptyDirtyRects);
+        let resolved = skip
+            .resolved
+            .expect("a matching assignment should remain resolved");
+        assert_eq!(resolved.format, BackBufferFormat::Bgra8Unorm);
+        assert_eq!(resolved.lut_index, 0);
     }
 
     #[test]

@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 use dwm_lut_payload::{HookPayload, MonitorIdentity};
 
 use crate::DirtyRect;
-use crate::lut_bypass::{LutBypassRuntime, PresentHookOutcome};
-use crate::lut_pipeline::LutPipeline;
+use crate::lut_bypass::LutBypassRuntime;
+use crate::lut_pipeline::{LutDecision, LutPipeline};
 use crate::minhook::{MinHookRuntime, RegisteredHook};
 use crate::profile::{HookProfile, HookTarget};
 use crate::resolver::SignatureResolutionReport;
@@ -136,23 +136,17 @@ pub(crate) fn is_runtime_active() -> bool {
     )
 }
 
-pub(crate) fn evaluate_present_hook(
-    context_address: usize,
-    monitor_identity: Option<MonitorIdentity>,
-    dxgi_format: u32,
-    dirty_rects: &[DirtyRect],
-    _lut_applied: bool,
-) -> Option<PresentHookOutcome> {
-    with_state_mut(|state| {
-        let runtime = &mut state.runtime;
-        runtime.lut_bypass.update_present(
-            &runtime.lut_pipeline,
-            context_address,
-            monitor_identity,
-            dxgi_format,
-            dirty_rects,
-        )
-    })
+pub(crate) fn update_present_context(context_address: usize, decision: LutDecision) {
+    let _ = with_state_mut(|state| {
+        state
+            .runtime
+            .lut_bypass
+            .update_from_decision(context_address, decision);
+    });
+}
+
+pub(crate) fn deactivate_present_context(context_address: usize) {
+    update_present_context(context_address, LutDecision::NotApplicable);
 }
 
 pub(crate) fn begin_replace_assignments() -> ReplaceAssignmentsStart {
@@ -275,35 +269,6 @@ pub(crate) fn reactivate_retained_state(
 
 pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
     with_state(|state| (state.runtime.minhook, state.runtime.hooks.clone()))
-}
-
-pub(crate) fn evaluate_rendered_present_hook(
-    context_address: usize,
-    monitor_identity: Option<MonitorIdentity>,
-    dxgi_format: u32,
-    dirty_rects: &[DirtyRect],
-    render_result: crate::d3d11_renderer::RenderPresentLutResult,
-) -> Option<PresentHookOutcome> {
-    with_state_mut(|state| {
-        let runtime = &mut state.runtime;
-        if render_result.lut_index.is_some() {
-            runtime.lut_bypass.update_present_with_lut_index(
-                &runtime.lut_pipeline,
-                context_address,
-                dxgi_format,
-                dirty_rects,
-                render_result.lut_index,
-            )
-        } else {
-            runtime.lut_bypass.update_present(
-                &runtime.lut_pipeline,
-                context_address,
-                monitor_identity,
-                dxgi_format,
-                dirty_rects,
-            )
-        }
-    })
 }
 
 pub(crate) fn render_present_lut(
