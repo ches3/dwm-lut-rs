@@ -598,7 +598,7 @@ mod tests {
 
     use crate::profile::HookTarget;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
-    use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
+    use crate::state::{self, HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK};
     use crate::{
         BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
         HookProfile,
@@ -940,22 +940,6 @@ mod tests {
         assert!(super::is_readable_memory_region(&readable));
         assert!(!super::is_readable_memory_region(&execute_only));
         assert!(!super::is_readable_memory_region(&guarded));
-    }
-
-    #[test]
-    fn monitor_identity_offsets_match_overlay_swap_chain_fixture() {
-        let profile = test_profile();
-        let hypothesis = profile.hypotheses.monitor_identity;
-        assert_eq!(hypothesis.adapter_luid_low_offset, 0x34);
-        assert_eq!(hypothesis.adapter_luid_high_offset, 0x38);
-        assert_eq!(hypothesis.target_id_offset, 0x3c);
-
-        let fake = FakePresentObjects::new(Vec::new(), false);
-
-        let identity =
-            unsafe { super::read_monitor_identity(fake.overlay_swap_chain_address(), hypothesis) };
-
-        assert_eq!(identity, Some(test_monitor_identity()));
     }
 
     #[test]

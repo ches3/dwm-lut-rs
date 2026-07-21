@@ -1,6 +1,3 @@
-#[cfg(test)]
-use std::cell::RefCell;
-#[cfg(not(test))]
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
@@ -61,18 +58,15 @@ pub struct HookState {
     pub runtime: HookRuntime,
 }
 
-#[cfg(not(test))]
 static STATE: OnceLock<Mutex<Option<HookState>>> = OnceLock::new();
 
-#[cfg(not(test))]
 static RETAINED_STATE: OnceLock<Mutex<Option<HookState>>> = OnceLock::new();
 
 static PRESENT_RUNTIME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(test)]
-pub(crate) static PRESENT_RUNTIME_TEST_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static HOOK_GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-#[cfg(not(test))]
 static LIFECYCLE: AtomicU8 = AtomicU8::new(LIFECYCLE_IDLE);
 
 const LIFECYCLE_IDLE: u8 = 0;
@@ -80,13 +74,6 @@ const LIFECYCLE_RUNNING: u8 = 1;
 const LIFECYCLE_SHUTTING_DOWN: u8 = 2;
 const LIFECYCLE_SHUT_DOWN: u8 = 3;
 const LIFECYCLE_REPLACING_ASSIGNMENTS: u8 = 4;
-
-#[cfg(test)]
-thread_local! {
-    static STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
-    static RETAINED_STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
-    static LIFECYCLE: RefCell<u8> = const { RefCell::new(LIFECYCLE_IDLE) };
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShutdownStart {
@@ -104,33 +91,16 @@ pub(crate) enum ReplaceAssignmentsStart {
 }
 
 pub(crate) fn install_state(state: HookState) -> Result<(), Box<HookState>> {
-    #[cfg(not(test))]
-    {
-        let slot = STATE.get_or_init(|| Mutex::new(None));
-        let Ok(mut slot) = slot.lock() else {
-            return Err(Box::new(state));
-        };
-        if slot.is_some() {
-            return Err(Box::new(state));
-        }
-        *slot = Some(state);
-        LIFECYCLE.store(LIFECYCLE_RUNNING, Ordering::Release);
-        Ok(())
+    let slot = STATE.get_or_init(|| Mutex::new(None));
+    let Ok(mut slot) = slot.lock() else {
+        return Err(Box::new(state));
+    };
+    if slot.is_some() {
+        return Err(Box::new(state));
     }
-
-    #[cfg(test)]
-    {
-        STATE.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            if slot.is_some() {
-                Err(Box::new(state))
-            } else {
-                *slot = Some(state);
-                LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_RUNNING);
-                Ok(())
-            }
-        })
-    }
+    *slot = Some(state);
+    LIFECYCLE.store(LIFECYCLE_RUNNING, Ordering::Release);
+    Ok(())
 }
 
 pub fn is_initialized() -> bool {
@@ -138,34 +108,17 @@ pub fn is_initialized() -> bool {
 }
 
 pub(crate) fn can_initialize() -> bool {
-    #[cfg(not(test))]
-    {
-        matches!(
-            LIFECYCLE.load(Ordering::Acquire),
-            LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN
-        )
-    }
-
-    #[cfg(test)]
-    {
-        LIFECYCLE
-            .with(|lifecycle| matches!(*lifecycle.borrow(), LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN))
-    }
+    matches!(
+        LIFECYCLE.load(Ordering::Acquire),
+        LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN
+    )
 }
 
 pub(crate) fn has_retained_state() -> bool {
-    #[cfg(not(test))]
-    {
-        RETAINED_STATE
-            .get()
-            .and_then(|state| state.lock().ok().map(|guard| guard.is_some()))
-            .unwrap_or(false)
-    }
-
-    #[cfg(test)]
-    {
-        RETAINED_STATE.with(|slot| slot.borrow().is_some())
-    }
+    RETAINED_STATE
+        .get()
+        .and_then(|state| state.lock().ok().map(|guard| guard.is_some()))
+        .unwrap_or(false)
 }
 
 pub fn hook_profile() -> Option<HookProfile> {
@@ -177,23 +130,10 @@ pub fn lut_bypass_runtime() -> Option<LutBypassRuntime> {
 }
 
 pub(crate) fn is_runtime_active() -> bool {
-    #[cfg(not(test))]
-    {
-        matches!(
-            LIFECYCLE.load(Ordering::Acquire),
-            LIFECYCLE_RUNNING | LIFECYCLE_REPLACING_ASSIGNMENTS
-        )
-    }
-
-    #[cfg(test)]
-    {
-        LIFECYCLE.with(|lifecycle| {
-            matches!(
-                *lifecycle.borrow(),
-                LIFECYCLE_RUNNING | LIFECYCLE_REPLACING_ASSIGNMENTS
-            )
-        })
-    }
+    matches!(
+        LIFECYCLE.load(Ordering::Acquire),
+        LIFECYCLE_RUNNING | LIFECYCLE_REPLACING_ASSIGNMENTS
+    )
 }
 
 pub(crate) fn evaluate_present_hook(
@@ -216,64 +156,28 @@ pub(crate) fn evaluate_present_hook(
 }
 
 pub(crate) fn begin_replace_assignments() -> ReplaceAssignmentsStart {
-    #[cfg(not(test))]
-    {
-        match LIFECYCLE.compare_exchange(
-            LIFECYCLE_RUNNING,
-            LIFECYCLE_REPLACING_ASSIGNMENTS,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => ReplaceAssignmentsStart::Started,
-            Err(LIFECYCLE_IDLE) | Err(LIFECYCLE_SHUT_DOWN) => {
-                ReplaceAssignmentsStart::NotInitialized
-            }
-            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_REPLACING_ASSIGNMENTS) => {
-                ReplaceAssignmentsStart::AlreadyInProgress
-            }
-            Err(_) => ReplaceAssignmentsStart::NotInitialized,
+    match LIFECYCLE.compare_exchange(
+        LIFECYCLE_RUNNING,
+        LIFECYCLE_REPLACING_ASSIGNMENTS,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => ReplaceAssignmentsStart::Started,
+        Err(LIFECYCLE_IDLE) | Err(LIFECYCLE_SHUT_DOWN) => ReplaceAssignmentsStart::NotInitialized,
+        Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_REPLACING_ASSIGNMENTS) => {
+            ReplaceAssignmentsStart::AlreadyInProgress
         }
-    }
-
-    #[cfg(test)]
-    {
-        LIFECYCLE.with(|lifecycle| {
-            let mut lifecycle = lifecycle.borrow_mut();
-            match *lifecycle {
-                LIFECYCLE_RUNNING => {
-                    *lifecycle = LIFECYCLE_REPLACING_ASSIGNMENTS;
-                    ReplaceAssignmentsStart::Started
-                }
-                LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN => ReplaceAssignmentsStart::NotInitialized,
-                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_REPLACING_ASSIGNMENTS => {
-                    ReplaceAssignmentsStart::AlreadyInProgress
-                }
-                _ => ReplaceAssignmentsStart::NotInitialized,
-            }
-        })
+        Err(_) => ReplaceAssignmentsStart::NotInitialized,
     }
 }
 
 pub(crate) fn finish_replace_assignments() {
-    #[cfg(not(test))]
-    {
-        let _ = LIFECYCLE.compare_exchange(
-            LIFECYCLE_REPLACING_ASSIGNMENTS,
-            LIFECYCLE_RUNNING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-    }
-
-    #[cfg(test)]
-    {
-        LIFECYCLE.with(|lifecycle| {
-            let mut lifecycle = lifecycle.borrow_mut();
-            if *lifecycle == LIFECYCLE_REPLACING_ASSIGNMENTS {
-                *lifecycle = LIFECYCLE_RUNNING;
-            }
-        });
-    }
+    let _ = LIFECYCLE.compare_exchange(
+        LIFECYCLE_REPLACING_ASSIGNMENTS,
+        LIFECYCLE_RUNNING,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
 }
 
 fn present_runtime_lock() -> &'static Mutex<()> {
@@ -295,164 +199,78 @@ pub(crate) fn try_lock_present_runtime() -> Option<MutexGuard<'static, ()>> {
 }
 
 pub(crate) fn begin_shutdown() -> ShutdownStart {
-    #[cfg(not(test))]
-    {
-        match LIFECYCLE.compare_exchange(
-            LIFECYCLE_RUNNING,
-            LIFECYCLE_SHUTTING_DOWN,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => ShutdownStart::Started,
-            Err(LIFECYCLE_IDLE) => ShutdownStart::NotInitialized,
-            Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_REPLACING_ASSIGNMENTS) => {
-                ShutdownStart::AlreadyInProgress
-            }
-            Err(LIFECYCLE_SHUT_DOWN) => ShutdownStart::AlreadyShutDown,
-            Err(_) => ShutdownStart::NotInitialized,
+    match LIFECYCLE.compare_exchange(
+        LIFECYCLE_RUNNING,
+        LIFECYCLE_SHUTTING_DOWN,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => ShutdownStart::Started,
+        Err(LIFECYCLE_IDLE) => ShutdownStart::NotInitialized,
+        Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_REPLACING_ASSIGNMENTS) => {
+            ShutdownStart::AlreadyInProgress
         }
-    }
-
-    #[cfg(test)]
-    {
-        LIFECYCLE.with(|lifecycle| {
-            let mut lifecycle = lifecycle.borrow_mut();
-            match *lifecycle {
-                LIFECYCLE_RUNNING => {
-                    *lifecycle = LIFECYCLE_SHUTTING_DOWN;
-                    ShutdownStart::Started
-                }
-                LIFECYCLE_IDLE => ShutdownStart::NotInitialized,
-                LIFECYCLE_SHUTTING_DOWN | LIFECYCLE_REPLACING_ASSIGNMENTS => {
-                    ShutdownStart::AlreadyInProgress
-                }
-                LIFECYCLE_SHUT_DOWN => ShutdownStart::AlreadyShutDown,
-                _ => ShutdownStart::NotInitialized,
-            }
-        })
+        Err(LIFECYCLE_SHUT_DOWN) => ShutdownStart::AlreadyShutDown,
+        Err(_) => ShutdownStart::NotInitialized,
     }
 }
 
 pub(crate) fn mark_process_detaching() {
-    #[cfg(not(test))]
-    {
-        let _ = LIFECYCLE.compare_exchange(
-            LIFECYCLE_RUNNING,
-            LIFECYCLE_SHUT_DOWN,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-    }
-
-    #[cfg(test)]
-    {
-        LIFECYCLE.with(|lifecycle| {
-            let mut lifecycle = lifecycle.borrow_mut();
-            if *lifecycle == LIFECYCLE_RUNNING {
-                *lifecycle = LIFECYCLE_SHUT_DOWN;
-            }
-        });
-    }
+    let _ = LIFECYCLE.compare_exchange(
+        LIFECYCLE_RUNNING,
+        LIFECYCLE_SHUT_DOWN,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
 }
 
 pub(crate) fn clear_state_after_shutdown() {
-    #[cfg(not(test))]
+    if let Some(state) = STATE.get()
+        && let Ok(mut guard) = state.lock()
     {
-        if let Some(state) = STATE.get()
-            && let Ok(mut guard) = state.lock()
-        {
-            *guard = None;
-        }
-        if let Some(state) = RETAINED_STATE.get()
-            && let Ok(mut guard) = state.lock()
-        {
-            *guard = None;
-        }
-        LIFECYCLE.store(LIFECYCLE_IDLE, Ordering::Release);
+        *guard = None;
     }
-
-    #[cfg(test)]
+    if let Some(state) = RETAINED_STATE.get()
+        && let Ok(mut guard) = state.lock()
     {
-        STATE.with(|slot| {
-            *slot.borrow_mut() = None;
-        });
-        RETAINED_STATE.with(|slot| {
-            *slot.borrow_mut() = None;
-        });
-        LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_IDLE);
+        *guard = None;
     }
+    LIFECYCLE.store(LIFECYCLE_IDLE, Ordering::Release);
 }
 
 pub(crate) fn retain_state_after_shutdown() {
-    #[cfg(not(test))]
-    {
-        let active = STATE.get_or_init(|| Mutex::new(None));
-        let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
-        if let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock()) {
-            *retained = active.take();
-        }
-    }
-
-    #[cfg(test)]
-    {
-        let state = STATE.with(|slot| slot.borrow_mut().take());
-        RETAINED_STATE.with(|slot| *slot.borrow_mut() = state);
+    let active = STATE.get_or_init(|| Mutex::new(None));
+    let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
+    if let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock()) {
+        *retained = active.take();
     }
 }
 
 pub(crate) fn finish_shutdown() {
-    #[cfg(not(test))]
-    {
-        LIFECYCLE.store(LIFECYCLE_SHUT_DOWN, Ordering::Release);
-    }
-
-    #[cfg(test)]
-    {
-        LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_SHUT_DOWN);
-    }
+    LIFECYCLE.store(LIFECYCLE_SHUT_DOWN, Ordering::Release);
 }
 
 pub(crate) fn finish_reactivation() {
-    #[cfg(not(test))]
-    {
-        LIFECYCLE.store(LIFECYCLE_RUNNING, Ordering::Release);
-    }
-
-    #[cfg(test)]
-    {
-        LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_RUNNING);
-    }
+    LIFECYCLE.store(LIFECYCLE_RUNNING, Ordering::Release);
 }
 
 pub(crate) fn reactivate_retained_state(
     payload: HookPayload,
     lut_pipeline: LutPipeline,
 ) -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
-    #[cfg(not(test))]
-    {
-        let active = STATE.get_or_init(|| Mutex::new(None));
-        let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
-        let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock()) else {
-            return None;
-        };
-        if active.is_some() {
-            return None;
-        }
-        let mut state = retained.take()?;
-        update_payload_pipeline(&mut state, payload, lut_pipeline);
-        let plan = (state.runtime.minhook, state.runtime.hooks.clone());
-        *active = Some(state);
-        Some(plan)
+    let active = STATE.get_or_init(|| Mutex::new(None));
+    let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
+    let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock()) else {
+        return None;
+    };
+    if active.is_some() {
+        return None;
     }
-
-    #[cfg(test)]
-    {
-        let mut state = RETAINED_STATE.with(|slot| slot.borrow_mut().take())?;
-        update_payload_pipeline(&mut state, payload, lut_pipeline);
-        let plan = (state.runtime.minhook, state.runtime.hooks.clone());
-        STATE.with(|slot| *slot.borrow_mut() = Some(state));
-        Some(plan)
-    }
+    let mut state = retained.take()?;
+    update_payload_pipeline(&mut state, payload, lut_pipeline);
+    let plan = (state.runtime.minhook, state.runtime.hooks.clone());
+    *active = Some(state);
+    Some(plan)
 }
 
 pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
@@ -573,19 +391,12 @@ fn update_payload_pipeline(state: &mut HookState, payload: HookPayload, lut_pipe
         .reload_for_new_payload(has_lut_assignments);
 }
 
-#[cfg(not(test))]
 fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
     let state = STATE.get()?;
     let guard = state.lock().ok()?;
     guard.as_ref().map(f)
 }
 
-#[cfg(test)]
-fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
-    STATE.with(|slot| slot.borrow().as_ref().map(f))
-}
-
-#[cfg(not(test))]
 fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
     let state = STATE.get()?;
     let mut guard = state.lock().ok()?;
@@ -593,39 +404,22 @@ fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
 }
 
 #[cfg(test)]
-fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
-    STATE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        slot.as_mut().map(f)
-    })
-}
-
-#[cfg(test)]
 pub(crate) fn reset_state_for_tests() {
-    STATE.with(|slot| {
-        *slot.borrow_mut() = None;
-    });
-    RETAINED_STATE.with(|slot| {
-        *slot.borrow_mut() = None;
-    });
-    LIFECYCLE.with(|lifecycle| *lifecycle.borrow_mut() = LIFECYCLE_IDLE);
+    if let Some(state) = STATE.get() {
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = None;
+    }
+    if let Some(state) = RETAINED_STATE.get() {
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = None;
+    }
+    LIFECYCLE.store(LIFECYCLE_IDLE, Ordering::Release);
     crate::bootstrap::reset_initialization_guard_for_tests();
     crate::d3d11_renderer::reset_test_render_present_lut_result();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
     crate::minhook::reset_test_original_slots();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PRESENT_RUNTIME_TEST_LOCK, lock_present_runtime, try_lock_present_runtime};
-
-    #[test]
-    fn present_runtime_lock_is_exclusive() {
-        let _test_guard = PRESENT_RUNTIME_TEST_LOCK
-            .lock()
-            .expect("test mutex should lock");
-        let _runtime_guard = lock_present_runtime();
-
-        assert!(try_lock_present_runtime().is_none());
-    }
 }

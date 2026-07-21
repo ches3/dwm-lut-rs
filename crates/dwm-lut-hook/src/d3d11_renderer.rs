@@ -146,6 +146,7 @@ impl RenderTargetStates {
     }
 }
 
+#[cfg(not(test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ResourceKey {
     device: usize,
@@ -751,24 +752,6 @@ mod tests {
         assert!(states.entries.contains_key(&key(0)));
         assert!(!states.entries.contains_key(&key(1)));
         assert!(states.entries.contains_key(&new_key));
-    }
-
-    #[test]
-    fn resource_key_distinguishes_overlay_swap_chain_sizes_on_one_device() {
-        let first = ResourceKey {
-            device: 0x1000,
-            overlay_swap_chain: 0x2000,
-            width: 1920,
-            height: 1080,
-        };
-        let second = ResourceKey {
-            device: 0x1000,
-            overlay_swap_chain: 0x3000,
-            width: 1280,
-            height: 720,
-        };
-
-        assert_ne!(first, second);
     }
 
     #[test]

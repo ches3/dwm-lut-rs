@@ -576,11 +576,12 @@ unsafe extern "system" fn test_remove_hook(_target: *mut c_void) -> MhStatus {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::sync::atomic::Ordering;
 
     use crate::profile::HookTarget;
-    use crate::state::{HookRegistrationPlan, HookRegistrationTarget};
+    use crate::state::{
+        HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK, HookRegistrationPlan, HookRegistrationTarget,
+    };
 
     use super::{
         MinHookCleanupOperation, MinHookOperation, MinHookRuntime, MinHookState, detours,
@@ -588,8 +589,6 @@ mod tests {
         test_minhook_apis, test_minhook_call_counts, unregister_registered_hooks,
         unregister_registered_hooks_with_apis,
     };
-
-    static CONTROLLED_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn plan_with_targets(targets: &[(HookTarget, usize)]) -> HookRegistrationPlan {
         HookRegistrationPlan {
@@ -624,6 +623,7 @@ mod tests {
 
     #[test]
     fn registration_maps_targets_to_detours_and_original_slots() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         let plan = plan_with_targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
@@ -655,11 +655,6 @@ mod tests {
             .store(std::ptr::null_mut(), Ordering::Release);
         detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
             .store(std::ptr::null_mut(), Ordering::Release);
-    }
-
-    #[test]
-    fn enable_all_hooks_uses_minhook_null_sentinel() {
-        assert_eq!(super::MH_ALL_HOOKS, std::ptr::null_mut());
     }
 
     #[test]

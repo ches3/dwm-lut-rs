@@ -1,7 +1,4 @@
-#[cfg(test)]
-use std::cell::Cell;
 use std::fmt;
-#[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dwm_lut_payload::{
@@ -30,13 +27,7 @@ use crate::state::{
     reactivate_retained_state, replace_payload_pipeline, retain_state_after_shutdown,
 };
 
-#[cfg(not(test))]
 static INITIALIZATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
-thread_local! {
-    static INITIALIZATION_IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
-}
 
 struct InitializationGuard;
 
@@ -82,44 +73,17 @@ fn enter_replace_assignments() -> Result<ReplaceAssignmentsGuard, ReplaceAssignm
 }
 
 fn is_initialization_in_progress() -> bool {
-    #[cfg(not(test))]
-    {
-        INITIALIZATION_IN_PROGRESS.load(Ordering::Acquire)
-    }
-
-    #[cfg(test)]
-    {
-        INITIALIZATION_IN_PROGRESS.with(Cell::get)
-    }
+    INITIALIZATION_IN_PROGRESS.load(Ordering::Acquire)
 }
 
-#[cfg(not(test))]
 fn mark_initialization_in_progress() -> bool {
     INITIALIZATION_IN_PROGRESS
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
 }
 
-#[cfg(test)]
-fn mark_initialization_in_progress() -> bool {
-    INITIALIZATION_IN_PROGRESS.with(|slot| {
-        if slot.get() {
-            false
-        } else {
-            slot.set(true);
-            true
-        }
-    })
-}
-
-#[cfg(not(test))]
 fn clear_initialization_in_progress() {
     INITIALIZATION_IN_PROGRESS.store(false, Ordering::Release);
-}
-
-#[cfg(test)]
-fn clear_initialization_in_progress() {
-    INITIALIZATION_IN_PROGRESS.with(|slot| slot.set(false));
 }
 
 #[cfg(test)]
@@ -781,7 +745,7 @@ mod tests {
     use crate::resolver::{
         HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport,
     };
-    use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK};
+    use crate::state::{self, HOOK_GLOBAL_TEST_LOCK};
 
     fn test_profile() -> HookProfile {
         crate::profile::latest_registered_profile()
@@ -837,6 +801,9 @@ mod tests {
 
     #[test]
     fn prologue_conflict_stops_before_minhook_registration() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
         crate::minhook::reset_test_minhook_behavior(None, None, None, None);
 
         let error = super::prepare_initial_state_from_payload_with_profile_resolver(
@@ -909,7 +876,7 @@ mod tests {
 
     #[test]
     fn shutdown_disables_hooks_and_reinitialization_reuses_registration() {
-        let _guard = PRESENT_RUNTIME_TEST_LOCK
+        let _guard = HOOK_GLOBAL_TEST_LOCK
             .lock()
             .expect("test mutex should lock");
         state::reset_state_for_tests();

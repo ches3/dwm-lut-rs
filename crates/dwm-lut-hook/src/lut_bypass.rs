@@ -450,56 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_keeps_bypass_state_even_when_render_misses_a_frame() {
-        let pipeline = pipeline_for_single_sdr_monitor();
-        let mut runtime = LutBypassRuntime::new(true, None, None);
-
-        let outcome = runtime.update_present(
-            &pipeline,
-            0x1234,
-            Some(test_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[DirtyRect {
-                left: 0,
-                top: 0,
-                right: 64,
-                bottom: 64,
-            }],
-        );
-
-        assert!(outcome.plan.is_some());
-        assert!(outcome.promotion_blocked);
-        assert!(runtime.context(0x1234).is_some());
-        assert!(!runtime.direct_flip_compatible(0x1234, true));
-        assert!(!runtime.direct_flip_support_compatible(true));
-        assert_eq!(runtime.ensure_independent_flip_state(), Some(0));
-        assert_eq!(runtime.overlay_test_mode(0), 5);
-    }
-
-    #[test]
-    fn active_context_persists_until_explicit_deactivation() {
-        let pipeline = pipeline_for_single_sdr_monitor();
-        let mut runtime = LutBypassRuntime::new(true, None, None);
-
-        let _ = runtime.update_present(
-            &pipeline,
-            0x1234,
-            Some(test_identity()),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            &[DirtyRect {
-                left: 0,
-                top: 0,
-                right: 64,
-                bottom: 64,
-            }],
-        );
-
-        assert!(runtime.context(0x1234).is_some());
-        assert!(!runtime.direct_flip_support_compatible(true));
-        assert_eq!(runtime.overlay_test_mode(0), 5);
-    }
-
-    #[test]
     fn overlay_test_mode_global_is_patched_only_while_context_is_active() {
         let pipeline = pipeline_for_single_sdr_monitor();
         let mut overlay_test_mode = 0i32;

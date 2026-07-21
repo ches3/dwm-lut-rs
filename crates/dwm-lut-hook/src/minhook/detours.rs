@@ -276,7 +276,7 @@ mod tests {
     };
 
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
-    use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
+    use crate::state::{self, HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK};
     use crate::{DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookProfile};
 
     fn test_profile() -> HookProfile {
