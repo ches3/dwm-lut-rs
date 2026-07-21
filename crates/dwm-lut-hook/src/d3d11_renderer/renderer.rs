@@ -646,7 +646,6 @@ impl DeviceResources {
                     );
                 }
 
-                let mut drew_any = false;
                 for rect in &draw_plan.dirty_rects {
                     let rect = *rect;
                     let box3d = super::copy_box_for_rect(rect);
@@ -670,10 +669,16 @@ impl DeviceResources {
                             Some(&source_box),
                         );
                     }
+                }
 
-                    let vertices = super::vertices_for_rect(rect, frame.width, frame.height);
+                if draw_plan.dirty_rects.is_empty() {
+                    return false;
+                }
+
+                bind_pipeline(frame.context, self, &bindings);
+                for rect in &draw_plan.dirty_rects {
+                    let vertices = super::vertices_for_rect(*rect, frame.width, frame.height);
                     unsafe {
-                        bind_pipeline(frame.context, self, &bindings);
                         frame.context.UpdateSubresource(
                             &self.vertex_buffer,
                             0,
@@ -683,11 +688,10 @@ impl DeviceResources {
                             0,
                         );
                         frame.context.Draw(4, 0);
-                        unbind_pipeline(frame.context);
                     }
-                    drew_any = true;
                 }
-                drew_any
+                unbind_pipeline(frame.context);
+                true
             },
             |saved_state| saved_state.restore(frame.context),
         )
