@@ -285,17 +285,8 @@ unsafe fn read_dirty_rects_with(
     if count > MAX_DIRTY_RECTS {
         return Err(PresentInputError::InvalidDirtyRectVector);
     }
-    if count > 0 && !reader.is_readable(start, byte_len) {
-        return Err(PresentInputError::UnreadableMemory);
-    }
 
-    let mut dirty_rects = Vec::with_capacity(count);
-    for index in 0..count {
-        let offset = index * size_of::<DirtyRect>();
-        dirty_rects.push(unsafe { reader.read::<DirtyRect>(checked_address(start, offset)?)? });
-    }
-
-    Ok(dirty_rects)
+    unsafe { reader.read_dirty_rect_slice(start, count) }
 }
 
 fn checked_address(base: usize, offset: usize) -> Result<usize, PresentInputError> {
@@ -306,6 +297,11 @@ fn checked_address(base: usize, offset: usize) -> Result<usize, PresentInputErro
 trait MemoryReader {
     fn is_readable(&self, address: usize, size: usize) -> bool;
     unsafe fn read<T: Copy>(&self, address: usize) -> Result<T, PresentInputError>;
+    unsafe fn read_dirty_rect_slice(
+        &self,
+        address: usize,
+        count: usize,
+    ) -> Result<Vec<DirtyRect>, PresentInputError>;
 }
 
 #[cfg(not(test))]
@@ -338,6 +334,32 @@ impl MemoryReader for DirectMemoryReader {
             return Err(PresentInputError::UnreadableMemory);
         }
         Ok(unsafe { (address as *const T).read_unaligned() })
+    }
+
+    unsafe fn read_dirty_rect_slice(
+        &self,
+        address: usize,
+        count: usize,
+    ) -> Result<Vec<DirtyRect>, PresentInputError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(byte_len) = count.checked_mul(size_of::<DirtyRect>()) else {
+            return Err(PresentInputError::UnreadableMemory);
+        };
+        if !self.is_readable(address, byte_len) {
+            return Err(PresentInputError::UnreadableMemory);
+        }
+
+        let mut values = Vec::with_capacity(count);
+        for index in 0..count {
+            let Some(offset) = index.checked_mul(size_of::<DirtyRect>()) else {
+                return Err(PresentInputError::UnreadableMemory);
+            };
+            let item_address = checked_address(address, offset)?;
+            values.push(unsafe { (item_address as *const DirtyRect).read_unaligned() });
+        }
+        Ok(values)
     }
 }
 
@@ -373,6 +395,41 @@ impl MemoryReader for Win32MemoryReader {
             return Err(PresentInputError::UnreadableMemory);
         }
         Ok(unsafe { value.assume_init() })
+    }
+
+    unsafe fn read_dirty_rect_slice(
+        &self,
+        address: usize,
+        count: usize,
+    ) -> Result<Vec<DirtyRect>, PresentInputError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(byte_len) = count.checked_mul(size_of::<DirtyRect>()) else {
+            return Err(PresentInputError::UnreadableMemory);
+        };
+        if address == 0 || address.checked_add(byte_len).is_none() {
+            return Err(PresentInputError::UnreadableMemory);
+        }
+
+        let mut values = Vec::<DirtyRect>::with_capacity(count);
+        let mut bytes_read = 0usize;
+        let result = unsafe {
+            ReadProcessMemory(
+                GetCurrentProcess(),
+                address as *const c_void,
+                values.as_mut_ptr().cast(),
+                byte_len,
+                Some(&mut bytes_read),
+            )
+        };
+        if result.is_err() || bytes_read != byte_len {
+            return Err(PresentInputError::UnreadableMemory);
+        }
+        unsafe {
+            values.set_len(count);
+        }
+        Ok(values)
     }
 }
 
