@@ -172,6 +172,22 @@ unsafe fn collect_present_inputs_with_profile(
     overlay_swap_chain: usize,
     rect_vec: usize,
 ) -> Result<PresentInputsWithoutFormat, PresentInputError> {
+    unsafe {
+        collect_present_inputs_with_profile_and_reader(
+            &process_memory_reader(),
+            profile,
+            overlay_swap_chain,
+            rect_vec,
+        )
+    }
+}
+
+unsafe fn collect_present_inputs_with_profile_and_reader(
+    reader: &impl MemoryReader,
+    profile: &HookProfile,
+    overlay_swap_chain: usize,
+    rect_vec: usize,
+) -> Result<PresentInputsWithoutFormat, PresentInputError> {
     let hypotheses = profile.hypotheses;
 
     if overlay_swap_chain == 0 {
@@ -179,14 +195,15 @@ unsafe fn collect_present_inputs_with_profile(
     }
 
     let hardware_protected = unsafe {
-        read_memory::<u8>(checked_address(
+        reader.read::<u8>(checked_address(
             overlay_swap_chain,
             hypotheses.hardware_protected.offset,
         )?)? != 0
     };
-    let monitor_identity =
-        unsafe { read_monitor_identity(overlay_swap_chain, hypotheses.monitor_identity) };
-    let dirty_rects = unsafe { read_dirty_rects(rect_vec)? };
+    let monitor_identity = unsafe {
+        read_monitor_identity_with(reader, overlay_swap_chain, hypotheses.monitor_identity)
+    };
+    let dirty_rects = unsafe { read_dirty_rects_with(reader, rect_vec)? };
     Ok(PresentInputsWithoutFormat {
         monitor_identity,
         dirty_rects,
@@ -194,24 +211,28 @@ unsafe fn collect_present_inputs_with_profile(
     })
 }
 
-unsafe fn read_monitor_identity(
+unsafe fn read_monitor_identity_with(
+    reader: &impl MemoryReader,
     overlay_swap_chain: usize,
     hypothesis: MonitorIdentityPathHypothesis,
 ) -> Option<MonitorIdentity> {
     let low_part = unsafe {
-        read_memory::<u32>(
-            checked_address(overlay_swap_chain, hypothesis.adapter_luid_low_offset).ok()?,
-        )
-        .ok()?
+        reader
+            .read::<u32>(
+                checked_address(overlay_swap_chain, hypothesis.adapter_luid_low_offset).ok()?,
+            )
+            .ok()?
     };
     let high_part = unsafe {
-        read_memory::<i32>(
-            checked_address(overlay_swap_chain, hypothesis.adapter_luid_high_offset).ok()?,
-        )
-        .ok()?
+        reader
+            .read::<i32>(
+                checked_address(overlay_swap_chain, hypothesis.adapter_luid_high_offset).ok()?,
+            )
+            .ok()?
     };
     let target_id = unsafe {
-        read_memory::<u32>(checked_address(overlay_swap_chain, hypothesis.target_id_offset).ok()?)
+        reader
+            .read::<u32>(checked_address(overlay_swap_chain, hypothesis.target_id_offset).ok()?)
             .ok()?
     };
 
@@ -224,12 +245,20 @@ unsafe fn read_monitor_identity(
     })
 }
 
+#[cfg(test)]
 unsafe fn read_dirty_rects(rect_vec: usize) -> Result<Vec<DirtyRect>, PresentInputError> {
+    unsafe { read_dirty_rects_with(&process_memory_reader(), rect_vec) }
+}
+
+unsafe fn read_dirty_rects_with(
+    reader: &impl MemoryReader,
+    rect_vec: usize,
+) -> Result<Vec<DirtyRect>, PresentInputError> {
     if rect_vec == 0 {
         return Err(PresentInputError::InvalidDirtyRectVector);
     }
 
-    let rect_vec = unsafe { read_memory::<RectVec>(rect_vec)? };
+    let rect_vec = unsafe { reader.read::<RectVec>(rect_vec)? };
     let start = rect_vec.start as usize;
     let end = rect_vec.end as usize;
     let capacity_end = rect_vec.capacity_end as usize;
@@ -256,14 +285,14 @@ unsafe fn read_dirty_rects(rect_vec: usize) -> Result<Vec<DirtyRect>, PresentInp
     if count > MAX_DIRTY_RECTS {
         return Err(PresentInputError::InvalidDirtyRectVector);
     }
-    if count > 0 && !is_readable_range(start, byte_len) {
+    if count > 0 && !reader.is_readable(start, byte_len) {
         return Err(PresentInputError::UnreadableMemory);
     }
 
     let mut dirty_rects = Vec::with_capacity(count);
     for index in 0..count {
         let offset = index * size_of::<DirtyRect>();
-        dirty_rects.push(unsafe { read_memory::<DirtyRect>(checked_address(start, offset)?)? });
+        dirty_rects.push(unsafe { reader.read::<DirtyRect>(checked_address(start, offset)?)? });
     }
 
     Ok(dirty_rects)
@@ -274,18 +303,61 @@ fn checked_address(base: usize, offset: usize) -> Result<usize, PresentInputErro
         .ok_or(PresentInputError::UnreadableMemory)
 }
 
-unsafe fn read_memory<T: Copy>(address: usize) -> Result<T, PresentInputError> {
-    if !is_readable_range(address, size_of::<T>()) {
-        return Err(PresentInputError::UnreadableMemory);
-    }
+trait MemoryReader {
+    fn is_readable(&self, address: usize, size: usize) -> bool;
+    unsafe fn read<T: Copy>(&self, address: usize) -> Result<T, PresentInputError>;
+}
 
+#[cfg(not(test))]
+#[derive(Clone, Copy, Debug, Default)]
+struct Win32MemoryReader;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct DirectMemoryReader;
+
+fn process_memory_reader() -> impl MemoryReader {
     #[cfg(test)]
     {
-        Ok(unsafe { (address as *const T).read_unaligned() })
+        DirectMemoryReader
     }
-
     #[cfg(not(test))]
     {
+        Win32MemoryReader
+    }
+}
+
+#[cfg(test)]
+impl MemoryReader for DirectMemoryReader {
+    fn is_readable(&self, address: usize, size: usize) -> bool {
+        address != 0 && size != 0 && address.checked_add(size - 1).is_some()
+    }
+
+    unsafe fn read<T: Copy>(&self, address: usize) -> Result<T, PresentInputError> {
+        if !self.is_readable(address, size_of::<T>()) {
+            return Err(PresentInputError::UnreadableMemory);
+        }
+        Ok(unsafe { (address as *const T).read_unaligned() })
+    }
+}
+
+#[cfg(not(test))]
+impl MemoryReader for Win32MemoryReader {
+    fn is_readable(&self, address: usize, size: usize) -> bool {
+        if address == 0 || size == 0 {
+            return false;
+        }
+        let Some(end) = address.checked_add(size - 1) else {
+            return false;
+        };
+        is_readable_range_in_process(address, end)
+    }
+
+    unsafe fn read<T: Copy>(&self, address: usize) -> Result<T, PresentInputError> {
+        if !self.is_readable(address, size_of::<T>()) {
+            return Err(PresentInputError::UnreadableMemory);
+        }
+
         let mut value = MaybeUninit::<T>::uninit();
         let mut bytes_read = 0usize;
         let result = unsafe {
@@ -301,26 +373,6 @@ unsafe fn read_memory<T: Copy>(address: usize) -> Result<T, PresentInputError> {
             return Err(PresentInputError::UnreadableMemory);
         }
         Ok(unsafe { value.assume_init() })
-    }
-}
-
-fn is_readable_range(address: usize, size: usize) -> bool {
-    if address == 0 || size == 0 {
-        return false;
-    }
-    let Some(end) = address.checked_add(size - 1) else {
-        return false;
-    };
-
-    #[cfg(test)]
-    {
-        let _ = end;
-        true
-    }
-
-    #[cfg(not(test))]
-    {
-        is_readable_range_in_process(address, end)
     }
 }
 
@@ -956,7 +1008,14 @@ mod tests {
             }],
             false,
         );
-        crate::d3d11_renderer::set_test_render_present_lut_result(true);
+        crate::d3d11_renderer::set_fake_render_result(
+            crate::d3d11_renderer::RenderPresentLutResult {
+                lut_applied: true,
+                dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+                lut_index: Some(0),
+                ..Default::default()
+            },
+        );
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
 
@@ -980,10 +1039,10 @@ mod tests {
             .expect("successful LUT render should keep the context active");
         assert_eq!(context.lut_index, Some(0));
         assert_eq!(context.dirty_rect_count, 1);
-        let render_call = crate::d3d11_renderer::test_render_present_lut_call()
+        let render_call = crate::d3d11_renderer::fake_render_present_lut_call()
             .expect("renderer should be called with collected present inputs");
         assert_eq!(
-            crate::d3d11_renderer::test_render_context_active(),
+            crate::d3d11_renderer::fake_render_context_active(),
             Some(false)
         );
         assert_eq!(
@@ -1012,10 +1071,14 @@ mod tests {
             }],
             false,
         );
-        crate::d3d11_renderer::set_test_render_present_lut_result(true);
-        crate::d3d11_renderer::set_test_render_present_dxgi_format(Some(
-            DXGI_FORMAT_R16G16B16A16_FLOAT,
-        ));
+        crate::d3d11_renderer::set_fake_render_result(
+            crate::d3d11_renderer::RenderPresentLutResult {
+                lut_applied: true,
+                dxgi_format: Some(DXGI_FORMAT_R16G16B16A16_FLOAT),
+                lut_index: Some(1),
+                ..Default::default()
+            },
+        );
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
 
@@ -1043,7 +1106,7 @@ mod tests {
         );
         assert_eq!(context.lut_index, Some(1));
 
-        crate::d3d11_renderer::reset_test_render_present_lut_result();
+        crate::d3d11_renderer::reset_fake_render_result();
     }
 
     #[test]
@@ -1066,9 +1129,14 @@ mod tests {
             right: 1920,
             bottom: 1080,
         };
-        crate::d3d11_renderer::set_test_render_present_lut_result_with_present_rect(
-            true,
-            Some(full_rect),
+        crate::d3d11_renderer::set_fake_render_result(
+            crate::d3d11_renderer::RenderPresentLutResult {
+                lut_applied: true,
+                dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+                lut_index: Some(0),
+                present_dirty_rect: Some(full_rect),
+                ..Default::default()
+            },
         );
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
@@ -1089,7 +1157,7 @@ mod tests {
         );
 
         assert_eq!(last_original_present_rects(), Some(vec![full_rect]));
-        let render_call = crate::d3d11_renderer::test_render_present_lut_call()
+        let render_call = crate::d3d11_renderer::fake_render_present_lut_call()
             .expect("renderer should still receive original present inputs");
         assert_eq!(render_call.dirty_rects, fake.dirty_rects);
     }
@@ -1224,7 +1292,14 @@ mod tests {
         activate_context(fake.context_address());
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
-        crate::d3d11_renderer::set_test_render_present_lut_result(true);
+        crate::d3d11_renderer::set_fake_render_result(
+            crate::d3d11_renderer::RenderPresentLutResult {
+                lut_applied: true,
+                dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+                lut_index: Some(0),
+                ..Default::default()
+            },
+        );
 
         assert_eq!(
             unsafe {
@@ -1240,7 +1315,7 @@ mod tests {
             },
             0x55
         );
-        let render_call = crate::d3d11_renderer::test_render_present_lut_call()
+        let render_call = crate::d3d11_renderer::fake_render_present_lut_call()
             .expect("hardware protected present should reach renderer");
         assert_eq!(
             render_call.overlay_swap_chain,
@@ -1249,7 +1324,7 @@ mod tests {
         assert_eq!(render_call.monitor_identity, Some(test_monitor_identity()));
         assert!(render_call.hardware_protected);
         assert_eq!(render_call.dirty_rects, fake.dirty_rects);
-        crate::d3d11_renderer::reset_test_render_present_lut_result();
+        crate::d3d11_renderer::reset_fake_render_result();
     }
 
     #[test]
@@ -1275,7 +1350,14 @@ mod tests {
     fn present_render_is_skipped_when_shutdown_starts_after_entry_check() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         initialize_test_state();
-        crate::d3d11_renderer::set_test_render_present_lut_result(true);
+        crate::d3d11_renderer::set_fake_render_result(
+            crate::d3d11_renderer::RenderPresentLutResult {
+                lut_applied: true,
+                dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+                lut_index: Some(0),
+                ..Default::default()
+            },
+        );
 
         assert_eq!(state::begin_shutdown(), state::ShutdownStart::Started);
 
@@ -1283,7 +1365,7 @@ mod tests {
             super::render_present_lut_if_active(0x1234, Some(test_monitor_identity()), false, &[]);
 
         assert!(render_result.is_none());
-        assert!(crate::d3d11_renderer::test_render_present_lut_call().is_none());
+        assert!(crate::d3d11_renderer::fake_render_present_lut_call().is_none());
         state::reset_state_for_tests();
     }
 }

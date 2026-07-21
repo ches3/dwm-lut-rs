@@ -333,15 +333,62 @@ fn present_dirty_rect_for_full_redraw(
 mod context_state;
 #[cfg(not(test))]
 mod d3d11_api;
+#[cfg(test)]
+mod fake_renderer;
 #[cfg(not(test))]
 mod renderer;
-#[cfg(test)]
-mod test_stub;
+
+pub(crate) unsafe fn render_present_lut(
+    overlay_swap_chain: usize,
+    swap_chain_path: crate::profile::SwapChainPathHypothesis,
+    monitor_identity: Option<MonitorIdentity>,
+    hardware_protected: bool,
+    dirty_rects: &[DirtyRect],
+    pipeline: &LutPipeline,
+) -> RenderPresentLutResult {
+    #[cfg(test)]
+    {
+        unsafe {
+            fake_renderer::render_present_lut(
+                overlay_swap_chain,
+                swap_chain_path,
+                monitor_identity,
+                hardware_protected,
+                dirty_rects,
+                pipeline,
+            )
+        }
+    }
+    #[cfg(not(test))]
+    {
+        unsafe {
+            renderer::render_present_lut(
+                overlay_swap_chain,
+                swap_chain_path,
+                monitor_identity,
+                hardware_protected,
+                dirty_rects,
+                pipeline,
+            )
+        }
+    }
+}
 
 #[cfg(not(test))]
-pub(crate) use renderer::{render_present_lut, shutdown_renderer_resources};
+pub(crate) fn shutdown_renderer_resources() -> usize {
+    renderer::shutdown_renderer_resources()
+}
+
 #[cfg(test)]
-pub(crate) use test_stub::*;
+pub(crate) fn shutdown_renderer_resources() -> usize {
+    0
+}
+
+#[cfg(test)]
+pub(crate) use fake_renderer::{
+    fake_render_context_active, fake_render_present_lut_call, reset_fake_render_result,
+    set_fake_render_result,
+};
 
 #[cfg(test)]
 mod tests {

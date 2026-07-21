@@ -1,0 +1,81 @@
+use super::RenderPresentLutResult;
+use crate::lut_pipeline::DirtyRect;
+use dwm_lut_payload::MonitorIdentity;
+use std::sync::{Mutex, OnceLock};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FakeRenderPresentLutCall {
+    pub overlay_swap_chain: usize,
+    pub swap_chain_path: crate::profile::SwapChainPathHypothesis,
+    pub monitor_identity: Option<MonitorIdentity>,
+    pub hardware_protected: bool,
+    pub dirty_rects: Vec<DirtyRect>,
+}
+
+static FAKE_RENDER_RESULT: OnceLock<Mutex<RenderPresentLutResult>> = OnceLock::new();
+static FAKE_RENDER_CALL: OnceLock<Mutex<Option<FakeRenderPresentLutCall>>> = OnceLock::new();
+static FAKE_RENDER_CONTEXT_ACTIVE: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
+
+fn result_slot() -> &'static Mutex<RenderPresentLutResult> {
+    FAKE_RENDER_RESULT.get_or_init(|| Mutex::new(RenderPresentLutResult::default()))
+}
+
+fn call_slot() -> &'static Mutex<Option<FakeRenderPresentLutCall>> {
+    FAKE_RENDER_CALL.get_or_init(|| Mutex::new(None))
+}
+
+fn context_active_slot() -> &'static Mutex<Option<bool>> {
+    FAKE_RENDER_CONTEXT_ACTIVE.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn set_fake_render_result(result: RenderPresentLutResult) {
+    if let Ok(mut slot) = result_slot().lock() {
+        *slot = result;
+    }
+}
+
+pub(crate) fn reset_fake_render_result() {
+    set_fake_render_result(RenderPresentLutResult::default());
+    if let Ok(mut calls) = call_slot().lock() {
+        *calls = None;
+    }
+    if let Ok(mut context_active) = context_active_slot().lock() {
+        *context_active = None;
+    }
+}
+
+pub(crate) fn fake_render_present_lut_call() -> Option<FakeRenderPresentLutCall> {
+    call_slot().lock().ok().and_then(|call| call.clone())
+}
+
+pub(crate) fn fake_render_context_active() -> Option<bool> {
+    context_active_slot().lock().ok().and_then(|active| *active)
+}
+
+pub(crate) unsafe fn render_present_lut(
+    overlay_swap_chain: usize,
+    swap_chain_path: crate::profile::SwapChainPathHypothesis,
+    monitor_identity: Option<MonitorIdentity>,
+    hardware_protected: bool,
+    dirty_rects: &[DirtyRect],
+    _pipeline: &crate::lut_pipeline::LutPipeline,
+) -> RenderPresentLutResult {
+    if let Ok(mut calls) = call_slot().lock() {
+        *calls = Some(FakeRenderPresentLutCall {
+            overlay_swap_chain,
+            swap_chain_path,
+            monitor_identity,
+            hardware_protected,
+            dirty_rects: dirty_rects.to_vec(),
+        });
+    }
+    if let Ok(mut context_active) = context_active_slot().lock() {
+        *context_active = Some(
+            crate::state::lut_bypass_runtime().is_some_and(|runtime| runtime.has_active_contexts()),
+        );
+    }
+    result_slot()
+        .lock()
+        .map(|result| *result)
+        .unwrap_or_default()
+}

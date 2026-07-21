@@ -419,7 +419,7 @@ pub(crate) fn reset_state_for_tests() {
     }
     LIFECYCLE.store(LIFECYCLE_IDLE, Ordering::Release);
     crate::bootstrap::reset_initialization_guard_for_tests();
-    crate::d3d11_renderer::reset_test_render_present_lut_result();
+    crate::d3d11_renderer::reset_fake_render_result();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
     crate::minhook::reset_test_original_slots();
 }
