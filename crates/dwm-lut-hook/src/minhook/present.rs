@@ -71,7 +71,7 @@ struct PresentOriginalCallDetail {
     monitor_identity: Option<MonitorIdentity>,
     dirty_rect_count: usize,
     first_dirty_rect: Option<DirtyRect>,
-    render_result: crate::d3d11_renderer::RenderPresentLutResult,
+    render_outcome: crate::d3d11_renderer::PresentLutOutcome,
     present_dirty_rect_source: &'static str,
 }
 
@@ -492,17 +492,66 @@ fn deactivate_present_context(context_address: usize) {
     state::deactivate_present_context(context_address);
 }
 
-fn decision_from_render_result(
-    render_result: crate::d3d11_renderer::RenderPresentLutResult,
-) -> Option<crate::LutDecision> {
-    let dxgi_format = render_result.dxgi_format?;
-    let Some(format) = crate::BackBufferFormat::from_dxgi_format(dxgi_format) else {
-        return Some(crate::LutDecision::NotApplicable);
-    };
-    Some(match render_result.lut_index {
-        Some(lut_index) => crate::LutDecision::Apply { format, lut_index },
-        None => crate::LutDecision::NotApplicable,
-    })
+fn emit_present_lut_acquire_error(
+    overlay_swap_chain: usize,
+    error: crate::d3d11_renderer::RenderAcquireError,
+    should_log_frame: bool,
+) {
+    #[cfg(debug_assertions)]
+    {
+        if should_log_frame {
+            debug_log!(
+                "event=present_lut_frame overlay_swap_chain=0x{:x} acquired=0 reason={}",
+                overlay_swap_chain,
+                error.as_str()
+            );
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = (overlay_swap_chain, error, should_log_frame);
+}
+
+fn emit_present_lut_outcome(
+    overlay_swap_chain: usize,
+    hardware_protected: bool,
+    monitor_identity: Option<MonitorIdentity>,
+    outcome: crate::d3d11_renderer::PresentLutOutcome,
+    should_log_frame: bool,
+) {
+    #[cfg(debug_assertions)]
+    {
+        if should_log_frame {
+            debug_log!(
+                "event=present_lut_frame overlay_swap_chain=0x{:x} acquired=1 applied={} draw={} decision={:?} dxgi_format={:?} width={:?} height={:?} lut_index={:?} present_dirty_rect={:?} monitor_identity={} hardware_protected={}",
+                overlay_swap_chain,
+                u8::from(outcome.lut_applied()),
+                outcome.draw.as_str(),
+                outcome.decision,
+                outcome.dxgi_format,
+                outcome.width,
+                outcome.height,
+                outcome.lut_index,
+                outcome.present_dirty_rect,
+                crate::debug_log::quoted(format_monitor_identity_for_log(monitor_identity)),
+                u8::from(hardware_protected)
+            );
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = (
+        overlay_swap_chain,
+        hardware_protected,
+        monitor_identity,
+        outcome,
+        should_log_frame,
+    );
+}
+
+#[cfg(debug_assertions)]
+fn format_monitor_identity_for_log(identity: Option<MonitorIdentity>) -> String {
+    identity
+        .map(|identity| format!("{}:{}", identity.adapter_luid, identity.target_id))
+        .unwrap_or_else(|| "none".to_owned())
 }
 
 pub(super) unsafe extern "system" fn present_detour(
@@ -541,7 +590,9 @@ pub(super) unsafe extern "system" fn present_detour(
     let mut last_present_context = None;
     match unsafe { collect_present_inputs(overlay_swap_chain, rect_vec) } {
         Ok(inputs) => {
-            if should_log_present_detour_enter(overlay_swap_chain, inputs.hardware_protected) {
+            let should_log_frame =
+                should_log_present_detour_enter(overlay_swap_chain, inputs.hardware_protected);
+            if should_log_frame {
                 debug_log!(
                     "event=present_detour_enter this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x}",
                     this,
@@ -556,62 +607,75 @@ pub(super) unsafe extern "system" fn present_detour(
                     Some((inputs.hardware_protected, inputs.monitor_identity, None));
             }
             if let Some(_present_guard) = state::try_lock_present_runtime() {
-                if let Some(render_result) = render_present_lut_if_active(
+                match render_present_lut_if_active(
                     overlay_swap_chain,
                     inputs.monitor_identity,
                     inputs.hardware_protected,
                     &inputs.dirty_rects,
                 ) {
-                    #[cfg(debug_assertions)]
-                    {
-                        last_present_context = Some((
+                    None => {}
+                    Some(Err(error)) => {
+                        emit_present_lut_acquire_error(overlay_swap_chain, error, should_log_frame);
+                    }
+                    Some(Ok(outcome)) => {
+                        emit_present_lut_outcome(
+                            overlay_swap_chain,
                             inputs.hardware_protected,
                             inputs.monitor_identity,
-                            Some(render_result.lut_applied),
-                        ));
-                        if inputs.hardware_protected {
-                            protected_resource_result_detail = Some(PresentOriginalCallDetail {
-                                hardware_protected: inputs.hardware_protected,
-                                monitor_identity: inputs.monitor_identity,
-                                dirty_rect_count: inputs.dirty_rects.len(),
-                                first_dirty_rect: inputs.dirty_rects.first().copied(),
-                                render_result,
-                                present_dirty_rect_source: "original",
-                            });
+                            outcome,
+                            should_log_frame,
+                        );
+                        #[cfg(debug_assertions)]
+                        {
+                            last_present_context = Some((
+                                inputs.hardware_protected,
+                                inputs.monitor_identity,
+                                Some(outcome.lut_applied()),
+                            ));
+                            if inputs.hardware_protected {
+                                protected_resource_result_detail =
+                                    Some(PresentOriginalCallDetail {
+                                        hardware_protected: inputs.hardware_protected,
+                                        monitor_identity: inputs.monitor_identity,
+                                        dirty_rect_count: inputs.dirty_rects.len(),
+                                        first_dirty_rect: inputs.dirty_rects.first().copied(),
+                                        render_outcome: outcome,
+                                        present_dirty_rect_source: "original",
+                                    });
+                            }
                         }
-                    }
-                    route_trace::record_present_lut_result(
-                        inputs.hardware_protected,
-                        render_result.lut_applied,
-                    );
-                    let present_dirty_rect_source =
-                        if let Some(rect) = render_result.present_dirty_rect {
-                            original_rect_vec = full_present_rect_vec(
-                                rect,
-                                &mut present_rect_storage,
-                                &mut present_rect_vec_storage,
-                            );
-                            "expanded"
-                        } else {
-                            "original"
-                        };
-                    #[cfg(debug_assertions)]
-                    {
-                        if inputs.hardware_protected {
-                            protected_resource_result_detail = Some(PresentOriginalCallDetail {
-                                hardware_protected: inputs.hardware_protected,
-                                monitor_identity: inputs.monitor_identity,
-                                dirty_rect_count: inputs.dirty_rects.len(),
-                                first_dirty_rect: inputs.dirty_rects.first().copied(),
-                                render_result,
-                                present_dirty_rect_source,
-                            });
+                        route_trace::record_present_lut_result(
+                            inputs.hardware_protected,
+                            outcome.lut_applied(),
+                        );
+                        let present_dirty_rect_source =
+                            if let Some(rect) = outcome.present_dirty_rect {
+                                original_rect_vec = full_present_rect_vec(
+                                    rect,
+                                    &mut present_rect_storage,
+                                    &mut present_rect_vec_storage,
+                                );
+                                "expanded"
+                            } else {
+                                "original"
+                            };
+                        #[cfg(debug_assertions)]
+                        {
+                            if inputs.hardware_protected {
+                                protected_resource_result_detail =
+                                    Some(PresentOriginalCallDetail {
+                                        hardware_protected: inputs.hardware_protected,
+                                        monitor_identity: inputs.monitor_identity,
+                                        dirty_rect_count: inputs.dirty_rects.len(),
+                                        first_dirty_rect: inputs.dirty_rects.first().copied(),
+                                        render_outcome: outcome,
+                                        present_dirty_rect_source,
+                                    });
+                            }
                         }
-                    }
-                    #[cfg(not(debug_assertions))]
-                    let _ = present_dirty_rect_source;
-                    if let Some(decision) = decision_from_render_result(render_result) {
-                        state::update_present_context(this, decision);
+                        #[cfg(not(debug_assertions))]
+                        let _ = present_dirty_rect_source;
+                        state::update_present_context(this, outcome.decision);
                     }
                 }
             } else {
@@ -654,11 +718,11 @@ pub(super) unsafe extern "system" fn present_detour(
                 detail.monitor_identity,
                 detail.hardware_protected,
                 original_result,
-                detail.render_result,
+                detail.render_outcome,
                 detail.dirty_rect_count,
                 detail.first_dirty_rect,
                 detail.present_dirty_rect_source == "expanded",
-                detail.render_result.present_dirty_rect,
+                detail.render_outcome.present_dirty_rect,
             );
         }
         return original_result;
@@ -673,7 +737,9 @@ fn render_present_lut_if_active(
     monitor_identity: Option<MonitorIdentity>,
     hardware_protected: bool,
     dirty_rects: &[DirtyRect],
-) -> Option<crate::d3d11_renderer::RenderPresentLutResult> {
+) -> Option<
+    Result<crate::d3d11_renderer::PresentLutOutcome, crate::d3d11_renderer::RenderAcquireError>,
+> {
     if !state::is_runtime_active() {
         return None;
     }
@@ -838,7 +904,7 @@ mod tests {
     fn activate_context(context_address: usize) {
         state::update_present_context(
             context_address,
-            crate::LutDecision::Apply {
+            crate::lut_pipeline::LutDecision::Apply {
                 format: BackBufferFormat::Bgra8Unorm,
                 lut_index: 0,
             },
@@ -1062,14 +1128,20 @@ mod tests {
             }],
             false,
         );
-        crate::d3d11_renderer::set_fake_render_result(
-            crate::d3d11_renderer::RenderPresentLutResult {
-                lut_applied: true,
+        crate::d3d11_renderer::set_fake_render_result(Ok(
+            crate::d3d11_renderer::PresentLutOutcome {
+                decision: crate::lut_pipeline::LutDecision::Apply {
+                    format: BackBufferFormat::Bgra8Unorm,
+                    lut_index: 0,
+                },
+                present_dirty_rect: None,
+                draw: crate::d3d11_renderer::PresentDrawStatus::Applied { full_redraw: false },
                 dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+                width: None,
+                height: None,
                 lut_index: Some(0),
-                ..Default::default()
             },
-        );
+        ));
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
 
@@ -1125,14 +1197,20 @@ mod tests {
             }],
             false,
         );
-        crate::d3d11_renderer::set_fake_render_result(
-            crate::d3d11_renderer::RenderPresentLutResult {
-                lut_applied: true,
+        crate::d3d11_renderer::set_fake_render_result(Ok(
+            crate::d3d11_renderer::PresentLutOutcome {
+                decision: crate::lut_pipeline::LutDecision::Apply {
+                    format: BackBufferFormat::Rgba16Float,
+                    lut_index: 1,
+                },
+                present_dirty_rect: None,
+                draw: crate::d3d11_renderer::PresentDrawStatus::Applied { full_redraw: false },
                 dxgi_format: Some(DXGI_FORMAT_R16G16B16A16_FLOAT),
+                width: None,
+                height: None,
                 lut_index: Some(1),
-                ..Default::default()
             },
-        );
+        ));
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
 
@@ -1180,15 +1258,20 @@ mod tests {
             right: 1920,
             bottom: 1080,
         };
-        crate::d3d11_renderer::set_fake_render_result(
-            crate::d3d11_renderer::RenderPresentLutResult {
-                lut_applied: true,
-                dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
-                lut_index: Some(0),
+        crate::d3d11_renderer::set_fake_render_result(Ok(
+            crate::d3d11_renderer::PresentLutOutcome {
+                decision: crate::lut_pipeline::LutDecision::Apply {
+                    format: BackBufferFormat::Bgra8Unorm,
+                    lut_index: 0,
+                },
                 present_dirty_rect: Some(full_rect),
-                ..Default::default()
+                draw: crate::d3d11_renderer::PresentDrawStatus::Applied { full_redraw: true },
+                dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+                width: None,
+                height: None,
+                lut_index: Some(0),
             },
-        );
+        ));
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
 
@@ -1228,14 +1311,22 @@ mod tests {
             false,
         );
         activate_context(fake.context_address());
-        crate::d3d11_renderer::set_fake_render_result(
-            crate::d3d11_renderer::RenderPresentLutResult {
-                lut_applied: false,
+        crate::d3d11_renderer::set_fake_render_result(Ok(
+            crate::d3d11_renderer::PresentLutOutcome {
+                decision: crate::lut_pipeline::LutDecision::Apply {
+                    format: BackBufferFormat::Bgra8Unorm,
+                    lut_index: 0,
+                },
+                present_dirty_rect: None,
+                draw: crate::d3d11_renderer::PresentDrawStatus::Failed(
+                    crate::d3d11_renderer::PresentDrawFailReason::DrawFailed,
+                ),
                 dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+                width: None,
+                height: None,
                 lut_index: Some(0),
-                ..Default::default()
             },
-        );
+        ));
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
 
@@ -1276,14 +1367,19 @@ mod tests {
         );
 
         activate_context(fake.context_address());
-        crate::d3d11_renderer::set_fake_render_result(
-            crate::d3d11_renderer::RenderPresentLutResult {
-                lut_applied: false,
+        crate::d3d11_renderer::set_fake_render_result(Ok(
+            crate::d3d11_renderer::PresentLutOutcome {
+                decision: crate::lut_pipeline::LutDecision::NotApplicable,
+                present_dirty_rect: None,
+                draw: crate::d3d11_renderer::PresentDrawStatus::Skipped(
+                    crate::d3d11_renderer::DrawPlanSkipReason::MissingAssignment,
+                ),
                 dxgi_format: Some(DXGI_FORMAT_R16G16B16A16_FLOAT),
+                width: None,
+                height: None,
                 lut_index: None,
-                ..Default::default()
             },
-        );
+        ));
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
 
@@ -1327,7 +1423,7 @@ mod tests {
         );
         state::update_present_context(
             fake.context_address(),
-            crate::LutDecision::Apply {
+            crate::lut_pipeline::LutDecision::Apply {
                 format: BackBufferFormat::Rgba16Float,
                 lut_index: 0,
             },
@@ -1365,14 +1461,20 @@ mod tests {
         activate_context(fake.context_address());
         super::super::detours::original_pointer_for_target(HookTarget::Present)
             .store(returns_present_status as *mut c_void, Ordering::Release);
-        crate::d3d11_renderer::set_fake_render_result(
-            crate::d3d11_renderer::RenderPresentLutResult {
-                lut_applied: true,
+        crate::d3d11_renderer::set_fake_render_result(Ok(
+            crate::d3d11_renderer::PresentLutOutcome {
+                decision: crate::lut_pipeline::LutDecision::Apply {
+                    format: BackBufferFormat::Bgra8Unorm,
+                    lut_index: 0,
+                },
+                present_dirty_rect: None,
+                draw: crate::d3d11_renderer::PresentDrawStatus::Applied { full_redraw: false },
                 dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+                width: None,
+                height: None,
                 lut_index: Some(0),
-                ..Default::default()
             },
-        );
+        ));
 
         assert_eq!(
             unsafe {
@@ -1423,14 +1525,20 @@ mod tests {
     fn present_render_is_skipped_when_shutdown_starts_after_entry_check() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         initialize_test_state();
-        crate::d3d11_renderer::set_fake_render_result(
-            crate::d3d11_renderer::RenderPresentLutResult {
-                lut_applied: true,
+        crate::d3d11_renderer::set_fake_render_result(Ok(
+            crate::d3d11_renderer::PresentLutOutcome {
+                decision: crate::lut_pipeline::LutDecision::Apply {
+                    format: BackBufferFormat::Bgra8Unorm,
+                    lut_index: 0,
+                },
+                present_dirty_rect: None,
+                draw: crate::d3d11_renderer::PresentDrawStatus::Applied { full_redraw: false },
                 dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+                width: None,
+                height: None,
                 lut_index: Some(0),
-                ..Default::default()
             },
-        );
+        ));
 
         assert_eq!(state::begin_shutdown(), state::ShutdownStart::Started);
 

@@ -1,4 +1,4 @@
-use super::RenderPresentLutResult;
+use super::{PresentLutOutcome, RenderAcquireError};
 use crate::lut_pipeline::DirtyRect;
 use dwm_lut_payload::MonitorIdentity;
 use std::sync::{Mutex, OnceLock};
@@ -12,12 +12,13 @@ pub(crate) struct FakeRenderPresentLutCall {
     pub dirty_rects: Vec<DirtyRect>,
 }
 
-static FAKE_RENDER_RESULT: OnceLock<Mutex<RenderPresentLutResult>> = OnceLock::new();
+static FAKE_RENDER_RESULT: OnceLock<Mutex<Result<PresentLutOutcome, RenderAcquireError>>> =
+    OnceLock::new();
 static FAKE_RENDER_CALL: OnceLock<Mutex<Option<FakeRenderPresentLutCall>>> = OnceLock::new();
 static FAKE_RENDER_CONTEXT_ACTIVE: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
 
-fn result_slot() -> &'static Mutex<RenderPresentLutResult> {
-    FAKE_RENDER_RESULT.get_or_init(|| Mutex::new(RenderPresentLutResult::default()))
+fn result_slot() -> &'static Mutex<Result<PresentLutOutcome, RenderAcquireError>> {
+    FAKE_RENDER_RESULT.get_or_init(|| Mutex::new(Err(RenderAcquireError::BackBuffer)))
 }
 
 fn call_slot() -> &'static Mutex<Option<FakeRenderPresentLutCall>> {
@@ -28,14 +29,14 @@ fn context_active_slot() -> &'static Mutex<Option<bool>> {
     FAKE_RENDER_CONTEXT_ACTIVE.get_or_init(|| Mutex::new(None))
 }
 
-pub(crate) fn set_fake_render_result(result: RenderPresentLutResult) {
+pub(crate) fn set_fake_render_result(result: Result<PresentLutOutcome, RenderAcquireError>) {
     if let Ok(mut slot) = result_slot().lock() {
         *slot = result;
     }
 }
 
 pub(crate) fn reset_fake_render_result() {
-    set_fake_render_result(RenderPresentLutResult::default());
+    set_fake_render_result(Err(RenderAcquireError::BackBuffer));
     if let Ok(mut calls) = call_slot().lock() {
         *calls = None;
     }
@@ -59,7 +60,7 @@ pub(crate) unsafe fn render_present_lut(
     hardware_protected: bool,
     dirty_rects: &[DirtyRect],
     _pipeline: &crate::lut_pipeline::LutPipeline,
-) -> RenderPresentLutResult {
+) -> Result<PresentLutOutcome, RenderAcquireError> {
     if let Ok(mut calls) = call_slot().lock() {
         *calls = Some(FakeRenderPresentLutCall {
             overlay_swap_chain,
@@ -77,5 +78,5 @@ pub(crate) unsafe fn render_present_lut(
     result_slot()
         .lock()
         .map(|result| *result)
-        .unwrap_or_default()
+        .unwrap_or(Err(RenderAcquireError::Unavailable))
 }

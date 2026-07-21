@@ -19,64 +19,19 @@ use super::Vertex;
 use super::context_state::{ContextState, unbind_pipeline};
 use super::d3d11_api::*;
 
-use crate::lut_pipeline::{BackBufferFormat, DirtyRect, LutPipeline, ShaderConstantsCBuffer};
+use crate::lut_pipeline::{
+    BackBufferFormat, DirtyRect, LutDecision, LutPipeline, ShaderConstantsCBuffer,
+};
 use crate::profile::SwapChainPathHypothesis;
 use dwm_lut_payload::MonitorIdentity;
 
-#[cfg(debug_assertions)]
-const DIAGNOSTIC_SAMPLE_INTERVAL: u64 = 600;
+static RENDERER: OnceLock<Mutex<D3D11Renderer>> = OnceLock::new();
+
 const BACK_BUFFER_ID_PRIVATE_DATA_GUID: GUID =
     GUID::from_u128(0x6ca95369_322a_4ee3_8515_fec2020a7416);
 
-static RENDERER: OnceLock<Mutex<D3D11Renderer>> = OnceLock::new();
-
-#[cfg(debug_assertions)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FrameDiagnosticKey {
-    dxgi_format: u32,
-    target_id: Option<u32>,
-    width: u32,
-    height: u32,
-}
-
-#[cfg(debug_assertions)]
-struct PerOverlayDiagnosticLogLimiter<K> {
-    last_keys: BTreeMap<usize, K>,
-    counts: BTreeMap<usize, u64>,
-}
-
-#[cfg(debug_assertions)]
-impl<K> Default for PerOverlayDiagnosticLogLimiter<K> {
-    fn default() -> Self {
-        Self {
-            last_keys: BTreeMap::new(),
-            counts: BTreeMap::new(),
-        }
-    }
-}
-
-#[cfg(debug_assertions)]
-impl<K: Copy + PartialEq> PerOverlayDiagnosticLogLimiter<K> {
-    fn should_log(&mut self, overlay_swap_chain: usize, key: K) -> bool {
-        let count = self.counts.entry(overlay_swap_chain).or_insert(0);
-        *count = count.saturating_add(1);
-
-        let changed = self
-            .last_keys
-            .get(&overlay_swap_chain)
-            .is_none_or(|last_key| *last_key != key);
-        if changed {
-            self.last_keys.insert(overlay_swap_chain, key);
-        }
-
-        *count == 1 || changed || (*count).is_multiple_of(DIAGNOSTIC_SAMPLE_INTERVAL)
-    }
-}
-
 struct D3D11Renderer {
     devices: BTreeMap<super::ResourceKey, DeviceResources>,
-    #[cfg(debug_assertions)]
-    frame_diagnostics: PerOverlayDiagnosticLogLimiter<FrameDiagnosticKey>,
     #[cfg(debug_assertions)]
     back_buffer_identity_fallbacks: BTreeSet<usize>,
 }
@@ -103,8 +58,6 @@ impl D3D11Renderer {
         Self {
             devices: BTreeMap::new(),
             #[cfg(debug_assertions)]
-            frame_diagnostics: PerOverlayDiagnosticLogLimiter::default(),
-            #[cfg(debug_assertions)]
             back_buffer_identity_fallbacks: BTreeSet::new(),
         }
     }
@@ -114,69 +67,23 @@ impl D3D11Renderer {
         present_context: PresentRenderContext,
         dirty_rects: &[DirtyRect],
         pipeline: &LutPipeline,
-    ) -> super::RenderPresentLutResult {
-        let Some(back_buffer) = (unsafe {
+    ) -> Result<super::PresentLutOutcome, super::RenderAcquireError> {
+        let back_buffer = (unsafe {
             self.overlay_swap_chain_to_back_buffer(
                 present_context.overlay_swap_chain,
                 present_context.swap_chain_path,
             )
-        }) else {
-            debug_log!(
-                "event=back_buffer_get_failed overlay_swap_chain=0x{:x}",
-                present_context.overlay_swap_chain
-            );
-            return super::RenderPresentLutResult::default();
-        };
+        })
+        .ok_or(super::RenderAcquireError::BackBuffer)?;
 
-        let Ok(device) = (unsafe { back_buffer.GetDevice() }) else {
-            debug_log!(
-                "event=renderer_early_return reason=device_get_failed overlay_swap_chain=0x{:x} back_buffer=0x{:x}",
-                present_context.overlay_swap_chain,
-                back_buffer.as_raw() as usize
-            );
-            return super::RenderPresentLutResult::default();
-        };
-
-        let Ok(context) = (unsafe { device.GetImmediateContext() }) else {
-            debug_log!(
-                "event=renderer_early_return reason=context_get_failed overlay_swap_chain=0x{:x} back_buffer=0x{:x} device=0x{:x}",
-                present_context.overlay_swap_chain,
-                back_buffer.as_raw() as usize,
-                device.as_raw() as usize
-            );
-            return super::RenderPresentLutResult::default();
-        };
+        let device =
+            (unsafe { back_buffer.GetDevice() }).map_err(|_| super::RenderAcquireError::Device)?;
+        let context = (unsafe { device.GetImmediateContext() })
+            .map_err(|_| super::RenderAcquireError::Context)?;
 
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
             back_buffer.GetDesc(&mut desc);
-        }
-        #[cfg(debug_assertions)]
-        let frame_adapter_luid = present_context
-            .monitor_identity
-            .map(|identity| identity.adapter_luid.to_string())
-            .unwrap_or_else(|| "unknown".to_owned());
-        #[cfg(debug_assertions)]
-        let frame_target_id = present_context
-            .monitor_identity
-            .map(|identity| identity.target_id);
-        #[cfg(debug_assertions)]
-        let should_log_success_frame = self.should_log_success_frame(
-            present_context.overlay_swap_chain,
-            desc,
-            frame_target_id,
-        );
-        #[cfg(debug_assertions)]
-        if should_log_success_frame {
-            debug_log!(
-                "event=back_buffer_desc overlay_swap_chain=0x{:x} back_buffer=0x{:x} dxgi_format={} width={} height={} target_id={:?}",
-                present_context.overlay_swap_chain,
-                back_buffer.as_raw() as usize,
-                desc.Format.0,
-                desc.Width,
-                desc.Height,
-                frame_target_id
-            );
         }
 
         let draw_plan = match super::prepare_gpu_draw_plan(
@@ -189,50 +96,14 @@ impl D3D11Renderer {
         ) {
             Ok(draw_plan) => draw_plan,
             Err(skip) => {
-                #[cfg(debug_assertions)]
-                debug_log!(
-                    "event=lut_draw_skip reason={} overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} dxgi_format={} width={} height={} dirty_rect_count={}",
-                    skip.reason.as_str(),
-                    present_context.overlay_swap_chain,
-                    back_buffer.as_raw() as usize,
-                    frame_adapter_luid,
-                    frame_target_id,
-                    desc.Format.0,
+                return Ok(outcome_from_skip(
+                    skip,
+                    desc.Format.0 as u32,
                     desc.Width,
                     desc.Height,
-                    dirty_rects.len()
-                );
-                return super::RenderPresentLutResult {
-                    lut_applied: false,
-                    dxgi_format: Some(desc.Format.0 as u32),
-                    width: Some(desc.Width),
-                    height: Some(desc.Height),
-                    lut_index: skip.resolved.map(|resolved| resolved.lut_index),
-                    present_dirty_rect: None,
-                };
+                ));
             }
         };
-        #[cfg(debug_assertions)]
-        if should_log_success_frame {
-            debug_log!(
-                "event=lut_draw_plan overlay_swap_chain=0x{:x} back_buffer=0x{:x} adapter_luid={} target_id={:?} dxgi_format={} width={} height={} lut_index={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?}",
-                present_context.overlay_swap_chain,
-                back_buffer.as_raw() as usize,
-                frame_adapter_luid,
-                frame_target_id,
-                desc.Format.0,
-                desc.Width,
-                desc.Height,
-                draw_plan.lut_index,
-                dirty_rects.len(),
-                draw_plan.dirty_rects.len(),
-                draw_plan.dirty_rects.first()
-            );
-        }
-        #[cfg(debug_assertions)]
-        let draw_rect_count = draw_plan.dirty_rects.len();
-        #[cfg(debug_assertions)]
-        let first_draw_rect = draw_plan.dirty_rects.first().copied();
 
         let frame = RenderFrame {
             device: &device,
@@ -241,56 +112,14 @@ impl D3D11Renderer {
             width: desc.Width,
             height: desc.Height,
         };
-        let result = self.render_with_device(
+        Ok(self.render_with_device(
             present_context.overlay_swap_chain,
             present_context.monitor_identity,
             present_context.hardware_protected,
             frame,
             pipeline,
             draw_plan,
-        );
-        #[cfg(debug_assertions)]
-        if should_log_success_frame {
-            debug_log!(
-                "event=renderer_present_result overlay_swap_chain=0x{:x} monitor_identity={} target_id={:?} back_buffer=0x{:x} device=0x{:x} context=0x{:x} dxgi_format={:?} width={} height={} lut_index={:?} lut_applied={} dirty_rect_count={} draw_rect_count={} first_draw_rect={:?} present_dirty_rect={:?}",
-                present_context.overlay_swap_chain,
-                crate::debug_log::quoted(format_monitor_identity(present_context.monitor_identity)),
-                present_context
-                    .monitor_identity
-                    .map(|identity| identity.target_id),
-                back_buffer.as_raw() as usize,
-                device.as_raw() as usize,
-                context.as_raw() as usize,
-                result.dxgi_format,
-                desc.Width,
-                desc.Height,
-                result.lut_index,
-                result.lut_applied,
-                dirty_rects.len(),
-                draw_rect_count,
-                first_draw_rect,
-                result.present_dirty_rect
-            );
-        }
-        result
-    }
-
-    #[cfg(debug_assertions)]
-    fn should_log_success_frame(
-        &mut self,
-        overlay_swap_chain: usize,
-        desc: D3D11_TEXTURE2D_DESC,
-        target_id: Option<u32>,
-    ) -> bool {
-        self.frame_diagnostics.should_log(
-            overlay_swap_chain,
-            FrameDiagnosticKey {
-                dxgi_format: desc.Format.0 as u32,
-                target_id,
-                width: desc.Width,
-                height: desc.Height,
-            },
-        )
+        ))
     }
 
     unsafe fn overlay_swap_chain_to_back_buffer(
@@ -318,7 +147,7 @@ impl D3D11Renderer {
         frame: RenderFrame<'_>,
         pipeline: &LutPipeline,
         mut draw_plan: super::GpuDrawPlan,
-    ) -> super::RenderPresentLutResult {
+    ) -> super::PresentLutOutcome {
         let back_buffer_id = self.back_buffer_id(frame.back_buffer);
         let device_key = frame.device.as_raw() as usize;
         let resource_key = super::ResourceKey {
@@ -336,17 +165,10 @@ impl D3D11Renderer {
             let Some(resources) =
                 DeviceResources::create(frame.device, frame.width, frame.height, pipeline)
             else {
-                debug_log!(
-                    "event=renderer_early_return reason=device_resources_create_failed overlay_swap_chain=0x{:x} device=0x{:x} width={} height={} lut_count={}",
-                    overlay_swap_chain,
-                    device_key,
-                    frame.width,
-                    frame.height,
-                    pipeline.luts.len()
-                );
-                return super::RenderPresentLutResult::planned(
+                return outcome_planned(
                     draw_plan.format,
                     draw_plan.lut_index,
+                    super::PresentDrawFailReason::ResourcesCreateFailed,
                 );
             };
             self.devices
@@ -355,22 +177,18 @@ impl D3D11Renderer {
         }
 
         let Some(resources) = self.devices.get_mut(&resource_key) else {
-            debug_log!(
-                "event=renderer_early_return reason=device_resources_missing overlay_swap_chain=0x{:x} device=0x{:x}",
-                overlay_swap_chain,
-                device_key
+            return outcome_planned(
+                draw_plan.format,
+                draw_plan.lut_index,
+                super::PresentDrawFailReason::ResourcesMissing,
             );
-            return super::RenderPresentLutResult::planned(draw_plan.format, draw_plan.lut_index);
         };
         if draw_plan.lut_index >= resources.lut_srvs.len() {
-            debug_log!(
-                "event=renderer_early_return reason=lut_index_out_of_range overlay_swap_chain=0x{:x} device=0x{:x} lut_index={} srv_count={}",
-                overlay_swap_chain,
-                device_key,
+            return outcome_planned(
+                draw_plan.format,
                 draw_plan.lut_index,
-                resources.lut_srvs.len()
+                super::PresentDrawFailReason::LutIndexOutOfRange,
             );
-            return super::RenderPresentLutResult::planned(draw_plan.format, draw_plan.lut_index);
         }
 
         let current_draw_state = super::DrawState {
@@ -390,29 +208,14 @@ impl D3D11Renderer {
             copy_texture_created,
         );
         if needs_full_redraw {
-            debug_log!(
-                "event=lut_full_redraw device=0x{:x} overlay_swap_chain=0x{:x} back_buffer=0x{:x} width={} height={} format={:?} lut_index={} resources_recreated={} copy_texture_created={} previous_state={:?} dirty_rect_count={}",
-                device_key,
-                overlay_swap_chain,
-                frame.back_buffer.as_raw() as usize,
-                frame.width,
-                frame.height,
-                draw_plan.format,
-                draw_plan.lut_index,
-                recreate,
-                copy_texture_created,
-                previous_state,
-                draw_plan.dirty_rects.len()
-            );
             draw_plan.dirty_rects = super::draw_rects_for_full_frame(frame.width, frame.height);
         }
         if draw_plan.dirty_rects.is_empty() {
-            debug_log!(
-                "event=renderer_early_return reason=draw_rects_empty overlay_swap_chain=0x{:x} device=0x{:x}",
-                overlay_swap_chain,
-                device_key
+            return outcome_planned(
+                draw_plan.format,
+                draw_plan.lut_index,
+                super::PresentDrawFailReason::DrawRectsEmpty,
             );
-            return super::RenderPresentLutResult::planned(draw_plan.format, draw_plan.lut_index);
         }
         let present_dirty_rect = super::present_dirty_rect_for_full_redraw(
             needs_full_redraw,
@@ -422,7 +225,7 @@ impl D3D11Renderer {
             &draw_plan.dirty_rects,
         );
 
-        let result = resources.draw(frame, &draw_plan);
+        let draw_result = resources.draw(frame, &draw_plan);
         #[cfg(debug_assertions)]
         crate::route_trace::record_protected_lut_resource_candidate(
             overlay_swap_chain,
@@ -434,20 +237,29 @@ impl D3D11Renderer {
             Some(super::dxgi_format_for_copy_texture(draw_plan.format)),
             Some(frame.width),
             Some(frame.height),
-            result,
+            draw_result.is_ok(),
         );
-        if result {
-            resources
-                .draw_states
-                .record_success(render_target_key, current_draw_state);
-        }
-        super::RenderPresentLutResult {
-            lut_applied: result,
-            dxgi_format: Some(super::dxgi_format_for_copy_texture(draw_plan.format)),
-            width: Some(frame.width),
-            height: Some(frame.height),
-            lut_index: Some(draw_plan.lut_index),
-            present_dirty_rect: result.then_some(present_dirty_rect).flatten(),
+        match draw_result {
+            Ok(()) => {
+                resources
+                    .draw_states
+                    .record_success(render_target_key, current_draw_state);
+                outcome_applied(
+                    draw_plan.format,
+                    draw_plan.lut_index,
+                    frame.width,
+                    frame.height,
+                    present_dirty_rect,
+                    needs_full_redraw,
+                )
+            }
+            Err(fail) => outcome_draw_failed(
+                draw_plan.format,
+                draw_plan.lut_index,
+                frame.width,
+                frame.height,
+                fail,
+            ),
         }
     }
 
@@ -456,7 +268,6 @@ impl D3D11Renderer {
         self.devices.clear();
         #[cfg(debug_assertions)]
         {
-            self.frame_diagnostics = PerOverlayDiagnosticLogLimiter::default();
             self.back_buffer_identity_fallbacks.clear();
         }
         device_count
@@ -612,33 +423,24 @@ impl DeviceResources {
         })
     }
 
-    fn draw(&mut self, frame: RenderFrame<'_>, draw_plan: &super::GpuDrawPlan) -> bool {
+    fn draw(
+        &mut self,
+        frame: RenderFrame<'_>,
+        draw_plan: &super::GpuDrawPlan,
+    ) -> Result<(), super::PresentDrawFailReason> {
         let Some((copy_texture, copy_srv)) = self
             .copy_textures
             .for_format(frame.device, frame.width, frame.height, draw_plan.format)
             .map(|resource| (resource.texture.clone(), resource.srv.clone()))
         else {
-            debug_log!(
-                "event=renderer_early_return reason=copy_texture_create_failed device=0x{:x} back_buffer=0x{:x} width={} height={} format={:?}",
-                frame.device.as_raw() as usize,
-                frame.back_buffer.as_raw() as usize,
-                frame.width,
-                frame.height,
-                draw_plan.format
-            );
-            return false;
+            return Err(super::PresentDrawFailReason::CopyTextureCreateFailed);
         };
         let Some(rtv) = create_render_target_view(frame.device, frame.back_buffer) else {
-            debug_log!(
-                "event=renderer_early_return reason=render_target_view_create_failed device=0x{:x} back_buffer=0x{:x}",
-                frame.device.as_raw() as usize,
-                frame.back_buffer.as_raw() as usize
-            );
-            return false;
+            return Err(super::PresentDrawFailReason::RenderTargetViewCreateFailed);
         };
         let bindings =
             PipelineBindings::new(self, &rtv, &copy_srv, &self.lut_srvs[draw_plan.lut_index]);
-        super::with_restored_state(
+        let drawn = super::with_restored_state(
             || ContextState::capture(frame.context),
             || {
                 if self.last_constants.as_ref() != Some(&draw_plan.constants) {
@@ -703,15 +505,94 @@ impl DeviceResources {
                 true
             },
             |saved_state| saved_state.restore(frame.context),
-        )
+        );
+        if drawn {
+            Ok(())
+        } else {
+            Err(super::PresentDrawFailReason::DrawFailed)
+        }
     }
 }
 
-#[cfg(debug_assertions)]
-fn format_monitor_identity(identity: Option<MonitorIdentity>) -> String {
-    identity
-        .map(|identity| format!("{}:{}", identity.adapter_luid, identity.target_id))
-        .unwrap_or_else(|| "none".to_owned())
+fn decision_from_observed(dxgi_format: u32, lut_index: Option<usize>) -> LutDecision {
+    match BackBufferFormat::from_dxgi_format(dxgi_format) {
+        Some(format) => match lut_index {
+            Some(lut_index) => LutDecision::Apply { format, lut_index },
+            None => LutDecision::NotApplicable,
+        },
+        None => LutDecision::NotApplicable,
+    }
+}
+
+fn outcome_from_skip(
+    skip: super::DrawPlanSkip,
+    dxgi_format: u32,
+    width: u32,
+    height: u32,
+) -> super::PresentLutOutcome {
+    let lut_index = skip.resolved.map(|resolved| resolved.lut_index);
+    super::PresentLutOutcome {
+        decision: decision_from_observed(dxgi_format, lut_index),
+        present_dirty_rect: None,
+        draw: super::PresentDrawStatus::Skipped(skip.reason),
+        dxgi_format: Some(dxgi_format),
+        width: Some(width),
+        height: Some(height),
+        lut_index,
+    }
+}
+
+fn outcome_planned(
+    format: BackBufferFormat,
+    lut_index: usize,
+    fail: super::PresentDrawFailReason,
+) -> super::PresentLutOutcome {
+    super::PresentLutOutcome {
+        decision: LutDecision::Apply { format, lut_index },
+        present_dirty_rect: None,
+        draw: super::PresentDrawStatus::Failed(fail),
+        dxgi_format: Some(super::dxgi_format_for_copy_texture(format)),
+        width: None,
+        height: None,
+        lut_index: Some(lut_index),
+    }
+}
+
+fn outcome_applied(
+    format: BackBufferFormat,
+    lut_index: usize,
+    width: u32,
+    height: u32,
+    present_dirty_rect: Option<DirtyRect>,
+    full_redraw: bool,
+) -> super::PresentLutOutcome {
+    super::PresentLutOutcome {
+        decision: LutDecision::Apply { format, lut_index },
+        present_dirty_rect,
+        draw: super::PresentDrawStatus::Applied { full_redraw },
+        dxgi_format: Some(super::dxgi_format_for_copy_texture(format)),
+        width: Some(width),
+        height: Some(height),
+        lut_index: Some(lut_index),
+    }
+}
+
+fn outcome_draw_failed(
+    format: BackBufferFormat,
+    lut_index: usize,
+    width: u32,
+    height: u32,
+    fail: super::PresentDrawFailReason,
+) -> super::PresentLutOutcome {
+    super::PresentLutOutcome {
+        decision: LutDecision::Apply { format, lut_index },
+        present_dirty_rect: None,
+        draw: super::PresentDrawStatus::Failed(fail),
+        dxgi_format: Some(super::dxgi_format_for_copy_texture(format)),
+        width: Some(width),
+        height: Some(height),
+        lut_index: Some(lut_index),
+    }
 }
 
 pub(crate) unsafe fn render_present_lut(
@@ -721,10 +602,10 @@ pub(crate) unsafe fn render_present_lut(
     hardware_protected: bool,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,
-) -> super::RenderPresentLutResult {
+) -> Result<super::PresentLutOutcome, super::RenderAcquireError> {
     let renderer = RENDERER.get_or_init(|| Mutex::new(D3D11Renderer::new()));
     let Ok(mut renderer) = renderer.lock() else {
-        return super::RenderPresentLutResult::default();
+        return Err(super::RenderAcquireError::Unavailable);
     };
     unsafe {
         renderer.render_present_lut(

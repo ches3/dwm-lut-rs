@@ -17,7 +17,6 @@ pub use lut_bypass::{
     ContextLutState, DisableIndependentFlipPatch, LutBypassRuntime, OverlayTestModeControl,
     OverlayTestModePatch,
 };
-pub(crate) use lut_pipeline::LutDecision;
 pub use lut_pipeline::{
     BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
     LoadedLut, LutMetadata, LutPipeline, ShaderConstants, ShaderConstantsCBuffer, ShaderTexture3D,

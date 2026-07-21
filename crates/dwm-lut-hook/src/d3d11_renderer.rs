@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::lut_pipeline::{
     BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
-    LutPipeline, ResolvedLut, ShaderConstantsCBuffer,
+    LutDecision, LutPipeline, ResolvedLut, ShaderConstantsCBuffer,
 };
 use dwm_lut_payload::MonitorIdentity;
 
@@ -33,7 +33,7 @@ struct GpuDrawPlan {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DrawPlanSkipReason {
+pub(crate) enum DrawPlanSkipReason {
     ZeroSize,
     MissingMonitorIdentity,
     UnsupportedFormat,
@@ -47,9 +47,9 @@ struct DrawPlanSkip {
     resolved: Option<ResolvedLut>,
 }
 
-#[cfg(all(not(test), debug_assertions))]
+#[cfg(debug_assertions)]
 impl DrawPlanSkipReason {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::ZeroSize => "zero_size",
             Self::MissingMonitorIdentity => "missing_monitor_identity",
@@ -60,27 +60,90 @@ impl DrawPlanSkipReason {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RenderPresentLutResult {
-    pub lut_applied: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) enum RenderAcquireError {
+    BackBuffer,
+    Device,
+    Context,
+    Unavailable,
+}
+
+#[cfg(debug_assertions)]
+impl RenderAcquireError {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::BackBuffer => "back_buffer",
+            Self::Device => "device",
+            Self::Context => "context",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) enum PresentDrawFailReason {
+    ResourcesCreateFailed,
+    ResourcesMissing,
+    LutIndexOutOfRange,
+    DrawRectsEmpty,
+    CopyTextureCreateFailed,
+    RenderTargetViewCreateFailed,
+    DrawFailed,
+}
+
+#[cfg(debug_assertions)]
+impl PresentDrawFailReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ResourcesCreateFailed => "resources_create_failed",
+            Self::ResourcesMissing => "resources_missing",
+            Self::LutIndexOutOfRange => "lut_index_out_of_range",
+            Self::DrawRectsEmpty => "draw_rects_empty",
+            Self::CopyTextureCreateFailed => "copy_texture_create_failed",
+            Self::RenderTargetViewCreateFailed => "render_target_view_create_failed",
+            Self::DrawFailed => "draw_failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PresentDrawStatus {
+    Applied { full_redraw: bool },
+    Skipped(DrawPlanSkipReason),
+    Failed(PresentDrawFailReason),
+}
+
+impl PresentDrawStatus {
+    #[cfg(debug_assertions)]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied { .. } => "applied",
+            Self::Skipped(reason) => reason.as_str(),
+            Self::Failed(reason) => reason.as_str(),
+        }
+    }
+
+    pub(crate) const fn lut_applied(self) -> bool {
+        matches!(self, Self::Applied { .. })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PresentLutOutcome {
+    pub decision: LutDecision,
+    pub present_dirty_rect: Option<DirtyRect>,
+    pub draw: PresentDrawStatus,
     pub dxgi_format: Option<u32>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub lut_index: Option<usize>,
-    pub present_dirty_rect: Option<DirtyRect>,
 }
 
-#[cfg(not(test))]
-impl RenderPresentLutResult {
-    fn planned(format: BackBufferFormat, lut_index: usize) -> Self {
-        Self {
-            lut_applied: false,
-            dxgi_format: Some(dxgi_format_for_copy_texture(format)),
-            width: None,
-            height: None,
-            lut_index: Some(lut_index),
-            present_dirty_rect: None,
-        }
+impl PresentLutOutcome {
+    pub(crate) const fn lut_applied(self) -> bool {
+        self.draw.lut_applied()
     }
 }
 
@@ -376,7 +439,7 @@ pub(crate) unsafe fn render_present_lut(
     hardware_protected: bool,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,
-) -> RenderPresentLutResult {
+) -> Result<PresentLutOutcome, RenderAcquireError> {
     #[cfg(test)]
     {
         unsafe {

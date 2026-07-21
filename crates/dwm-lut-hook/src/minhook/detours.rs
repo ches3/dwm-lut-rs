@@ -505,7 +505,7 @@ mod tests {
     fn activate_context(context_address: usize) {
         state::update_present_context(
             context_address,
-            crate::LutDecision::Apply {
+            crate::lut_pipeline::LutDecision::Apply {
                 format: crate::BackBufferFormat::Bgra8Unorm,
                 lut_index: 0,
             },
