@@ -275,13 +275,12 @@ mod tests {
         PayloadLut,
     };
 
-    use crate::profile::VERSIONED_PROFILES;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
     use crate::{DXGI_FORMAT_B8G8R8A8_UNORM, DirtyRect, HookProfile};
 
     fn test_profile() -> HookProfile {
-        (VERSIONED_PROFILES[0].build)()
+        crate::profile::latest_registered_profile()
     }
 
     unsafe extern "system" fn returns_true_overlay_direct_flip(

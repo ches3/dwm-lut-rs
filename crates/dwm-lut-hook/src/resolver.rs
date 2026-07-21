@@ -593,11 +593,10 @@ mod tests {
     };
     use crate::profile::{
         AobToken, HOOK_MODULE_NAME, HookProfile, HookSignature, HookTarget, SignatureLocator,
-        VERSIONED_PROFILES,
     };
 
     fn test_profile() -> HookProfile {
-        (VERSIONED_PROFILES[0].build)()
+        crate::profile::latest_registered_profile()
     }
 
     #[test]

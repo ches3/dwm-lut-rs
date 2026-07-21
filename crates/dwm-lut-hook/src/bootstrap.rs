@@ -17,7 +17,9 @@ use crate::minhook::{
     MinHookError, disable_registered_hooks, enable_registered_hooks, register_plan,
     unregister_registered_hooks,
 };
-use crate::profile::{HookProfile, ProfileSelectError, os_build_number, select_versioned_profile};
+use crate::profile::{
+    HookProfile, ProfileSelectError, dwmcore_file_version, select_versioned_profile,
+};
 
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
@@ -128,7 +130,7 @@ pub(crate) fn reset_initialization_guard_for_tests() {
 #[derive(Debug)]
 pub enum HookError {
     AlreadyInitialized,
-    UnsupportedOsBuild(ProfileSelectError),
+    ProfileSelect(ProfileSelectError),
     Payload(PayloadError),
     MinHook(MinHookError),
     Resolve(HookResolveError),
@@ -138,7 +140,7 @@ impl fmt::Display for HookError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyInitialized => write!(f, "hook is already initialized"),
-            Self::UnsupportedOsBuild(error) => write!(f, "{error}"),
+            Self::ProfileSelect(error) => write!(f, "{error}"),
             Self::Payload(error) => write!(f, "{error}"),
             Self::MinHook(error) => write!(f, "{error}"),
             Self::Resolve(error) => write!(f, "{error}"),
@@ -168,7 +170,7 @@ impl From<MinHookError> for HookError {
 
 impl From<ProfileSelectError> for HookError {
     fn from(value: ProfileSelectError) -> Self {
-        Self::UnsupportedOsBuild(value)
+        Self::ProfileSelect(value)
     }
 }
 
@@ -462,15 +464,14 @@ fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
 }
 
 fn selected_profile() -> Result<HookProfile, HookError> {
-    let os_build = os_build_number()?;
-    let entry = select_versioned_profile(os_build)?;
+    let dwmcore_version = dwmcore_file_version()?;
+    let entry = select_versioned_profile(dwmcore_version)?;
     debug_log!(
-        "event=profile_selected id={} min_build={} os_build={}",
-        crate::debug_log::quoted(entry.id),
-        entry.min_build.0,
-        os_build
+        "event=profile_selected min_version={} dwmcore_version={}",
+        entry.min_version,
+        dwmcore_version
     );
-    Ok((entry.build)())
+    Ok((entry.profile)())
 }
 
 fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
@@ -722,7 +723,15 @@ fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
 fn map_hook_error(error: HookError) -> InitializeStatus {
     match error {
         HookError::AlreadyInitialized => InitializeStatus::AlreadyInitialized,
-        HookError::UnsupportedOsBuild(_) => InitializeStatus::UnsupportedOsBuild,
+        HookError::ProfileSelect(error) => match error {
+            ProfileSelectError::UnsupportedDwmcoreVersion { .. } => {
+                InitializeStatus::UnsupportedDwmcoreVersion
+            }
+            ProfileSelectError::DwmcoreModuleNotLoaded => InitializeStatus::DwmcoreModuleNotLoaded,
+            ProfileSelectError::DwmcoreVersionQueryFailed => {
+                InitializeStatus::DwmcoreVersionQueryFailed
+            }
+        },
         HookError::Resolve(error) => map_resolve_status(error),
         HookError::Payload(error) => map_payload_error_to_initialize_status(&error),
         HookError::MinHook(error) => match error.operation {
@@ -768,14 +777,14 @@ mod tests {
         PayloadLut, ShutdownStatus,
     };
 
-    use crate::profile::{HookProfile, HookTarget, VERSIONED_PROFILES};
+    use crate::profile::{DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError};
     use crate::resolver::{
         HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport,
     };
     use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK};
 
     fn test_profile() -> HookProfile {
-        (VERSIONED_PROFILES[0].build)()
+        crate::profile::latest_registered_profile()
     }
 
     fn test_payload() -> HookPayload {
@@ -869,6 +878,33 @@ mod tests {
             status,
             dwm_lut_payload::InitializeStatus::DwmcoreImageAccessFailed
         );
+    }
+
+    #[test]
+    fn profile_select_failures_have_distinct_initialize_statuses() {
+        let cases = [
+            (
+                ProfileSelectError::UnsupportedDwmcoreVersion {
+                    version: DwmcoreVersion {
+                        build: 26100,
+                        revision: 0,
+                    },
+                },
+                dwm_lut_payload::InitializeStatus::UnsupportedDwmcoreVersion,
+            ),
+            (
+                ProfileSelectError::DwmcoreModuleNotLoaded,
+                dwm_lut_payload::InitializeStatus::DwmcoreModuleNotLoaded,
+            ),
+            (
+                ProfileSelectError::DwmcoreVersionQueryFailed,
+                dwm_lut_payload::InitializeStatus::DwmcoreVersionQueryFailed,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(super::map_hook_error(error.into()), expected);
+        }
     }
 
     #[test]

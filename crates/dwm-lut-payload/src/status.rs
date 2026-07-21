@@ -26,7 +26,7 @@ pub enum InitializeStatus {
     PresentPrologueConflict = 31,
     DirectFlipPrologueConflict = 32,
     DwmcoreImageAccessFailed = 37,
-    UnsupportedOsBuild = 38,
+    UnsupportedDwmcoreVersion = 38,
     DisableIndependentFlipNotFound = 39,
     DisableIndependentFlipAmbiguous = 40,
     DirectFlipInfoEnsureIndependentFlipSignatureNotFound = 41,
@@ -42,6 +42,7 @@ pub enum InitializeStatus {
     IsAdvancedDirectFlipCompatibleSignatureAmbiguous = 51,
     IsAdvancedDirectFlipCompatiblePrologueConflict = 52,
     OverlaysEnabledPrologueConflict = 53,
+    DwmcoreVersionQueryFailed = 54,
 }
 
 impl InitializeStatus {
@@ -70,7 +71,7 @@ impl InitializeStatus {
             31 => Self::PresentPrologueConflict,
             32 => Self::DirectFlipPrologueConflict,
             37 => Self::DwmcoreImageAccessFailed,
-            38 => Self::UnsupportedOsBuild,
+            38 => Self::UnsupportedDwmcoreVersion,
             39 => Self::DisableIndependentFlipNotFound,
             40 => Self::DisableIndependentFlipAmbiguous,
             41 => Self::DirectFlipInfoEnsureIndependentFlipSignatureNotFound,
@@ -86,6 +87,7 @@ impl InitializeStatus {
             51 => Self::IsAdvancedDirectFlipCompatibleSignatureAmbiguous,
             52 => Self::IsAdvancedDirectFlipCompatiblePrologueConflict,
             53 => Self::OverlaysEnabledPrologueConflict,
+            54 => Self::DwmcoreVersionQueryFailed,
             _ => return None,
         })
     }
@@ -137,8 +139,11 @@ impl fmt::Display for InitializeStatus {
             Self::DwmcoreImageAccessFailed => {
                 write!(f, "dwmcore.dll backing image could not be accessed")
             }
-            Self::UnsupportedOsBuild => {
-                write!(f, "OS build is below the minimum supported hook profile")
+            Self::UnsupportedDwmcoreVersion => {
+                write!(
+                    f,
+                    "dwmcore.dll FileVersion is below the minimum supported hook profile"
+                )
             }
             Self::DisableIndependentFlipNotFound => {
                 write!(f, "DisableIndependentFlip reference was not found")
@@ -201,6 +206,9 @@ impl fmt::Display for InitializeStatus {
                 f,
                 "COverlayContext::OverlaysEnabled prologue is modified by a conflicting hook"
             ),
+            Self::DwmcoreVersionQueryFailed => {
+                write!(f, "dwmcore.dll FileVersion could not be queried")
+            }
         }
     }
 }

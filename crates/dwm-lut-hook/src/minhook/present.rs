@@ -597,7 +597,6 @@ mod tests {
     };
 
     use crate::profile::HookTarget;
-    use crate::profile::VERSIONED_PROFILES;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state::{self, PRESENT_RUNTIME_TEST_LOCK as CONTROLLED_TEST_LOCK};
     use crate::{
@@ -606,7 +605,7 @@ mod tests {
     };
 
     fn test_profile() -> HookProfile {
-        (VERSIONED_PROFILES[0].build)()
+        crate::profile::latest_registered_profile()
     }
 
     static LAST_ORIGINAL_PRESENT_RECTS: Mutex<Option<Vec<DirtyRect>>> = Mutex::new(None);
