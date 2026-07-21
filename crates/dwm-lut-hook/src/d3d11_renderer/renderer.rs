@@ -417,6 +417,8 @@ impl D3D11Renderer {
         let present_dirty_rect = super::present_dirty_rect_for_full_redraw(
             needs_full_redraw,
             previous_state,
+            recreate,
+            copy_texture_created,
             &draw_plan.dirty_rects,
         );
 

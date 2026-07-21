@@ -349,10 +349,15 @@ fn requires_full_redraw(
 fn present_dirty_rect_for_full_redraw(
     needs_full_redraw: bool,
     previous_state: RenderTargetState,
+    resources_recreated: bool,
+    copy_texture_created: bool,
     dirty_rects: &[DirtyRect],
 ) -> Option<DirtyRect> {
-    (needs_full_redraw && !matches!(previous_state, RenderTargetState::Bootstrapping))
-        .then(|| bounding_rect(dirty_rects).unwrap())
+    let should_expand = needs_full_redraw
+        && (resources_recreated
+            || copy_texture_created
+            || matches!(previous_state, RenderTargetState::Stable(_)));
+    should_expand.then(|| bounding_rect(dirty_rects).unwrap())
 }
 
 #[cfg(not(test))]
@@ -662,9 +667,63 @@ mod tests {
             present_dirty_rect_for_full_redraw(
                 true,
                 RenderTargetState::Bootstrapping,
+                false,
+                false,
                 &full_frame_rects,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn bootstrapping_full_redraw_expands_present_dirty_rect_when_resources_recreated() {
+        let full_frame_rects = vec![DirtyRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        }];
+
+        assert_eq!(
+            present_dirty_rect_for_full_redraw(
+                true,
+                RenderTargetState::Bootstrapping,
+                true,
+                false,
+                &full_frame_rects,
+            ),
+            Some(DirtyRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            })
+        );
+    }
+
+    #[test]
+    fn bootstrapping_full_redraw_expands_present_dirty_rect_when_copy_texture_created() {
+        let full_frame_rects = vec![DirtyRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        }];
+
+        assert_eq!(
+            present_dirty_rect_for_full_redraw(
+                true,
+                RenderTargetState::Bootstrapping,
+                false,
+                true,
+                &full_frame_rects,
+            ),
+            Some(DirtyRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            })
         );
     }
 
@@ -685,6 +744,8 @@ mod tests {
             present_dirty_rect_for_full_redraw(
                 true,
                 RenderTargetState::Stable(sdr),
+                false,
+                false,
                 &full_frame_rects,
             ),
             Some(DirtyRect {
@@ -713,6 +774,8 @@ mod tests {
             present_dirty_rect_for_full_redraw(
                 false,
                 RenderTargetState::Stable(sdr),
+                false,
+                false,
                 &partial_rects,
             ),
             None
