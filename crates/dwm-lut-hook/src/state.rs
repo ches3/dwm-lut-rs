@@ -1,9 +1,8 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
-use dwm_lut_payload::{HookPayload, MonitorIdentity};
+use dwm_lut_payload::HookPayload;
 
-use crate::DirtyRect;
 use crate::lut_bypass::LutBypassRuntime;
 use crate::lut_pipeline::{LutDecision, LutPipeline};
 use crate::minhook::{MinHookRuntime, RegisteredHook};
@@ -123,6 +122,10 @@ pub(crate) fn has_retained_state() -> bool {
 
 pub fn hook_profile() -> Option<HookProfile> {
     with_state(|state| state.profile)
+}
+
+pub(crate) fn lut_pipeline() -> Option<Arc<LutPipeline>> {
+    with_state(|state| state.runtime.lut_pipeline.clone())
 }
 
 pub fn lut_bypass_runtime() -> Option<LutBypassRuntime> {
@@ -269,28 +272,6 @@ pub(crate) fn reactivate_retained_state(
 
 pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
     with_state(|state| (state.runtime.minhook, state.runtime.hooks.clone()))
-}
-
-pub(crate) fn render_present_lut(
-    overlay_swap_chain: usize,
-    monitor_identity: Option<MonitorIdentity>,
-    dirty_rects: &[DirtyRect],
-) -> Result<crate::d3d11::PresentLutOutcome, crate::d3d11::RenderAcquireError> {
-    let Some((lut_pipeline, swap_chain_path)) =
-        with_state(|state| (state.runtime.lut_pipeline.clone(), state.profile.swap_chain))
-    else {
-        return Err(crate::d3d11::RenderAcquireError::Unavailable);
-    };
-
-    unsafe {
-        crate::d3d11::render_present_lut(
-            overlay_swap_chain,
-            swap_chain_path,
-            monitor_identity,
-            dirty_rects,
-            &lut_pipeline,
-        )
-    }
 }
 
 pub fn evaluate_direct_flip_compatible(

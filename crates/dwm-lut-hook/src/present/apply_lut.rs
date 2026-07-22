@@ -212,16 +212,40 @@ pub(crate) fn apply_lut(
         return outcome;
     };
 
-    match render_present_lut_if_active(
-        overlay_swap_chain,
-        inputs.monitor_identity,
-        &inputs.dirty_rects,
-    ) {
-        None => {}
-        Some(Err(error)) => {
+    if !state::is_runtime_active() {
+        return outcome;
+    }
+
+    let Some(lut_pipeline) = state::lut_pipeline() else {
+        emit_present_lut_acquire_error(
+            overlay_swap_chain,
+            crate::d3d11::RenderAcquireError::Unavailable,
+            should_log_frame,
+        );
+        return outcome;
+    };
+    let Some(profile) = state::hook_profile() else {
+        emit_present_lut_acquire_error(
+            overlay_swap_chain,
+            crate::d3d11::RenderAcquireError::Unavailable,
+            should_log_frame,
+        );
+        return outcome;
+    };
+
+    match unsafe {
+        crate::d3d11::render_present_lut(
+            overlay_swap_chain,
+            profile.swap_chain,
+            inputs.monitor_identity,
+            &inputs.dirty_rects,
+            &lut_pipeline,
+        )
+    } {
+        Err(error) => {
             emit_present_lut_acquire_error(overlay_swap_chain, error, should_log_frame);
         }
-        Some(Ok(render_outcome)) => {
+        Ok(render_outcome) => {
             emit_present_lut_outcome(
                 overlay_swap_chain,
                 inputs.hardware_protected,
@@ -249,21 +273,6 @@ pub(crate) fn empty_rect_vec_storage() -> RectVec {
     }
 }
 
-pub(crate) fn render_present_lut_if_active(
-    overlay_swap_chain: usize,
-    monitor_identity: Option<MonitorIdentity>,
-    dirty_rects: &[DirtyRect],
-) -> Option<Result<crate::d3d11::PresentLutOutcome, crate::d3d11::RenderAcquireError>> {
-    if !state::is_runtime_active() {
-        return None;
-    }
-    Some(state::render_present_lut(
-        overlay_swap_chain,
-        monitor_identity,
-        dirty_rects,
-    ))
-}
-
 fn full_present_rect_vec(
     rect: DirtyRect,
     rect_storage: &mut [DirtyRect; 1],
@@ -288,7 +297,7 @@ mod tests {
         activate_context, initialize_test_state, initialize_test_state_from_payload,
         test_monitor_identity, test_payload,
     };
-    use super::{ApplyOutcome, apply_lut, empty_rect_vec_storage, render_present_lut_if_active};
+    use super::{ApplyOutcome, apply_lut, empty_rect_vec_storage};
     use crate::BackBufferFormat;
     use crate::DirtyRect;
     use crate::lut_pipeline::DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -589,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn render_present_lut_is_skipped_when_shutdown_starts_after_entry_check() {
+    fn apply_lut_skips_render_when_shutdown_starts_after_entry_check() {
         let _guard = HOOK_GLOBAL_TEST_LOCK
             .lock()
             .expect("test mutex should lock");
@@ -611,10 +620,8 @@ mod tests {
 
         assert_eq!(state::begin_shutdown(), state::ShutdownStart::Started);
 
-        let render_result =
-            render_present_lut_if_active(0x1234, Some(test_monitor_identity()), &[]);
+        let _ = run_apply(0x1111, 0x1234, &sample_inputs(false, Vec::new()));
 
-        assert!(render_result.is_none());
         assert!(crate::d3d11::fake_render_present_lut_call().is_none());
         state::reset_state_for_tests();
     }
