@@ -670,7 +670,7 @@ mod tests {
     fn prologue_test_profile() -> HookProfile {
         HookProfile {
             signatures: PROLOGUE_TEST_SIGNATURES,
-            hypotheses: test_profile().hypotheses,
+            ..test_profile()
         }
     }
 
@@ -719,7 +719,7 @@ mod tests {
         ];
         let profile = HookProfile {
             signatures: SIGNATURES,
-            hypotheses: test_profile().hypotheses,
+            ..test_profile()
         };
 
         let report =
@@ -759,7 +759,7 @@ mod tests {
         ];
         let profile = HookProfile {
             signatures: SIGNATURES,
-            hypotheses: test_profile().hypotheses,
+            ..test_profile()
         };
 
         let report = resolve_profile_from_image(&profile, module, &image)
@@ -795,7 +795,7 @@ mod tests {
         }];
         let profile = HookProfile {
             signatures: SIGNATURES,
-            hypotheses: test_profile().hypotheses,
+            ..test_profile()
         };
 
         let error = resolve_profile_from_image(&profile, module, &image)

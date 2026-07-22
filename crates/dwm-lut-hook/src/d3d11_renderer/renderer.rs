@@ -22,7 +22,7 @@ use super::d3d11_api::*;
 use crate::lut_pipeline::{
     BackBufferFormat, DirtyRect, LutDecision, LutPipeline, ShaderConstantsCBuffer,
 };
-use crate::profile::SwapChainPathHypothesis;
+use crate::profile::SwapChainVtablePath;
 use dwm_lut_payload::MonitorIdentity;
 
 static RENDERER: OnceLock<Mutex<D3D11Renderer>> = OnceLock::new();
@@ -39,7 +39,7 @@ struct D3D11Renderer {
 #[derive(Clone, Copy)]
 struct PresentRenderContext {
     overlay_swap_chain: usize,
-    swap_chain_path: SwapChainPathHypothesis,
+    swap_chain_path: SwapChainVtablePath,
     monitor_identity: Option<MonitorIdentity>,
 }
 
@@ -126,7 +126,7 @@ impl D3D11Renderer {
     unsafe fn overlay_swap_chain_to_back_buffer(
         &mut self,
         overlay_swap_chain: usize,
-        swap_chain_path: SwapChainPathHypothesis,
+        swap_chain_path: SwapChainVtablePath,
     ) -> Option<ID3D11Texture2D> {
         let texture = unsafe {
             dwm_lut_get_back_buffer(
@@ -605,7 +605,7 @@ fn outcome_draw_failed(
 
 pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
-    swap_chain_path: SwapChainPathHypothesis,
+    swap_chain_path: SwapChainVtablePath,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,

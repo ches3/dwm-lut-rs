@@ -453,7 +453,7 @@ mod renderer;
 
 pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
-    swap_chain_path: crate::profile::SwapChainPathHypothesis,
+    swap_chain_path: crate::profile::SwapChainVtablePath,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,

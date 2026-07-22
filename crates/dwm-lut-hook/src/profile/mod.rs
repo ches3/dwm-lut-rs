@@ -203,34 +203,24 @@ pub struct HookSignature {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SwapChainPathHypothesis {
+pub struct SwapChainVtablePath {
     pub container_vtable_index: usize,
     pub resource_vtable_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HardwareProtectedPathHypothesis {
-    pub offset: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MonitorIdentityPathHypothesis {
+pub struct MonitorIdentityOffsets {
     pub adapter_luid_low_offset: usize,
     pub adapter_luid_high_offset: usize,
     pub target_id_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProfileHypotheses {
-    pub swap_chain: SwapChainPathHypothesis,
-    pub hardware_protected: HardwareProtectedPathHypothesis,
-    pub monitor_identity: MonitorIdentityPathHypothesis,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookProfile {
     pub signatures: &'static [HookSignature],
-    pub hypotheses: ProfileHypotheses,
+    pub swap_chain: SwapChainVtablePath,
+    pub hardware_protected_offset: usize,
+    pub monitor_identity: MonitorIdentityOffsets,
 }
 
 #[repr(C)]

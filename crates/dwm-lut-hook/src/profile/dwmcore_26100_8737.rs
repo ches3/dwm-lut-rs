@@ -1,6 +1,6 @@
 use super::{
-    AobToken, HardwareProtectedPathHypothesis, HookProfile, HookSignature, HookTarget,
-    MonitorIdentityPathHypothesis, ProfileHypotheses, SignatureLocator, SwapChainPathHypothesis,
+    AobToken, HookProfile, HookSignature, HookTarget, MonitorIdentityOffsets, SignatureLocator,
+    SwapChainVtablePath,
 };
 use AobToken::{Exact, Wildcard};
 
@@ -337,17 +337,15 @@ const SIGNATURES: &[HookSignature] = &[
 pub(super) fn profile() -> HookProfile {
     HookProfile {
         signatures: SIGNATURES,
-        hypotheses: ProfileHypotheses {
-            swap_chain: SwapChainPathHypothesis {
-                container_vtable_index: 24,
-                resource_vtable_index: 19,
-            },
-            hardware_protected: HardwareProtectedPathHypothesis { offset: 0x64 },
-            monitor_identity: MonitorIdentityPathHypothesis {
-                adapter_luid_low_offset: 0x34,
-                adapter_luid_high_offset: 0x38,
-                target_id_offset: 0x3c,
-            },
+        swap_chain: SwapChainVtablePath {
+            container_vtable_index: 24,
+            resource_vtable_index: 19,
+        },
+        hardware_protected_offset: 0x64,
+        monitor_identity: MonitorIdentityOffsets {
+            adapter_luid_low_offset: 0x34,
+            adapter_luid_high_offset: 0x38,
+            target_id_offset: 0x3c,
         },
     }
 }

@@ -276,12 +276,9 @@ pub(crate) fn render_present_lut(
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
 ) -> Result<crate::d3d11_renderer::PresentLutOutcome, crate::d3d11_renderer::RenderAcquireError> {
-    let Some((lut_pipeline, swap_chain_path)) = with_state(|state| {
-        (
-            state.runtime.lut_pipeline.clone(),
-            state.profile.hypotheses.swap_chain,
-        )
-    }) else {
+    let Some((lut_pipeline, swap_chain_path)) =
+        with_state(|state| (state.runtime.lut_pipeline.clone(), state.profile.swap_chain))
+    else {
         return Err(crate::d3d11_renderer::RenderAcquireError::Unavailable);
     };
 

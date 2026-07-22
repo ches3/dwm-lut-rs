@@ -24,10 +24,9 @@ pub use lut_pipeline::{
 };
 pub use minhook::{MinHookError, MinHookRuntime, MinHookState, RegisteredHook};
 pub use profile::{
-    AobToken, DwmcoreVersion, HOOK_MODULE_NAME, HardwareProtectedPathHypothesis, HookProfile,
-    HookSignature, HookTarget, MonitorIdentityPathHypothesis, ProfileHypotheses,
-    ProfileSelectError, SignatureLocator, SwapChainPathHypothesis, VERSIONED_PROFILES,
-    VersionedProfile, dwmcore_file_version, select_versioned_profile,
+    AobToken, DwmcoreVersion, HOOK_MODULE_NAME, HookProfile, HookSignature, HookTarget,
+    MonitorIdentityOffsets, ProfileSelectError, SignatureLocator, SwapChainVtablePath,
+    VERSIONED_PROFILES, VersionedProfile, dwmcore_file_version, select_versioned_profile,
 };
 pub use resolver::{
     HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport, SkippedSignature,

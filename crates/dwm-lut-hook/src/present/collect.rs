@@ -5,7 +5,7 @@ use std::mem::MaybeUninit;
 use std::mem::{align_of, size_of};
 
 use crate::DirtyRect;
-use crate::profile::{HookProfile, MonitorIdentityPathHypothesis};
+use crate::profile::{HookProfile, MonitorIdentityOffsets};
 use crate::state;
 use dwm_lut_payload::{AdapterLuid, MonitorIdentity};
 #[cfg(not(test))]
@@ -74,8 +74,6 @@ unsafe fn collect_present_inputs_with_profile_and_reader(
     overlay_swap_chain: usize,
     rect_vec: usize,
 ) -> Result<PresentInputs, PresentInputError> {
-    let hypotheses = profile.hypotheses;
-
     if overlay_swap_chain == 0 {
         return Err(PresentInputError::NullOverlaySwapChain);
     }
@@ -83,12 +81,11 @@ unsafe fn collect_present_inputs_with_profile_and_reader(
     let hardware_protected = unsafe {
         reader.read::<u8>(checked_address(
             overlay_swap_chain,
-            hypotheses.hardware_protected.offset,
+            profile.hardware_protected_offset,
         )?)? != 0
     };
-    let monitor_identity = unsafe {
-        read_monitor_identity_with(reader, overlay_swap_chain, hypotheses.monitor_identity)
-    };
+    let monitor_identity =
+        unsafe { read_monitor_identity_with(reader, overlay_swap_chain, profile.monitor_identity) };
     let dirty_rects = unsafe { read_dirty_rects_with(reader, rect_vec)? };
     Ok(PresentInputs {
         monitor_identity,
@@ -100,25 +97,23 @@ unsafe fn collect_present_inputs_with_profile_and_reader(
 unsafe fn read_monitor_identity_with(
     reader: &impl MemoryReader,
     overlay_swap_chain: usize,
-    hypothesis: MonitorIdentityPathHypothesis,
+    offsets: MonitorIdentityOffsets,
 ) -> Option<MonitorIdentity> {
     let low_part = unsafe {
         reader
-            .read::<u32>(
-                checked_address(overlay_swap_chain, hypothesis.adapter_luid_low_offset).ok()?,
-            )
+            .read::<u32>(checked_address(overlay_swap_chain, offsets.adapter_luid_low_offset).ok()?)
             .ok()?
     };
     let high_part = unsafe {
         reader
             .read::<i32>(
-                checked_address(overlay_swap_chain, hypothesis.adapter_luid_high_offset).ok()?,
+                checked_address(overlay_swap_chain, offsets.adapter_luid_high_offset).ok()?,
             )
             .ok()?
     };
     let target_id = unsafe {
         reader
-            .read::<u32>(checked_address(overlay_swap_chain, hypothesis.target_id_offset).ok()?)
+            .read::<u32>(checked_address(overlay_swap_chain, offsets.target_id_offset).ok()?)
             .ok()?
     };
 

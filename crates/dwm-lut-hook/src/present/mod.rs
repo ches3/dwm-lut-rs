@@ -219,18 +219,16 @@ pub(crate) mod test_support {
             let profile = test_profile();
             let context = Box::new(0usize);
 
-            let identity = profile.hypotheses.monitor_identity;
+            let identity = profile.monitor_identity;
             let overlay_swap_chain_len = (profile
-                .hypotheses
-                .hardware_protected
-                .offset
+                .hardware_protected_offset
                 .max(identity.target_id_offset + size_of::<u32>())
                 + 1)
             .div_ceil(size_of::<usize>());
             let mut overlay_swap_chain = vec![0usize; overlay_swap_chain_len];
             unsafe {
                 (overlay_swap_chain.as_mut_ptr() as *mut u8)
-                    .add(profile.hypotheses.hardware_protected.offset)
+                    .add(profile.hardware_protected_offset)
                     .write(u8::from(hardware_protected));
                 ((overlay_swap_chain.as_mut_ptr() as *mut u8).add(identity.adapter_luid_low_offset)
                     as *mut u32)
