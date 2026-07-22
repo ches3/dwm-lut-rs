@@ -2,6 +2,8 @@ use crate::lut_pipeline::{DirtyRect, LutDecision, LutPipeline};
 use dwm_lut_payload::MonitorIdentity;
 
 #[cfg(not(test))]
+mod back_buffer;
+#[cfg(not(test))]
 mod context_state;
 #[cfg(not(test))]
 mod d3d11_api;

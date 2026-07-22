@@ -16,10 +16,6 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/lut_pipeline.hlsl");
     println!("cargo:rerun-if-changed=src/blue_noise.rs");
 
-    cc::Build::new()
-        .file("src/d3d11_back_buffer.c")
-        .compile("dwm_lut_d3d11_back_buffer");
-
     let source = SHADER_TEMPLATE.replace("__BLUE_NOISE_64X64__", &render_blue_noise_hlsl());
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set"));
     compile_shader(

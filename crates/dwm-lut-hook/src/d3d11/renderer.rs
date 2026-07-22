@@ -137,12 +137,12 @@ impl D3D11Renderer {
         swap_chain_path: SwapChainVtablePath,
     ) -> Option<ID3D11Texture2D> {
         let texture = unsafe {
-            dwm_lut_get_back_buffer(
+            super::back_buffer::get_back_buffer(
                 overlay_swap_chain as *mut c_void,
                 swap_chain_path.container_vtable_index,
                 swap_chain_path.resource_vtable_index,
             )
-        };
+        }?;
         unsafe { take_owned_interface(texture) }
     }
 

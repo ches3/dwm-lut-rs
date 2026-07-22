@@ -1321,8 +1321,8 @@ dependencies = [
 name = "dwm-lut-hook"
 version = "0.1.0"
 dependencies = [
- "cc",
  "dwm-lut-payload",
+ "microseh",
  "minhook-sys",
  "windows",
  "windows-sys 0.61.2",
@@ -2984,6 +2984,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "microseh"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c21a3b5df1f93ad17fea4bdf3c99fbd841cda0d4102cd42a6003ff3fdf89b59"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
