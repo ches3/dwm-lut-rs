@@ -76,7 +76,7 @@ impl<K: Ord> SharedLimiter<K> {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(test)))]
 static LOG_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[cfg(debug_assertions)]
@@ -98,7 +98,7 @@ fn quoted(value: impl std::fmt::Display) -> String {
     quoted
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(test)))]
 fn write(args: std::fmt::Arguments<'_>) {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
@@ -125,7 +125,10 @@ fn write(args: std::fmt::Arguments<'_>) {
     );
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, test))]
+fn write(_args: std::fmt::Arguments<'_>) {}
+
+#[cfg(all(debug_assertions, not(test)))]
 fn current_thread_id() -> String {
     let id = format!("{:?}", std::thread::current().id());
     id.strip_prefix("ThreadId(")
@@ -134,7 +137,7 @@ fn current_thread_id() -> String {
         .to_owned()
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(test)))]
 fn utc_timestamp() -> String {
     const SECONDS_PER_DAY: u64 = 86_400;
 
@@ -154,7 +157,7 @@ fn utc_timestamp() -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(test)))]
 fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     let days = days_since_epoch + 719_468;
     let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
