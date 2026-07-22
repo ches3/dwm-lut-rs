@@ -1,12 +1,72 @@
 use std::ffi::c_void;
 use std::ptr;
+#[cfg(debug_assertions)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 use crate::DirtyRect;
 use crate::profile::HookTarget;
-#[cfg(debug_assertions)]
-use crate::route_trace::{FlipGateKind, record_flip_gate};
 use crate::state;
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy)]
+enum FlipGateKind {
+    OverlayContextDirectFlip,
+    DirectFlipInfoEnsureIndependentFlip,
+    IsDirectFlipSupportedOnTarget,
+    LegacySwapChainCheckDirectFlip,
+    IsAdvancedDirectFlipCompatible,
+}
+
+#[cfg(debug_assertions)]
+impl FlipGateKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::OverlayContextDirectFlip => "overlay_context_direct_flip",
+            Self::DirectFlipInfoEnsureIndependentFlip => "direct_flip_info_ensure_independent_flip",
+            Self::IsDirectFlipSupportedOnTarget => "is_direct_flip_supported_on_target",
+            Self::LegacySwapChainCheckDirectFlip => "legacy_swap_chain_check_direct_flip",
+            Self::IsAdvancedDirectFlipCompatible => "is_advanced_direct_flip_compatible",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::OverlayContextDirectFlip => 0,
+            Self::DirectFlipInfoEnsureIndependentFlip => 1,
+            Self::IsDirectFlipSupportedOnTarget => 2,
+            Self::LegacySwapChainCheckDirectFlip => 3,
+            Self::IsAdvancedDirectFlipCompatible => 4,
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+const FLIP_GATE_DENIED_SAMPLE_INTERVAL: u64 = 600;
+
+#[cfg(debug_assertions)]
+static FLIP_GATE_DENIED_COUNTS: [AtomicU64; 5] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+#[cfg(debug_assertions)]
+fn record_flip_gate_denied(kind: FlipGateKind, original: bool, result: bool) {
+    if !original || result {
+        return;
+    }
+    let denied = FLIP_GATE_DENIED_COUNTS[kind.index()].fetch_add(1, Ordering::Relaxed) + 1;
+    if denied == 1 || denied <= 8 || denied.is_multiple_of(FLIP_GATE_DENIED_SAMPLE_INTERVAL) {
+        debug_log!(
+            "event=flip_gate_denied gate={} denied_total={}",
+            kind.label(),
+            denied
+        );
+    }
+}
 
 type PresentOriginal = unsafe extern "system" fn(usize, usize, u32, usize, i32, usize, u8) -> i64;
 type ForwardBool1 = unsafe extern "system" fn(usize) -> u8;
@@ -134,10 +194,7 @@ unsafe extern "system" fn present_detour(
         &mut present_rect_storage,
         &mut present_rect_vec_storage,
     );
-    let original_result =
-        unsafe { original(this, overlay_swap_chain, a3, prepared.rect_vec, a5, a6, a7) };
-    crate::present::finish_present(overlay_swap_chain, &prepared, original_result);
-    original_result
+    unsafe { original(this, overlay_swap_chain, a3, prepared.rect_vec, a5, a6, a7) }
 }
 
 unsafe fn forward_overlay_direct_flip(
@@ -179,7 +236,7 @@ fn evaluate_bool_detour(
     let original_bool = original != 0;
     let result_bool = evaluate(original_bool).unwrap_or(original_bool);
     #[cfg(debug_assertions)]
-    record_flip_gate(kind, original_bool, result_bool);
+    record_flip_gate_denied(kind, original_bool, result_bool);
     bool_to_u8(result_bool)
 }
 
@@ -206,7 +263,7 @@ unsafe extern "system" fn ensure_independent_flip_state_detour(this: usize) -> i
         && let Some(blocked_status) = state::evaluate_ensure_independent_flip_state()
     {
         #[cfg(debug_assertions)]
-        record_flip_gate(
+        record_flip_gate_denied(
             FlipGateKind::DirectFlipInfoEnsureIndependentFlip,
             true,
             false,
@@ -220,14 +277,7 @@ unsafe extern "system" fn ensure_independent_flip_state_detour(this: usize) -> i
     }
 
     let original_fn: ForwardHresult1 = unsafe { std::mem::transmute(original) };
-    let status = unsafe { original_fn(this) };
-    #[cfg(debug_assertions)]
-    record_flip_gate(
-        FlipGateKind::DirectFlipInfoEnsureIndependentFlip,
-        true,
-        true,
-    );
-    status
+    unsafe { original_fn(this) }
 }
 
 unsafe extern "system" fn is_direct_flip_supported_on_target_detour(
@@ -673,6 +723,8 @@ mod tests {
                 width: None,
                 height: None,
                 lut_index: Some(0),
+                #[cfg(debug_assertions)]
+                back_buffer_id: None,
             },
         ));
         install_present_original();

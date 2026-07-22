@@ -41,7 +41,6 @@ struct PresentRenderContext {
     overlay_swap_chain: usize,
     swap_chain_path: SwapChainPathHypothesis,
     monitor_identity: Option<MonitorIdentity>,
-    hardware_protected: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +85,7 @@ impl D3D11Renderer {
             back_buffer.GetDesc(&mut desc);
         }
 
+        let back_buffer_id = self.back_buffer_id(&back_buffer);
         let draw_plan = match super::prepare_gpu_draw_plan(
             pipeline,
             present_context.monitor_identity,
@@ -101,6 +101,8 @@ impl D3D11Renderer {
                     desc.Format.0 as u32,
                     desc.Width,
                     desc.Height,
+                    #[cfg(debug_assertions)]
+                    Some(back_buffer_id),
                 ));
             }
         };
@@ -114,11 +116,10 @@ impl D3D11Renderer {
         };
         Ok(self.render_with_device(
             present_context.overlay_swap_chain,
-            present_context.monitor_identity,
-            present_context.hardware_protected,
             frame,
             pipeline,
             draw_plan,
+            back_buffer_id,
         ))
     }
 
@@ -140,15 +141,11 @@ impl D3D11Renderer {
     fn render_with_device(
         &mut self,
         overlay_swap_chain: usize,
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))] monitor_identity: Option<
-            MonitorIdentity,
-        >,
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))] hardware_protected: bool,
         frame: RenderFrame<'_>,
         pipeline: &LutPipeline,
         mut draw_plan: super::GpuDrawPlan,
+        back_buffer_id: super::BackBufferId,
     ) -> super::PresentLutOutcome {
-        let back_buffer_id = self.back_buffer_id(frame.back_buffer);
         let device_key = frame.device.as_raw() as usize;
         let resource_key = super::ResourceKey {
             device: device_key,
@@ -169,6 +166,8 @@ impl D3D11Renderer {
                     draw_plan.format,
                     draw_plan.lut_index,
                     super::PresentDrawFailReason::ResourcesCreateFailed,
+                    #[cfg(debug_assertions)]
+                    Some(back_buffer_id),
                 );
             };
             self.devices
@@ -181,6 +180,8 @@ impl D3D11Renderer {
                 draw_plan.format,
                 draw_plan.lut_index,
                 super::PresentDrawFailReason::ResourcesMissing,
+                #[cfg(debug_assertions)]
+                Some(back_buffer_id),
             );
         };
         if draw_plan.lut_index >= resources.lut_srvs.len() {
@@ -188,6 +189,8 @@ impl D3D11Renderer {
                 draw_plan.format,
                 draw_plan.lut_index,
                 super::PresentDrawFailReason::LutIndexOutOfRange,
+                #[cfg(debug_assertions)]
+                Some(back_buffer_id),
             );
         }
 
@@ -215,6 +218,8 @@ impl D3D11Renderer {
                 draw_plan.format,
                 draw_plan.lut_index,
                 super::PresentDrawFailReason::DrawRectsEmpty,
+                #[cfg(debug_assertions)]
+                Some(back_buffer_id),
             );
         }
         let present_dirty_rect = super::present_dirty_rect_for_full_redraw(
@@ -226,19 +231,6 @@ impl D3D11Renderer {
         );
 
         let draw_result = resources.draw(frame, &draw_plan);
-        #[cfg(debug_assertions)]
-        crate::route_trace::record_protected_lut_resource_candidate(
-            overlay_swap_chain,
-            monitor_identity,
-            hardware_protected,
-            frame.back_buffer.as_raw() as usize,
-            frame.device.as_raw() as usize,
-            frame.context.as_raw() as usize,
-            Some(super::dxgi_format_for_copy_texture(draw_plan.format)),
-            Some(frame.width),
-            Some(frame.height),
-            draw_result.is_ok(),
-        );
         match draw_result {
             Ok(()) => {
                 resources
@@ -251,6 +243,8 @@ impl D3D11Renderer {
                     frame.height,
                     present_dirty_rect,
                     needs_full_redraw,
+                    #[cfg(debug_assertions)]
+                    Some(back_buffer_id),
                 )
             }
             Err(fail) => outcome_draw_failed(
@@ -259,6 +253,8 @@ impl D3D11Renderer {
                 frame.width,
                 frame.height,
                 fail,
+                #[cfg(debug_assertions)]
+                Some(back_buffer_id),
             ),
         }
     }
@@ -529,6 +525,7 @@ fn outcome_from_skip(
     dxgi_format: u32,
     width: u32,
     height: u32,
+    #[cfg(debug_assertions)] back_buffer_id: Option<super::BackBufferId>,
 ) -> super::PresentLutOutcome {
     let lut_index = skip.resolved.map(|resolved| resolved.lut_index);
     super::PresentLutOutcome {
@@ -539,6 +536,8 @@ fn outcome_from_skip(
         width: Some(width),
         height: Some(height),
         lut_index,
+        #[cfg(debug_assertions)]
+        back_buffer_id,
     }
 }
 
@@ -546,6 +545,7 @@ fn outcome_planned(
     format: BackBufferFormat,
     lut_index: usize,
     fail: super::PresentDrawFailReason,
+    #[cfg(debug_assertions)] back_buffer_id: Option<super::BackBufferId>,
 ) -> super::PresentLutOutcome {
     super::PresentLutOutcome {
         decision: LutDecision::Apply { format, lut_index },
@@ -555,6 +555,8 @@ fn outcome_planned(
         width: None,
         height: None,
         lut_index: Some(lut_index),
+        #[cfg(debug_assertions)]
+        back_buffer_id,
     }
 }
 
@@ -565,6 +567,7 @@ fn outcome_applied(
     height: u32,
     present_dirty_rect: Option<DirtyRect>,
     full_redraw: bool,
+    #[cfg(debug_assertions)] back_buffer_id: Option<super::BackBufferId>,
 ) -> super::PresentLutOutcome {
     super::PresentLutOutcome {
         decision: LutDecision::Apply { format, lut_index },
@@ -574,6 +577,8 @@ fn outcome_applied(
         width: Some(width),
         height: Some(height),
         lut_index: Some(lut_index),
+        #[cfg(debug_assertions)]
+        back_buffer_id,
     }
 }
 
@@ -583,6 +588,7 @@ fn outcome_draw_failed(
     width: u32,
     height: u32,
     fail: super::PresentDrawFailReason,
+    #[cfg(debug_assertions)] back_buffer_id: Option<super::BackBufferId>,
 ) -> super::PresentLutOutcome {
     super::PresentLutOutcome {
         decision: LutDecision::Apply { format, lut_index },
@@ -592,6 +598,8 @@ fn outcome_draw_failed(
         width: Some(width),
         height: Some(height),
         lut_index: Some(lut_index),
+        #[cfg(debug_assertions)]
+        back_buffer_id,
     }
 }
 
@@ -599,7 +607,6 @@ pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
     swap_chain_path: SwapChainPathHypothesis,
     monitor_identity: Option<MonitorIdentity>,
-    hardware_protected: bool,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,
 ) -> Result<super::PresentLutOutcome, super::RenderAcquireError> {
@@ -613,7 +620,6 @@ pub(crate) unsafe fn render_present_lut(
                 overlay_swap_chain,
                 swap_chain_path,
                 monitor_identity,
-                hardware_protected,
             },
             dirty_rects,
             pipeline,

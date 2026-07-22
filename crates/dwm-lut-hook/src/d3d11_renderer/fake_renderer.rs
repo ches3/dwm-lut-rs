@@ -8,7 +8,6 @@ pub(crate) struct FakeRenderPresentLutCall {
     pub overlay_swap_chain: usize,
     pub swap_chain_path: crate::profile::SwapChainPathHypothesis,
     pub monitor_identity: Option<MonitorIdentity>,
-    pub hardware_protected: bool,
     pub dirty_rects: Vec<DirtyRect>,
 }
 
@@ -57,7 +56,6 @@ pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
     swap_chain_path: crate::profile::SwapChainPathHypothesis,
     monitor_identity: Option<MonitorIdentity>,
-    hardware_protected: bool,
     dirty_rects: &[DirtyRect],
     _pipeline: &crate::lut_pipeline::LutPipeline,
 ) -> Result<PresentLutOutcome, RenderAcquireError> {
@@ -66,7 +64,6 @@ pub(crate) unsafe fn render_present_lut(
             overlay_swap_chain,
             swap_chain_path,
             monitor_identity,
-            hardware_protected,
             dirty_rects: dirty_rects.to_vec(),
         });
     }

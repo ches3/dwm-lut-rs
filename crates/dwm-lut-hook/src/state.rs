@@ -274,7 +274,6 @@ pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHo
 pub(crate) fn render_present_lut(
     overlay_swap_chain: usize,
     monitor_identity: Option<MonitorIdentity>,
-    hardware_protected: bool,
     dirty_rects: &[DirtyRect],
 ) -> Result<crate::d3d11_renderer::PresentLutOutcome, crate::d3d11_renderer::RenderAcquireError> {
     let Some((lut_pipeline, swap_chain_path)) = with_state(|state| {
@@ -291,7 +290,6 @@ pub(crate) fn render_present_lut(
             overlay_swap_chain,
             swap_chain_path,
             monitor_identity,
-            hardware_protected,
             dirty_rects,
             &lut_pipeline,
         )

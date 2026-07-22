@@ -2,11 +2,7 @@ mod apply_lut;
 mod collect;
 
 use crate::DirtyRect;
-#[cfg(debug_assertions)]
-use crate::route_trace;
 use crate::state;
-#[cfg(debug_assertions)]
-use dwm_lut_payload::MonitorIdentity;
 
 use apply_lut::apply_lut;
 use collect::{RectVec, collect_present_inputs};
@@ -16,10 +12,6 @@ pub(crate) use apply_lut::empty_rect_vec_storage;
 #[derive(Debug)]
 pub(crate) struct PreparedPresent {
     pub rect_vec: usize,
-    #[cfg(debug_assertions)]
-    last_present_context: Option<(bool, Option<MonitorIdentity>, Option<bool>)>,
-    #[cfg(debug_assertions)]
-    protected_resource_result_detail: Option<apply_lut::PresentOriginalCallDetail>,
 }
 
 pub(crate) fn prepare_present(
@@ -41,10 +33,6 @@ pub(crate) fn prepare_present(
             );
             PreparedPresent {
                 rect_vec: applied.rect_vec,
-                #[cfg(debug_assertions)]
-                last_present_context: applied.last_present_context,
-                #[cfg(debug_assertions)]
-                protected_resource_result_detail: applied.protected_resource_result_detail,
             }
         }
         Err(error) => {
@@ -61,53 +49,9 @@ pub(crate) fn prepare_present(
             #[cfg(not(debug_assertions))]
             let _ = error;
             state::deactivate_present_context(this);
-            PreparedPresent {
-                rect_vec,
-                #[cfg(debug_assertions)]
-                last_present_context: None,
-                #[cfg(debug_assertions)]
-                protected_resource_result_detail: None,
-            }
+            PreparedPresent { rect_vec }
         }
     }
-}
-
-pub(crate) fn finish_present(
-    overlay_swap_chain: usize,
-    prepared: &PreparedPresent,
-    original_result: i64,
-) {
-    #[cfg(debug_assertions)]
-    {
-        let Some((hardware_protected, monitor_identity, lut_applied)) =
-            prepared.last_present_context
-        else {
-            return;
-        };
-        let last_present_sequence = route_trace::record_last_present_context(
-            overlay_swap_chain,
-            monitor_identity,
-            hardware_protected,
-            lut_applied,
-            None,
-        );
-        route_trace::record_last_present_original_result(last_present_sequence, original_result);
-        if let Some(detail) = &prepared.protected_resource_result_detail {
-            route_trace::record_protected_present_resource_result_summary(
-                overlay_swap_chain,
-                detail.monitor_identity,
-                detail.hardware_protected,
-                original_result,
-                detail.render_outcome,
-                detail.dirty_rect_count,
-                detail.first_dirty_rect,
-                detail.present_dirty_rect_source == "expanded",
-                detail.render_outcome.present_dirty_rect,
-            );
-        }
-    }
-    #[cfg(not(debug_assertions))]
-    let _ = (overlay_swap_chain, prepared, original_result);
 }
 
 #[cfg(test)]

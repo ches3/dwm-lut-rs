@@ -115,8 +115,8 @@ pub(crate) enum PresentDrawStatus {
     Failed(PresentDrawFailReason),
 }
 
+#[cfg(debug_assertions)]
 impl PresentDrawStatus {
-    #[cfg(debug_assertions)]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Applied { .. } => "applied",
@@ -139,11 +139,20 @@ pub(crate) struct PresentLutOutcome {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub lut_index: Option<usize>,
+    #[cfg(debug_assertions)]
+    pub(crate) back_buffer_id: Option<BackBufferId>,
 }
 
+#[cfg(debug_assertions)]
 impl PresentLutOutcome {
     pub(crate) const fn lut_applied(self) -> bool {
         self.draw.lut_applied()
+    }
+
+    pub(crate) fn back_buffer_id_for_log(self) -> String {
+        self.back_buffer_id
+            .map(BackBufferId::format_for_log)
+            .unwrap_or_else(|| "none".to_owned())
     }
 }
 
@@ -160,9 +169,19 @@ enum RenderTargetState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum BackBufferId {
+pub(crate) enum BackBufferId {
     PrivateData(u128),
     ComIdentity(usize),
+}
+
+#[cfg(debug_assertions)]
+impl BackBufferId {
+    fn format_for_log(self) -> String {
+        match self {
+            Self::PrivateData(id) => format!("private:0x{id:x}"),
+            Self::ComIdentity(id) => format!("com:0x{id:x}"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -436,7 +455,6 @@ pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
     swap_chain_path: crate::profile::SwapChainPathHypothesis,
     monitor_identity: Option<MonitorIdentity>,
-    hardware_protected: bool,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,
 ) -> Result<PresentLutOutcome, RenderAcquireError> {
@@ -447,7 +465,6 @@ pub(crate) unsafe fn render_present_lut(
                 overlay_swap_chain,
                 swap_chain_path,
                 monitor_identity,
-                hardware_protected,
                 dirty_rects,
                 pipeline,
             )
@@ -460,7 +477,6 @@ pub(crate) unsafe fn render_present_lut(
                 overlay_swap_chain,
                 swap_chain_path,
                 monitor_identity,
-                hardware_protected,
                 dirty_rects,
                 pipeline,
             )

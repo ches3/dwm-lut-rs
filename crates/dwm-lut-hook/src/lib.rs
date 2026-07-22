@@ -10,7 +10,6 @@ mod minhook;
 mod present;
 mod profile;
 mod resolver;
-mod route_trace;
 mod state;
 
 pub use bootstrap::HookError;
