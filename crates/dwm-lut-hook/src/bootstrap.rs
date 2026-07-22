@@ -222,40 +222,36 @@ pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) 
 pub(crate) fn ffi_shutdown() -> u32 {
     log::shutdown_start();
     if is_initialization_in_progress() {
-        log::shutdown_finished_reason(
-            ShutdownStatus::AlreadyInProgress,
-            "initialization_in_progress",
-        );
+        log::shutdown_finished(log::ShutdownFinished::InitializationInProgress);
         return ShutdownStatus::AlreadyInProgress as u32;
     }
 
     match begin_shutdown() {
         ShutdownStart::Started => {}
         ShutdownStart::NotInitialized => {
-            log::shutdown_finished_reason(ShutdownStatus::NotInitialized, "not_initialized");
+            log::shutdown_finished(log::ShutdownFinished::NotInitialized);
             return ShutdownStatus::NotInitialized as u32;
         }
         ShutdownStart::AlreadyInProgress => {
-            log::shutdown_finished_reason(ShutdownStatus::AlreadyInProgress, "already_in_progress");
+            log::shutdown_finished(log::ShutdownFinished::ShutdownInProgress);
             return ShutdownStatus::AlreadyInProgress as u32;
         }
         ShutdownStart::AlreadyShutDown => {
-            log::shutdown_finished_reason(ShutdownStatus::AlreadyShutDown, "already_shutdown");
+            log::shutdown_finished(log::ShutdownFinished::AlreadyShutDown);
             return ShutdownStatus::AlreadyShutDown as u32;
         }
     }
 
     let Some((minhook, hooks)) = minhook_cleanup_plan() else {
         clear_state_after_shutdown();
-        log::shutdown_finished_reason(ShutdownStatus::Success, "state_missing");
+        log::shutdown_finished(log::ShutdownFinished::StateMissing);
         return ShutdownStatus::Success as u32;
     };
 
     let cleanup_failures = {
         let _present_guard = lock_present_runtime();
-        let renderer_device_count = crate::d3d11::shutdown_renderer_resources();
+        let _ = crate::d3d11::shutdown_renderer_resources();
         crate::state::clear_present_session();
-        log::renderer_resources_released(renderer_device_count);
         crate::desktop_redraw::request_desktop_redraw();
         disable_registered_hooks(&minhook, &hooks)
     };
@@ -266,13 +262,10 @@ pub(crate) fn ffi_shutdown() -> u32 {
     retain_state_after_shutdown();
     finish_shutdown();
     if !cleanup_failures.is_empty() {
-        log::shutdown_finished_cleanup(
-            ShutdownStatus::MinHookCleanupFailed,
-            cleanup_failures.len(),
-        );
+        log::shutdown_finished(log::ShutdownFinished::MinHookCleanupFailed);
         ShutdownStatus::MinHookCleanupFailed as u32
     } else {
-        log::shutdown_finished_cleanup(ShutdownStatus::Success, cleanup_failures.len());
+        log::shutdown_finished(log::ShutdownFinished::Success);
         ShutdownStatus::Success as u32
     }
 }
@@ -312,17 +305,13 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
     }
     let _guard = enter_replace_assignments()?;
 
-    log::replace_assignments_decoded(payload.assignments.len());
-
     let assignments = assignments_from_payload(&payload);
-    log::replace_assignments_luts_prepared(assignments.len());
 
-    let renderer_device_count = {
+    {
         let _present_guard = lock_present_runtime();
         replace_lut_assignments(payload, assignments)?;
-        crate::d3d11::shutdown_renderer_resources()
-    };
-    log::replace_assignments_renderer_resources_released(renderer_device_count);
+        let _ = crate::d3d11::shutdown_renderer_resources();
+    }
     crate::desktop_redraw::request_desktop_redraw();
     Ok(())
 }
@@ -359,12 +348,9 @@ fn selected_profile() -> Result<HookProfile, HookError> {
 }
 
 fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
-    log::payload_decoded(payload.assignments.len());
-
     let assignments = assignments_from_payload(&payload);
-    log::luts_prepared(assignments.len());
 
-    let Some((minhook, _hooks)) = reactivate_retained_state(payload, assignments) else {
+    let Some((minhook, hooks)) = reactivate_retained_state(payload, assignments) else {
         return Err(HookError::AlreadyInitialized);
     };
     if let Err(error) = enable_registered_hooks(&minhook) {
@@ -372,14 +358,13 @@ fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
         return Err(HookError::MinHook(error));
     }
     finish_reactivation();
-    log::hooks_reenabled();
+    log::hooks(log::HooksPhase::Reenabled, &hooks);
     Ok(())
 }
 
 fn install_prepared_state(state: HookState) -> Result<(), HookError> {
     let minhook = state.runtime.minhook;
     let hooks = state.runtime.hooks.clone();
-    let hook_count = hooks.len();
 
     install_state(state).map_err(|state| {
         rollback_registered_state_hooks(&state);
@@ -393,7 +378,7 @@ fn install_prepared_state(state: HookState) -> Result<(), HookError> {
         return Err(HookError::MinHook(error));
     }
 
-    log::hooks_enabled(hook_count);
+    log::hooks(log::HooksPhase::Enabled, &hooks);
     Ok(())
 }
 
@@ -414,25 +399,10 @@ fn prepare_initial_state_from_payload_with_profile_resolver<F>(
 where
     F: FnOnce(&HookProfile) -> Result<SignatureResolutionReport, HookResolveError>,
 {
-    log::payload_decoded(payload.assignments.len());
-
     let assignments = assignments_from_payload(&payload);
-    log::luts_prepared(assignments.len());
 
     let resolution = resolver(&profile)?;
-    log::signatures_resolved(
-        resolution.module.module_name,
-        resolution.module.base_address,
-        resolution.module.size,
-        resolution.targets.len(),
-        resolution.skipped_signatures.len(),
-    );
-    for target in &resolution.targets {
-        log::signature_resolved(target.target, target.address);
-    }
-    for skipped in &resolution.skipped_signatures {
-        log::signature_skipped(skipped.target, skipped.reason);
-    }
+    log::signatures(&resolution);
 
     finalize_initial_state(payload, profile, resolution, assignments)
 }
@@ -454,7 +424,7 @@ fn finalize_initial_state(
 ) -> Result<HookState, HookError> {
     let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
     let (minhook, registered_hooks) = register_plan(&registration_plan)?;
-    log::hooks_created(registered_hooks.len());
+    log::hooks(log::HooksPhase::Created, &registered_hooks);
 
     let overlay_test_mode_address = resolution
         .targets
@@ -468,10 +438,6 @@ fn finalize_initial_state(
         .find(|target| target.target == crate::profile::HookTarget::DisableIndependentFlip)
         .map(|target| target.address)
         .filter(|address| *address != 0);
-    log::disable_independent_flip_address(
-        disable_independent_flip_address.is_some(),
-        disable_independent_flip_address.unwrap_or(0),
-    );
     let flip_gate_effects =
         FlipGateEffects::new(overlay_test_mode_address, disable_independent_flip_address);
 

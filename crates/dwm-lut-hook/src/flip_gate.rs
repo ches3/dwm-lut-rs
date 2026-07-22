@@ -133,27 +133,27 @@ impl FlipGateEffects {
         if enabled && !patch.applied {
             if !is_writable_i32(patch.address) {
                 patch.rejected = true;
-                crate::log::disable_independent_flip_rejected(
-                    crate::log::DisableIndependentFlipRejectReason::PageNotWritable,
-                );
+                crate::log::independent_flip(crate::log::IndependentFlipOutcome::Rejected(
+                    crate::log::IndependentFlipRejectReason::PageNotWritable,
+                ));
                 return;
             }
             let original_value = unsafe { read_i32(patch.address) };
             if original_value != 0 && original_value != 1 {
                 patch.rejected = true;
-                crate::log::disable_independent_flip_rejected(
-                    crate::log::DisableIndependentFlipRejectReason::UnexpectedValue(original_value),
-                );
+                crate::log::independent_flip(crate::log::IndependentFlipOutcome::Rejected(
+                    crate::log::IndependentFlipRejectReason::UnexpectedValue(original_value),
+                ));
                 return;
             }
             patch.original_value = Some(original_value);
             unsafe { write_i32(patch.address, 1) };
             patch.applied = true;
-            crate::log::disable_independent_flip_applied();
+            crate::log::independent_flip(crate::log::IndependentFlipOutcome::Applied);
         } else if !enabled && patch.applied {
             unsafe { write_i32(patch.address, patch.original_value.unwrap_or(0)) };
             patch.applied = false;
-            crate::log::disable_independent_flip_restored();
+            crate::log::independent_flip(crate::log::IndependentFlipOutcome::Restored);
         }
     }
 
