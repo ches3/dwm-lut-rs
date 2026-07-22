@@ -2,7 +2,7 @@ mod blue_noise;
 #[macro_use]
 mod debug_log;
 mod bootstrap;
-mod d3d11_renderer;
+mod d3d11;
 mod desktop_redraw;
 mod lut_bypass;
 mod lut_pipeline;

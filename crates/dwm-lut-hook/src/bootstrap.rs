@@ -269,7 +269,7 @@ pub(crate) fn ffi_shutdown() -> u32 {
     let cleanup_failures = {
         let _present_guard = lock_present_runtime();
         #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-        let renderer_device_count = crate::d3d11_renderer::shutdown_renderer_resources();
+        let renderer_device_count = crate::d3d11::shutdown_renderer_resources();
         crate::state::restore_overlay_test_mode();
         debug_log!(
             "event=renderer_resources_released device_resource_count={}",
@@ -359,7 +359,7 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
     let renderer_device_count = {
         let _present_guard = lock_present_runtime();
         replace_payload_pipeline(payload, lut_pipeline)?;
-        crate::d3d11_renderer::shutdown_renderer_resources()
+        crate::d3d11::shutdown_renderer_resources()
     };
     debug_log!(
         "event=replace_assignments_renderer_resources_released device_resource_count={}",

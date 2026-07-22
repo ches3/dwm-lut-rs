@@ -2,192 +2,60 @@ use std::collections::BTreeMap;
 
 use crate::lut_pipeline::{
     BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
-    LutDecision, LutPipeline, ResolvedLut, ShaderConstantsCBuffer,
+    LutPipeline, ResolvedLut, ShaderConstantsCBuffer,
 };
 use dwm_lut_payload::MonitorIdentity;
 
+use super::{BackBufferId, DrawPlanSkipReason};
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Vertex {
-    position: [f32; 2],
-    texcoord: [f32; 2],
+pub(super) struct Vertex {
+    pub(super) position: [f32; 2],
+    pub(super) texcoord: [f32; 2],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Box3D {
-    left: u32,
-    top: u32,
-    front: u32,
-    right: u32,
-    bottom: u32,
-    back: u32,
+pub(super) struct Box3D {
+    pub(super) left: u32,
+    pub(super) top: u32,
+    pub(super) front: u32,
+    pub(super) right: u32,
+    pub(super) bottom: u32,
+    pub(super) back: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct GpuDrawPlan {
-    format: BackBufferFormat,
-    lut_index: usize,
-    constants: ShaderConstantsCBuffer,
-    dirty_rects: Vec<DirtyRect>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DrawPlanSkipReason {
-    ZeroSize,
-    MissingMonitorIdentity,
-    UnsupportedFormat,
-    MissingAssignment,
-    EmptyDirtyRects,
+pub(super) struct GpuDrawPlan {
+    pub(super) format: BackBufferFormat,
+    pub(super) lut_index: usize,
+    pub(super) constants: ShaderConstantsCBuffer,
+    pub(super) dirty_rects: Vec<DirtyRect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct DrawPlanSkip {
-    reason: DrawPlanSkipReason,
-    resolved: Option<ResolvedLut>,
-}
-
-#[cfg(debug_assertions)]
-impl DrawPlanSkipReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::ZeroSize => "zero_size",
-            Self::MissingMonitorIdentity => "missing_monitor_identity",
-            Self::UnsupportedFormat => "unsupported_format",
-            Self::MissingAssignment => "missing_assignment",
-            Self::EmptyDirtyRects => "empty_dirty_rects",
-        }
-    }
+pub(super) struct DrawPlanSkip {
+    pub(super) reason: DrawPlanSkipReason,
+    pub(super) resolved: Option<ResolvedLut>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(test, allow(dead_code))]
-pub(crate) enum RenderAcquireError {
-    BackBuffer,
-    Device,
-    Context,
-    Unavailable,
-}
-
-#[cfg(debug_assertions)]
-impl RenderAcquireError {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::BackBuffer => "back_buffer",
-            Self::Device => "device",
-            Self::Context => "context",
-            Self::Unavailable => "unavailable",
-        }
-    }
+pub(super) struct DrawState {
+    pub(super) format: BackBufferFormat,
+    pub(super) lut_index: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(test, allow(dead_code))]
-pub(crate) enum PresentDrawFailReason {
-    ResourcesCreateFailed,
-    ResourcesMissing,
-    LutIndexOutOfRange,
-    DrawRectsEmpty,
-    CopyTextureCreateFailed,
-    RenderTargetViewCreateFailed,
-    DrawFailed,
-}
-
-#[cfg(debug_assertions)]
-impl PresentDrawFailReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::ResourcesCreateFailed => "resources_create_failed",
-            Self::ResourcesMissing => "resources_missing",
-            Self::LutIndexOutOfRange => "lut_index_out_of_range",
-            Self::DrawRectsEmpty => "draw_rects_empty",
-            Self::CopyTextureCreateFailed => "copy_texture_create_failed",
-            Self::RenderTargetViewCreateFailed => "render_target_view_create_failed",
-            Self::DrawFailed => "draw_failed",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PresentDrawStatus {
-    Applied { full_redraw: bool },
-    Skipped(DrawPlanSkipReason),
-    Failed(PresentDrawFailReason),
-}
-
-#[cfg(debug_assertions)]
-impl PresentDrawStatus {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Applied { .. } => "applied",
-            Self::Skipped(reason) => reason.as_str(),
-            Self::Failed(reason) => reason.as_str(),
-        }
-    }
-
-    pub(crate) const fn lut_applied(self) -> bool {
-        matches!(self, Self::Applied { .. })
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PresentLutOutcome {
-    pub decision: LutDecision,
-    pub present_dirty_rect: Option<DirtyRect>,
-    pub draw: PresentDrawStatus,
-    pub dxgi_format: Option<u32>,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub lut_index: Option<usize>,
-    #[cfg(debug_assertions)]
-    pub(crate) back_buffer_id: Option<BackBufferId>,
-}
-
-#[cfg(debug_assertions)]
-impl PresentLutOutcome {
-    pub(crate) const fn lut_applied(self) -> bool {
-        self.draw.lut_applied()
-    }
-
-    pub(crate) fn back_buffer_id_for_log(self) -> String {
-        self.back_buffer_id
-            .map(BackBufferId::format_for_log)
-            .unwrap_or_else(|| "none".to_owned())
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct DrawState {
-    format: BackBufferFormat,
-    lut_index: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RenderTargetState {
+pub(super) enum RenderTargetState {
     Bootstrapping,
     Stable(DrawState),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum BackBufferId {
-    PrivateData(u128),
-    ComIdentity(usize),
-}
-
-#[cfg(debug_assertions)]
-impl BackBufferId {
-    fn format_for_log(self) -> String {
-        match self {
-            Self::PrivateData(id) => format!("private:0x{id:x}"),
-            Self::ComIdentity(id) => format!("com:0x{id:x}"),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct RenderTargetKey {
-    overlay_swap_chain: usize,
-    back_buffer: BackBufferId,
+pub(super) struct RenderTargetKey {
+    pub(super) overlay_swap_chain: usize,
+    pub(super) back_buffer: BackBufferId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,7 +65,7 @@ struct RenderTargetStateEntry {
 }
 
 #[derive(Default)]
-struct RenderTargetStates {
+pub(super) struct RenderTargetStates {
     entries: BTreeMap<RenderTargetKey, RenderTargetStateEntry>,
     sequence: u64,
 }
@@ -205,7 +73,7 @@ struct RenderTargetStates {
 impl RenderTargetStates {
     const MAX_ENTRIES: usize = 16;
 
-    fn previous_state(&mut self, key: RenderTargetKey) -> RenderTargetState {
+    pub(super) fn previous_state(&mut self, key: RenderTargetKey) -> RenderTargetState {
         self.sequence = self.sequence.saturating_add(1);
         let Some(entry) = self.entries.get_mut(&key) else {
             return RenderTargetState::Bootstrapping;
@@ -214,7 +82,7 @@ impl RenderTargetStates {
         entry.state
     }
 
-    fn record_success(&mut self, key: RenderTargetKey, state: DrawState) {
+    pub(super) fn record_success(&mut self, key: RenderTargetKey, state: DrawState) {
         if !self.entries.contains_key(&key) && self.entries.len() >= Self::MAX_ENTRIES {
             let oldest_key = self
                 .entries
@@ -235,20 +103,20 @@ impl RenderTargetStates {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct ResourceKey {
-    device: usize,
-    overlay_swap_chain: usize,
-    width: u32,
-    height: u32,
+pub(super) struct ResourceKey {
+    pub(super) device: usize,
+    pub(super) overlay_swap_chain: usize,
+    pub(super) width: u32,
+    pub(super) height: u32,
 }
 
-const fn keeps_device_resource(key: ResourceKey, current: ResourceKey) -> bool {
+pub(super) const fn keeps_device_resource(key: ResourceKey, current: ResourceKey) -> bool {
     key.device != current.device
         || key.overlay_swap_chain != current.overlay_swap_chain
         || (key.width == current.width && key.height == current.height)
 }
 
-fn prepare_gpu_draw_plan(
+pub(super) fn prepare_gpu_draw_plan(
     pipeline: &LutPipeline,
     monitor_identity: Option<MonitorIdentity>,
     dxgi_format: u32,
@@ -300,7 +168,7 @@ fn prepare_gpu_draw_plan(
     })
 }
 
-const fn dxgi_format_for_copy_texture(format: BackBufferFormat) -> u32 {
+pub(super) const fn dxgi_format_for_copy_texture(format: BackBufferFormat) -> u32 {
     match format {
         BackBufferFormat::Bgra8Unorm => DXGI_FORMAT_B8G8R8A8_UNORM,
         BackBufferFormat::Rgba16Float => DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -328,11 +196,11 @@ fn draw_rects_for_frame(dirty_rects: &[DirtyRect], width: u32, height: u32) -> V
 }
 
 #[cfg_attr(test, allow(dead_code))]
-fn draw_rects_for_full_frame(width: u32, height: u32) -> Vec<DirtyRect> {
+pub(super) fn draw_rects_for_full_frame(width: u32, height: u32) -> Vec<DirtyRect> {
     draw_rects_for_frame(&[], width, height)
 }
 
-fn with_restored_state<State, Capture, Draw, Restore>(
+pub(super) fn with_restored_state<State, Capture, Draw, Restore>(
     capture: Capture,
     draw: Draw,
     restore: Restore,
@@ -348,7 +216,7 @@ where
     result
 }
 
-fn copy_box_for_rect(rect: DirtyRect) -> Box3D {
+pub(super) fn copy_box_for_rect(rect: DirtyRect) -> Box3D {
     Box3D {
         left: rect.left as u32,
         top: rect.top as u32,
@@ -359,7 +227,7 @@ fn copy_box_for_rect(rect: DirtyRect) -> Box3D {
     }
 }
 
-fn vertices_for_rect(rect: DirtyRect, width: u32, height: u32) -> [Vertex; 4] {
+pub(super) fn vertices_for_rect(rect: DirtyRect, width: u32, height: u32) -> [Vertex; 4] {
     let width = width as f32;
     let height = height as f32;
     let left = rect.left as f32;
@@ -414,7 +282,7 @@ fn bounding_rect(rects: &[DirtyRect]) -> Option<DirtyRect> {
     }))
 }
 
-fn requires_full_redraw(
+pub(super) fn requires_full_redraw(
     previous: RenderTargetState,
     current: DrawState,
     resources_recreated: bool,
@@ -428,7 +296,7 @@ fn requires_full_redraw(
     }
 }
 
-fn present_dirty_rect_for_full_redraw(
+pub(super) fn present_dirty_rect_for_full_redraw(
     needs_full_redraw: bool,
     previous_state: RenderTargetState,
     resources_recreated: bool,
@@ -442,69 +310,12 @@ fn present_dirty_rect_for_full_redraw(
     should_expand.then(|| bounding_rect(dirty_rects).unwrap())
 }
 
-#[cfg(not(test))]
-mod context_state;
-#[cfg(not(test))]
-mod d3d11_api;
-#[cfg(test)]
-mod fake_renderer;
-#[cfg(not(test))]
-mod renderer;
-
-pub(crate) unsafe fn render_present_lut(
-    overlay_swap_chain: usize,
-    swap_chain_path: crate::profile::SwapChainVtablePath,
-    monitor_identity: Option<MonitorIdentity>,
-    dirty_rects: &[DirtyRect],
-    pipeline: &LutPipeline,
-) -> Result<PresentLutOutcome, RenderAcquireError> {
-    #[cfg(test)]
-    {
-        unsafe {
-            fake_renderer::render_present_lut(
-                overlay_swap_chain,
-                swap_chain_path,
-                monitor_identity,
-                dirty_rects,
-                pipeline,
-            )
-        }
-    }
-    #[cfg(not(test))]
-    {
-        unsafe {
-            renderer::render_present_lut(
-                overlay_swap_chain,
-                swap_chain_path,
-                monitor_identity,
-                dirty_rects,
-                pipeline,
-            )
-        }
-    }
-}
-
-#[cfg(not(test))]
-pub(crate) fn shutdown_renderer_resources() -> usize {
-    renderer::shutdown_renderer_resources()
-}
-
-#[cfg(test)]
-pub(crate) fn shutdown_renderer_resources() -> usize {
-    0
-}
-
-#[cfg(test)]
-pub(crate) use fake_renderer::{
-    fake_render_context_active, fake_render_present_lut_call, reset_fake_render_result,
-    set_fake_render_result,
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lut_pipeline::{
-        BackBufferFormat, DXGI_FORMAT_R16G16B16A16_FLOAT, LoadedLut, LutMetadata, ShaderTexture3D,
+        BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, LoadedLut,
+        LutMetadata, ShaderTexture3D,
     };
     use dwm_lut_payload::{AdapterLuid, ColorMode, MonitorIdentity, MonitorTarget};
     use std::cell::RefCell;

@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::core::{Interface, PCSTR};
 
-use super::Vertex;
+use super::plan::{Vertex, dxgi_format_for_copy_texture};
 use crate::lut_pipeline::{BackBufferFormat, ShaderConstantsCBuffer};
 
 pub(super) const LUT_VERTEX_SHADER_BYTECODE: &[u8] =
@@ -182,7 +182,7 @@ pub(super) fn create_copy_texture(
         Height: height,
         MipLevels: 1,
         ArraySize: 1,
-        Format: DXGI_FORMAT(super::dxgi_format_for_copy_texture(format) as i32),
+        Format: DXGI_FORMAT(dxgi_format_for_copy_texture(format) as i32),
         SampleDesc: DXGI_SAMPLE_DESC {
             Count: 1,
             Quality: 0,

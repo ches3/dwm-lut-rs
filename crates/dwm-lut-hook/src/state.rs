@@ -275,15 +275,15 @@ pub(crate) fn render_present_lut(
     overlay_swap_chain: usize,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
-) -> Result<crate::d3d11_renderer::PresentLutOutcome, crate::d3d11_renderer::RenderAcquireError> {
+) -> Result<crate::d3d11::PresentLutOutcome, crate::d3d11::RenderAcquireError> {
     let Some((lut_pipeline, swap_chain_path)) =
         with_state(|state| (state.runtime.lut_pipeline.clone(), state.profile.swap_chain))
     else {
-        return Err(crate::d3d11_renderer::RenderAcquireError::Unavailable);
+        return Err(crate::d3d11::RenderAcquireError::Unavailable);
     };
 
     unsafe {
-        crate::d3d11_renderer::render_present_lut(
+        crate::d3d11::render_present_lut(
             overlay_swap_chain,
             swap_chain_path,
             monitor_identity,
@@ -379,7 +379,7 @@ pub(crate) fn reset_state_for_tests() {
     }
     LIFECYCLE.store(LIFECYCLE_IDLE, Ordering::Release);
     crate::bootstrap::reset_initialization_guard_for_tests();
-    crate::d3d11_renderer::reset_fake_render_result();
+    crate::d3d11::reset_fake_render_result();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
     crate::minhook::reset_test_original_slots();
 }

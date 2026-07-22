@@ -15,9 +15,17 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::core::{GUID, IUnknown, Interface};
 
-use super::Vertex;
 use super::context_state::{ContextState, unbind_pipeline};
 use super::d3d11_api::*;
+use super::plan::{
+    DrawPlanSkip, DrawState, GpuDrawPlan, RenderTargetKey, RenderTargetStates, ResourceKey, Vertex,
+    copy_box_for_rect, draw_rects_for_full_frame, dxgi_format_for_copy_texture,
+    keeps_device_resource, prepare_gpu_draw_plan, present_dirty_rect_for_full_redraw,
+    requires_full_redraw, vertices_for_rect, with_restored_state,
+};
+use super::{
+    BackBufferId, PresentDrawFailReason, PresentDrawStatus, PresentLutOutcome, RenderAcquireError,
+};
 
 use crate::lut_pipeline::{
     BackBufferFormat, DirtyRect, LutDecision, LutPipeline, ShaderConstantsCBuffer,
@@ -31,7 +39,7 @@ const BACK_BUFFER_ID_PRIVATE_DATA_GUID: GUID =
     GUID::from_u128(0x6ca95369_322a_4ee3_8515_fec2020a7416);
 
 struct D3D11Renderer {
-    devices: BTreeMap<super::ResourceKey, DeviceResources>,
+    devices: BTreeMap<ResourceKey, DeviceResources>,
     #[cfg(debug_assertions)]
     back_buffer_identity_fallbacks: BTreeSet<usize>,
 }
@@ -66,19 +74,19 @@ impl D3D11Renderer {
         present_context: PresentRenderContext,
         dirty_rects: &[DirtyRect],
         pipeline: &LutPipeline,
-    ) -> Result<super::PresentLutOutcome, super::RenderAcquireError> {
+    ) -> Result<PresentLutOutcome, RenderAcquireError> {
         let back_buffer = (unsafe {
             self.overlay_swap_chain_to_back_buffer(
                 present_context.overlay_swap_chain,
                 present_context.swap_chain_path,
             )
         })
-        .ok_or(super::RenderAcquireError::BackBuffer)?;
+        .ok_or(RenderAcquireError::BackBuffer)?;
 
         let device =
-            (unsafe { back_buffer.GetDevice() }).map_err(|_| super::RenderAcquireError::Device)?;
-        let context = (unsafe { device.GetImmediateContext() })
-            .map_err(|_| super::RenderAcquireError::Context)?;
+            (unsafe { back_buffer.GetDevice() }).map_err(|_| RenderAcquireError::Device)?;
+        let context =
+            (unsafe { device.GetImmediateContext() }).map_err(|_| RenderAcquireError::Context)?;
 
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe {
@@ -86,7 +94,7 @@ impl D3D11Renderer {
         }
 
         let back_buffer_id = self.back_buffer_id(&back_buffer);
-        let draw_plan = match super::prepare_gpu_draw_plan(
+        let draw_plan = match prepare_gpu_draw_plan(
             pipeline,
             present_context.monitor_identity,
             desc.Format.0 as u32,
@@ -143,11 +151,11 @@ impl D3D11Renderer {
         overlay_swap_chain: usize,
         frame: RenderFrame<'_>,
         pipeline: &LutPipeline,
-        mut draw_plan: super::GpuDrawPlan,
-        back_buffer_id: super::BackBufferId,
-    ) -> super::PresentLutOutcome {
+        mut draw_plan: GpuDrawPlan,
+        back_buffer_id: BackBufferId,
+    ) -> PresentLutOutcome {
         let device_key = frame.device.as_raw() as usize;
-        let resource_key = super::ResourceKey {
+        let resource_key = ResourceKey {
             device: device_key,
             overlay_swap_chain,
             width: frame.width,
@@ -165,13 +173,13 @@ impl D3D11Renderer {
                 return outcome_planned(
                     draw_plan.format,
                     draw_plan.lut_index,
-                    super::PresentDrawFailReason::ResourcesCreateFailed,
+                    PresentDrawFailReason::ResourcesCreateFailed,
                     #[cfg(debug_assertions)]
                     Some(back_buffer_id),
                 );
             };
             self.devices
-                .retain(|key, _| super::keeps_device_resource(*key, resource_key));
+                .retain(|key, _| keeps_device_resource(*key, resource_key));
             self.devices.insert(resource_key, resources);
         }
 
@@ -179,7 +187,7 @@ impl D3D11Renderer {
             return outcome_planned(
                 draw_plan.format,
                 draw_plan.lut_index,
-                super::PresentDrawFailReason::ResourcesMissing,
+                PresentDrawFailReason::ResourcesMissing,
                 #[cfg(debug_assertions)]
                 Some(back_buffer_id),
             );
@@ -188,41 +196,41 @@ impl D3D11Renderer {
             return outcome_planned(
                 draw_plan.format,
                 draw_plan.lut_index,
-                super::PresentDrawFailReason::LutIndexOutOfRange,
+                PresentDrawFailReason::LutIndexOutOfRange,
                 #[cfg(debug_assertions)]
                 Some(back_buffer_id),
             );
         }
 
-        let current_draw_state = super::DrawState {
+        let current_draw_state = DrawState {
             format: draw_plan.format,
             lut_index: draw_plan.lut_index,
         };
-        let render_target_key = super::RenderTargetKey {
+        let render_target_key = RenderTargetKey {
             overlay_swap_chain,
             back_buffer: back_buffer_id,
         };
         let previous_state = resources.draw_states.previous_state(render_target_key);
         let copy_texture_created = !resources.copy_textures.has_format(draw_plan.format);
-        let needs_full_redraw = super::requires_full_redraw(
+        let needs_full_redraw = requires_full_redraw(
             previous_state,
             current_draw_state,
             recreate,
             copy_texture_created,
         );
         if needs_full_redraw {
-            draw_plan.dirty_rects = super::draw_rects_for_full_frame(frame.width, frame.height);
+            draw_plan.dirty_rects = draw_rects_for_full_frame(frame.width, frame.height);
         }
         if draw_plan.dirty_rects.is_empty() {
             return outcome_planned(
                 draw_plan.format,
                 draw_plan.lut_index,
-                super::PresentDrawFailReason::DrawRectsEmpty,
+                PresentDrawFailReason::DrawRectsEmpty,
                 #[cfg(debug_assertions)]
                 Some(back_buffer_id),
             );
         }
-        let present_dirty_rect = super::present_dirty_rect_for_full_redraw(
+        let present_dirty_rect = present_dirty_rect_for_full_redraw(
             needs_full_redraw,
             previous_state,
             recreate,
@@ -269,9 +277,9 @@ impl D3D11Renderer {
         device_count
     }
 
-    fn back_buffer_id(&mut self, back_buffer: &ID3D11Texture2D) -> super::BackBufferId {
+    fn back_buffer_id(&mut self, back_buffer: &ID3D11Texture2D) -> BackBufferId {
         match private_data_back_buffer_id(back_buffer) {
-            Ok(id) => super::BackBufferId::PrivateData(id),
+            Ok(id) => BackBufferId::PrivateData(id),
             Err(_reason) => {
                 let identity = back_buffer
                     .cast::<IUnknown>()
@@ -286,7 +294,7 @@ impl D3D11Renderer {
                         identity
                     );
                 }
-                super::BackBufferId::ComIdentity(identity)
+                BackBufferId::ComIdentity(identity)
             }
         }
     }
@@ -331,7 +339,7 @@ struct DeviceResources {
     last_constants: Option<ShaderConstantsCBuffer>,
     copy_textures: CopyTextureResources,
     lut_srvs: Vec<ID3D11ShaderResourceView>,
-    draw_states: super::RenderTargetStates,
+    draw_states: RenderTargetStates,
 }
 
 #[derive(Default)]
@@ -415,28 +423,28 @@ impl DeviceResources {
             last_constants: None,
             copy_textures: CopyTextureResources::default(),
             lut_srvs,
-            draw_states: super::RenderTargetStates::default(),
+            draw_states: RenderTargetStates::default(),
         })
     }
 
     fn draw(
         &mut self,
         frame: RenderFrame<'_>,
-        draw_plan: &super::GpuDrawPlan,
-    ) -> Result<(), super::PresentDrawFailReason> {
+        draw_plan: &GpuDrawPlan,
+    ) -> Result<(), PresentDrawFailReason> {
         let Some((copy_texture, copy_srv)) = self
             .copy_textures
             .for_format(frame.device, frame.width, frame.height, draw_plan.format)
             .map(|resource| (resource.texture.clone(), resource.srv.clone()))
         else {
-            return Err(super::PresentDrawFailReason::CopyTextureCreateFailed);
+            return Err(PresentDrawFailReason::CopyTextureCreateFailed);
         };
         let Some(rtv) = create_render_target_view(frame.device, frame.back_buffer) else {
-            return Err(super::PresentDrawFailReason::RenderTargetViewCreateFailed);
+            return Err(PresentDrawFailReason::RenderTargetViewCreateFailed);
         };
         let bindings =
             PipelineBindings::new(self, &rtv, &copy_srv, &self.lut_srvs[draw_plan.lut_index]);
-        let drawn = super::with_restored_state(
+        let drawn = with_restored_state(
             || ContextState::capture(frame.context),
             || {
                 if self.last_constants.as_ref() != Some(&draw_plan.constants) {
@@ -455,7 +463,7 @@ impl DeviceResources {
 
                 for rect in &draw_plan.dirty_rects {
                     let rect = *rect;
-                    let box3d = super::copy_box_for_rect(rect);
+                    let box3d = copy_box_for_rect(rect);
                     let source_box = D3D11_BOX {
                         left: box3d.left,
                         top: box3d.top,
@@ -484,7 +492,7 @@ impl DeviceResources {
 
                 bind_pipeline(frame.context, self, &bindings);
                 for rect in &draw_plan.dirty_rects {
-                    let vertices = super::vertices_for_rect(*rect, frame.width, frame.height);
+                    let vertices = vertices_for_rect(*rect, frame.width, frame.height);
                     unsafe {
                         frame.context.UpdateSubresource(
                             &self.vertex_buffer,
@@ -505,7 +513,7 @@ impl DeviceResources {
         if drawn {
             Ok(())
         } else {
-            Err(super::PresentDrawFailReason::DrawFailed)
+            Err(PresentDrawFailReason::DrawFailed)
         }
     }
 }
@@ -521,17 +529,17 @@ fn decision_from_observed(dxgi_format: u32, lut_index: Option<usize>) -> LutDeci
 }
 
 fn outcome_from_skip(
-    skip: super::DrawPlanSkip,
+    skip: DrawPlanSkip,
     dxgi_format: u32,
     width: u32,
     height: u32,
-    #[cfg(debug_assertions)] back_buffer_id: Option<super::BackBufferId>,
-) -> super::PresentLutOutcome {
+    #[cfg(debug_assertions)] back_buffer_id: Option<BackBufferId>,
+) -> PresentLutOutcome {
     let lut_index = skip.resolved.map(|resolved| resolved.lut_index);
-    super::PresentLutOutcome {
+    PresentLutOutcome {
         decision: decision_from_observed(dxgi_format, lut_index),
         present_dirty_rect: None,
-        draw: super::PresentDrawStatus::Skipped(skip.reason),
+        draw: PresentDrawStatus::Skipped(skip.reason),
         dxgi_format: Some(dxgi_format),
         width: Some(width),
         height: Some(height),
@@ -544,14 +552,14 @@ fn outcome_from_skip(
 fn outcome_planned(
     format: BackBufferFormat,
     lut_index: usize,
-    fail: super::PresentDrawFailReason,
-    #[cfg(debug_assertions)] back_buffer_id: Option<super::BackBufferId>,
-) -> super::PresentLutOutcome {
-    super::PresentLutOutcome {
+    fail: PresentDrawFailReason,
+    #[cfg(debug_assertions)] back_buffer_id: Option<BackBufferId>,
+) -> PresentLutOutcome {
+    PresentLutOutcome {
         decision: LutDecision::Apply { format, lut_index },
         present_dirty_rect: None,
-        draw: super::PresentDrawStatus::Failed(fail),
-        dxgi_format: Some(super::dxgi_format_for_copy_texture(format)),
+        draw: PresentDrawStatus::Failed(fail),
+        dxgi_format: Some(dxgi_format_for_copy_texture(format)),
         width: None,
         height: None,
         lut_index: Some(lut_index),
@@ -567,13 +575,13 @@ fn outcome_applied(
     height: u32,
     present_dirty_rect: Option<DirtyRect>,
     full_redraw: bool,
-    #[cfg(debug_assertions)] back_buffer_id: Option<super::BackBufferId>,
-) -> super::PresentLutOutcome {
-    super::PresentLutOutcome {
+    #[cfg(debug_assertions)] back_buffer_id: Option<BackBufferId>,
+) -> PresentLutOutcome {
+    PresentLutOutcome {
         decision: LutDecision::Apply { format, lut_index },
         present_dirty_rect,
-        draw: super::PresentDrawStatus::Applied { full_redraw },
-        dxgi_format: Some(super::dxgi_format_for_copy_texture(format)),
+        draw: PresentDrawStatus::Applied { full_redraw },
+        dxgi_format: Some(dxgi_format_for_copy_texture(format)),
         width: Some(width),
         height: Some(height),
         lut_index: Some(lut_index),
@@ -587,14 +595,14 @@ fn outcome_draw_failed(
     lut_index: usize,
     width: u32,
     height: u32,
-    fail: super::PresentDrawFailReason,
-    #[cfg(debug_assertions)] back_buffer_id: Option<super::BackBufferId>,
-) -> super::PresentLutOutcome {
-    super::PresentLutOutcome {
+    fail: PresentDrawFailReason,
+    #[cfg(debug_assertions)] back_buffer_id: Option<BackBufferId>,
+) -> PresentLutOutcome {
+    PresentLutOutcome {
         decision: LutDecision::Apply { format, lut_index },
         present_dirty_rect: None,
-        draw: super::PresentDrawStatus::Failed(fail),
-        dxgi_format: Some(super::dxgi_format_for_copy_texture(format)),
+        draw: PresentDrawStatus::Failed(fail),
+        dxgi_format: Some(dxgi_format_for_copy_texture(format)),
         width: Some(width),
         height: Some(height),
         lut_index: Some(lut_index),
@@ -609,10 +617,10 @@ pub(crate) unsafe fn render_present_lut(
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
     pipeline: &LutPipeline,
-) -> Result<super::PresentLutOutcome, super::RenderAcquireError> {
+) -> Result<PresentLutOutcome, RenderAcquireError> {
     let renderer = RENDERER.get_or_init(|| Mutex::new(D3D11Renderer::new()));
     let Ok(mut renderer) = renderer.lock() else {
-        return Err(super::RenderAcquireError::Unavailable);
+        return Err(RenderAcquireError::Unavailable);
     };
     unsafe {
         renderer.render_present_lut(

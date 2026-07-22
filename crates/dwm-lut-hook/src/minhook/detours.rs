@@ -711,22 +711,20 @@ mod tests {
             right: 1920,
             bottom: 1080,
         };
-        crate::d3d11_renderer::set_fake_render_result(Ok(
-            crate::d3d11_renderer::PresentLutOutcome {
-                decision: crate::lut_pipeline::LutDecision::Apply {
-                    format: crate::BackBufferFormat::Bgra8Unorm,
-                    lut_index: 0,
-                },
-                present_dirty_rect: Some(full_rect),
-                draw: crate::d3d11_renderer::PresentDrawStatus::Applied { full_redraw: true },
-                dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
-                width: None,
-                height: None,
-                lut_index: Some(0),
-                #[cfg(debug_assertions)]
-                back_buffer_id: None,
+        crate::d3d11::set_fake_render_result(Ok(crate::d3d11::PresentLutOutcome {
+            decision: crate::lut_pipeline::LutDecision::Apply {
+                format: crate::BackBufferFormat::Bgra8Unorm,
+                lut_index: 0,
             },
-        ));
+            present_dirty_rect: Some(full_rect),
+            draw: crate::d3d11::PresentDrawStatus::Applied { full_redraw: true },
+            dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+            width: None,
+            height: None,
+            lut_index: Some(0),
+            #[cfg(debug_assertions)]
+            back_buffer_id: None,
+        }));
         install_present_original();
 
         assert_eq!(
