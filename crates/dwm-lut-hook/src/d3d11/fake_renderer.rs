@@ -1,5 +1,5 @@
 use super::{PresentLutOutcome, RenderAcquireError};
-use crate::lut_pipeline::DirtyRect;
+use crate::present::DirtyRect;
 use dwm_lut_payload::MonitorIdentity;
 use std::sync::{Mutex, OnceLock};
 
@@ -57,7 +57,7 @@ pub(crate) unsafe fn render_present_lut(
     swap_chain_path: crate::profile::SwapChainVtablePath,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
-    _pipeline: &crate::lut_pipeline::LutPipeline,
+    _assignments: &[crate::state::LutAssignment],
 ) -> Result<PresentLutOutcome, RenderAcquireError> {
     if let Ok(mut calls) = call_slot().lock() {
         *calls = Some(FakeRenderPresentLutCall {

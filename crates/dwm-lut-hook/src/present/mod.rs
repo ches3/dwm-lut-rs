@@ -1,13 +1,21 @@
 mod apply_lut;
 mod collect;
 
-use crate::DirtyRect;
 use crate::state;
 
 use apply_lut::apply_lut;
 use collect::{RectVec, collect_present_inputs};
 
 pub(crate) use apply_lut::empty_rect_vec_storage;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirtyRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
 
 #[derive(Debug)]
 pub(crate) struct PreparedPresent {
@@ -66,11 +74,12 @@ pub(crate) mod test_support {
         PayloadLut,
     };
 
+    use super::DirtyRect;
+    use crate::HookProfile;
     use crate::minhook;
     use crate::profile::HookTarget;
     use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
     use crate::state;
-    use crate::{BackBufferFormat, DirtyRect, HookProfile};
 
     use super::collect::{RectVec, read_dirty_rects};
 
@@ -193,13 +202,7 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn activate_context(context_address: usize) {
-        state::update_present_context(
-            context_address,
-            crate::lut_pipeline::LutDecision::Apply {
-                format: BackBufferFormat::Bgra8Unorm,
-                lut_index: 0,
-            },
-        );
+        state::update_present_context(context_address, true);
     }
 
     pub(crate) fn install_present_original() {
@@ -281,8 +284,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::{activate_context, initialize_test_state};
-    use super::{empty_rect_vec_storage, prepare_present};
-    use crate::DirtyRect;
+    use super::{DirtyRect, empty_rect_vec_storage, prepare_present};
     use crate::state;
     use crate::state::HOOK_GLOBAL_TEST_LOCK;
 
@@ -310,6 +312,6 @@ mod tests {
         );
 
         assert_eq!(prepared.rect_vec, 0);
-        assert!(state::present_context(0x1234).is_none());
+        assert!(!state::has_present_context(0x1234));
     }
 }

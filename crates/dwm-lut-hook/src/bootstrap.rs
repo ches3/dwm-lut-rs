@@ -9,7 +9,6 @@ use dwm_lut_payload::{
 use crate::flip_gate::FlipGateEffects;
 use std::sync::Arc;
 
-use crate::lut_pipeline::LutPipeline;
 use crate::minhook::{
     MinHookError, disable_registered_hooks, enable_registered_hooks, register_plan,
     unregister_registered_hooks,
@@ -17,14 +16,15 @@ use crate::minhook::{
 use crate::profile::{
     HookProfile, ProfileSelectError, dwmcore_file_version, select_versioned_profile,
 };
+use crate::state::{LutAssignment, assignments_from_payload};
 
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::{
     HookRegistrationPlan, HookRuntime, HookState, ReplaceAssignmentsStart,
-    ReplacePayloadPipelineError, ShutdownStart, begin_replace_assignments, begin_shutdown,
+    ReplaceLutAssignmentsError, ShutdownStart, begin_replace_assignments, begin_shutdown,
     can_initialize, clear_state_after_shutdown, finish_reactivation, finish_replace_assignments,
     finish_shutdown, has_retained_state, install_state, lock_present_runtime, minhook_cleanup_plan,
-    reactivate_retained_state, replace_payload_pipeline, retain_state_after_shutdown,
+    reactivate_retained_state, replace_lut_assignments, retain_state_after_shutdown,
 };
 
 static INITIALIZATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -143,7 +143,7 @@ pub enum ReplaceAssignmentsError {
     NotInitialized,
     AlreadyInProgress,
     Payload(PayloadError),
-    State(ReplacePayloadPipelineError),
+    State(ReplaceLutAssignmentsError),
 }
 
 impl fmt::Display for ReplaceAssignmentsError {
@@ -152,7 +152,7 @@ impl fmt::Display for ReplaceAssignmentsError {
             Self::NotInitialized => write!(f, "hook is not initialized"),
             Self::AlreadyInProgress => write!(f, "hook initialization or shutdown is in progress"),
             Self::Payload(error) => write!(f, "{error}"),
-            Self::State(ReplacePayloadPipelineError::NotInitialized) => {
+            Self::State(ReplaceLutAssignmentsError::NotInitialized) => {
                 write!(f, "hook is not initialized")
             }
         }
@@ -167,8 +167,8 @@ impl From<PayloadError> for ReplaceAssignmentsError {
     }
 }
 
-impl From<ReplacePayloadPipelineError> for ReplaceAssignmentsError {
-    fn from(value: ReplacePayloadPipelineError) -> Self {
+impl From<ReplaceLutAssignmentsError> for ReplaceAssignmentsError {
+    fn from(value: ReplaceLutAssignmentsError) -> Self {
         Self::State(value)
     }
 }
@@ -349,16 +349,16 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
         payload.assignments.len()
     );
 
-    let lut_pipeline = LutPipeline::from_payload(&payload);
+    let assignments = assignments_from_payload(&payload);
     debug_log!(
-        "event=replace_assignments_pipeline_prepared lut_count={}",
-        lut_pipeline.luts.len()
+        "event=replace_assignments_luts_prepared lut_count={}",
+        assignments.len()
     );
 
     #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let renderer_device_count = {
         let _present_guard = lock_present_runtime();
-        replace_payload_pipeline(payload, lut_pipeline)?;
+        replace_lut_assignments(payload, assignments)?;
         crate::d3d11::shutdown_renderer_resources()
     };
     debug_log!(
@@ -389,7 +389,7 @@ fn finish_replace_assignments_error(error: ReplaceAssignmentsError) -> u32 {
 fn map_replace_assignments_error(error: &ReplaceAssignmentsError) -> ReplaceAssignmentsStatus {
     match error {
         ReplaceAssignmentsError::NotInitialized
-        | ReplaceAssignmentsError::State(ReplacePayloadPipelineError::NotInitialized) => {
+        | ReplaceAssignmentsError::State(ReplaceLutAssignmentsError::NotInitialized) => {
             ReplaceAssignmentsStatus::NotInitialized
         }
         ReplaceAssignmentsError::AlreadyInProgress => ReplaceAssignmentsStatus::AlreadyInProgress,
@@ -444,13 +444,10 @@ fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
         payload.assignments.len()
     );
 
-    let lut_pipeline = LutPipeline::from_payload(&payload);
-    debug_log!(
-        "event=lut_pipeline_prepared lut_count={}",
-        lut_pipeline.luts.len()
-    );
+    let assignments = assignments_from_payload(&payload);
+    debug_log!("event=luts_prepared lut_count={}", assignments.len());
 
-    let Some((minhook, _hooks)) = reactivate_retained_state(payload, lut_pipeline) else {
+    let Some((minhook, _hooks)) = reactivate_retained_state(payload, assignments) else {
         return Err(HookError::AlreadyInitialized);
     };
     if let Err(error) = enable_registered_hooks(&minhook) {
@@ -506,11 +503,8 @@ where
         payload.assignments.len()
     );
 
-    let lut_pipeline = LutPipeline::from_payload(&payload);
-    debug_log!(
-        "event=lut_pipeline_prepared lut_count={}",
-        lut_pipeline.luts.len()
-    );
+    let assignments = assignments_from_payload(&payload);
+    debug_log!("event=luts_prepared lut_count={}", assignments.len());
 
     let resolution = resolver(&profile)?;
     debug_log!(
@@ -539,7 +533,7 @@ where
         }
     }
 
-    finalize_initial_state(payload, profile, resolution, lut_pipeline)
+    finalize_initial_state(payload, profile, resolution, assignments)
 }
 
 #[cfg(test)]
@@ -555,7 +549,7 @@ fn finalize_initial_state(
     payload: HookPayload,
     profile: HookProfile,
     resolution: SignatureResolutionReport,
-    lut_pipeline: LutPipeline,
+    assignments: Vec<LutAssignment>,
 ) -> Result<HookState, HookError> {
     let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
     let (minhook, registered_hooks) = register_plan(&registration_plan)?;
@@ -584,11 +578,11 @@ fn finalize_initial_state(
     Ok(HookState {
         payload,
         profile,
+        assignments: Arc::new(assignments),
+        contexts: Default::default(),
         runtime: HookRuntime {
             minhook,
-            lut_pipeline: Arc::new(lut_pipeline),
             hooks: registered_hooks,
-            contexts: Default::default(),
             flip_gate_effects,
         },
     })

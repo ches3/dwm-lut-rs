@@ -1,11 +1,9 @@
-mod blue_noise;
 #[macro_use]
 mod debug_log;
 mod bootstrap;
 mod d3d11;
 mod desktop_redraw;
 mod flip_gate;
-mod lut_pipeline;
 mod minhook;
 mod present;
 mod profile;
@@ -14,15 +12,10 @@ mod state;
 
 pub use bootstrap::HookError;
 pub use flip_gate::{
-    ContextLutState, DisableIndependentFlipPatch, FlipGateEffects, OverlayTestModeControl,
-    OverlayTestModePatch,
-};
-pub use lut_pipeline::{
-    BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
-    LoadedLut, LutMetadata, LutPipeline, ShaderConstants, ShaderConstantsCBuffer, ShaderTexture3D,
-    apply_sdr_dither, cube_to_texture, pq_to_scrgb, scrgb_to_pq, tetrahedral_interpolation,
+    DisableIndependentFlipPatch, FlipGateEffects, OverlayTestModeControl, OverlayTestModePatch,
 };
 pub use minhook::{MinHookError, MinHookRuntime, MinHookState, RegisteredHook};
+pub use present::DirtyRect;
 pub use profile::{
     AobToken, DwmcoreVersion, HOOK_MODULE_NAME, HookProfile, HookSignature, HookTarget,
     MonitorIdentityOffsets, ProfileSelectError, SignatureLocator, SwapChainVtablePath,
@@ -33,8 +26,9 @@ pub use resolver::{
     SkippedSignatureReason, resolve_profile,
 };
 pub use state::{
-    HookRegistrationPlan, HookRegistrationTarget, HookRuntime, HookState, has_active_contexts,
-    has_lut_assignments, has_present_context, hook_profile, is_initialized, present_context,
+    HookRegistrationPlan, HookRegistrationTarget, HookRuntime, HookState, LutAssignment,
+    LutMetadata, ShaderTexture3D, assignments_from_payload, cube_to_texture, has_active_contexts,
+    has_lut_assignments, has_present_context, hook_profile, is_initialized,
 };
 
 use std::ffi::c_void;

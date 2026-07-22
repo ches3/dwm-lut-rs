@@ -1,4 +1,5 @@
-use crate::lut_pipeline::{DirtyRect, LutDecision, LutPipeline};
+use crate::present::DirtyRect;
+use crate::state::LutAssignment;
 use dwm_lut_payload::MonitorIdentity;
 
 #[cfg(not(test))]
@@ -12,6 +13,9 @@ mod fake_renderer;
 mod plan;
 #[cfg(not(test))]
 mod renderer;
+
+#[cfg(test)]
+pub(crate) use plan::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DrawPlanSkipReason {
@@ -105,9 +109,9 @@ impl PresentDrawStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PresentLutOutcome {
-    pub decision: LutDecision,
+    pub lut_active: bool,
     pub present_dirty_rect: Option<DirtyRect>,
     pub draw: PresentDrawStatus,
     pub dxgi_format: Option<u32>,
@@ -152,7 +156,7 @@ pub(crate) unsafe fn render_present_lut(
     swap_chain_path: crate::profile::SwapChainVtablePath,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
-    pipeline: &LutPipeline,
+    assignments: &[LutAssignment],
 ) -> Result<PresentLutOutcome, RenderAcquireError> {
     #[cfg(test)]
     {
@@ -162,7 +166,7 @@ pub(crate) unsafe fn render_present_lut(
                 swap_chain_path,
                 monitor_identity,
                 dirty_rects,
-                pipeline,
+                assignments,
             )
         }
     }
@@ -174,7 +178,7 @@ pub(crate) unsafe fn render_present_lut(
                 swap_chain_path,
                 monitor_identity,
                 dirty_rects,
-                pipeline,
+                assignments,
             )
         }
     }

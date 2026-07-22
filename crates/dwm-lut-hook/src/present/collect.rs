@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use std::mem::{align_of, size_of};
 
-use crate::DirtyRect;
+use super::DirtyRect;
 use crate::profile::{HookProfile, MonitorIdentityOffsets};
 use crate::state;
 use dwm_lut_payload::{AdapterLuid, MonitorIdentity};
@@ -382,7 +382,7 @@ mod tests {
     use super::super::test_support::{
         FakePresentObjects, initialize_test_state, test_monitor_identity, test_profile,
     };
-    use crate::DirtyRect;
+    use super::DirtyRect;
     use crate::state::HOOK_GLOBAL_TEST_LOCK;
 
     use super::{

@@ -1,14 +1,76 @@
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
-use dwm_lut_payload::HookPayload;
+use dwm_lut_payload::{ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadLut};
 
-use crate::flip_gate::{ContextLutState, FlipGateEffects};
-use crate::lut_pipeline::{LutDecision, LutPipeline};
+use crate::flip_gate::FlipGateEffects;
 use crate::minhook::{MinHookRuntime, RegisteredHook};
 use crate::profile::{HookProfile, HookTarget};
 use crate::resolver::SignatureResolutionReport;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LutMetadata {
+    pub size: u32,
+    pub domain_min: [f32; 3],
+    pub domain_max: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderTexture3D {
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub texels: Vec<[f32; 4]>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LutAssignment {
+    pub target: MonitorTarget,
+    pub metadata: LutMetadata,
+    pub texture: ShaderTexture3D,
+}
+
+pub fn assignments_from_payload(payload: &HookPayload) -> Vec<LutAssignment> {
+    let mut assignments = Vec::with_capacity(payload.assignments.len());
+    for assignment in &payload.assignments {
+        assignments.push(LutAssignment {
+            target: assignment.target,
+            metadata: LutMetadata {
+                size: assignment.lut.size,
+                domain_min: assignment.lut.domain_min,
+                domain_max: assignment.lut.domain_max,
+            },
+            texture: cube_to_texture(&assignment.lut),
+        });
+    }
+    assignments
+}
+
+pub fn cube_to_texture(cube: &PayloadLut) -> ShaderTexture3D {
+    let texels = cube
+        .values
+        .iter()
+        .map(|value| [value[0], value[1], value[2], 1.0])
+        .collect();
+
+    ShaderTexture3D {
+        width: cube.size,
+        height: cube.size,
+        depth: cube.size,
+        texels,
+    }
+}
+
+pub(crate) fn find_assignment(
+    assignments: &[LutAssignment],
+    identity: MonitorIdentity,
+    color_mode: ColorMode,
+) -> Option<(usize, &LutAssignment)> {
+    assignments.iter().enumerate().find(|(_, assignment)| {
+        assignment.target.identity == identity && assignment.target.color_mode == color_mode
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookRegistrationTarget {
@@ -46,9 +108,7 @@ impl HookRegistrationPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookRuntime {
     pub minhook: MinHookRuntime,
-    pub lut_pipeline: Arc<LutPipeline>,
     pub hooks: Vec<RegisteredHook>,
-    pub contexts: BTreeMap<usize, ContextLutState>,
     pub flip_gate_effects: FlipGateEffects,
 }
 
@@ -56,6 +116,8 @@ pub struct HookRuntime {
 pub struct HookState {
     pub payload: HookPayload,
     pub profile: HookProfile,
+    pub assignments: Arc<Vec<LutAssignment>>,
+    pub contexts: BTreeSet<usize>,
     pub runtime: HookRuntime,
 }
 
@@ -126,24 +188,20 @@ pub fn hook_profile() -> Option<HookProfile> {
     with_state(|state| state.profile)
 }
 
-pub(crate) fn lut_pipeline() -> Option<Arc<LutPipeline>> {
-    with_state(|state| state.runtime.lut_pipeline.clone())
-}
-
-pub fn present_context(context_address: usize) -> Option<ContextLutState> {
-    with_state(|state| state.runtime.contexts.get(&context_address).copied()).flatten()
+pub(crate) fn assignments() -> Option<Arc<Vec<LutAssignment>>> {
+    with_state(|state| state.assignments.clone())
 }
 
 pub fn has_present_context(context_address: usize) -> bool {
-    with_state(|state| state.runtime.contexts.contains_key(&context_address)).unwrap_or(false)
+    with_state(|state| state.contexts.contains(&context_address)).unwrap_or(false)
 }
 
 pub fn has_active_contexts() -> bool {
-    with_state(|state| !state.runtime.contexts.is_empty()).unwrap_or(false)
+    with_state(|state| !state.contexts.is_empty()).unwrap_or(false)
 }
 
 pub fn has_lut_assignments() -> bool {
-    with_state(|state| !state.runtime.lut_pipeline.luts.is_empty()).unwrap_or(false)
+    with_state(|state| !state.assignments.is_empty()).unwrap_or(false)
 }
 
 pub(crate) fn is_runtime_active() -> bool {
@@ -153,29 +211,20 @@ pub(crate) fn is_runtime_active() -> bool {
     )
 }
 
-pub(crate) fn update_present_context(context_address: usize, decision: LutDecision) {
+pub(crate) fn update_present_context(context_address: usize, active: bool) {
     let _ = with_state_mut(|state| {
-        match decision {
-            LutDecision::Apply { format, lut_index } => {
-                state.runtime.contexts.insert(
-                    context_address,
-                    ContextLutState {
-                        back_buffer_format: format,
-                        lut_index,
-                    },
-                );
-            }
-            LutDecision::NotApplicable => {
-                state.runtime.contexts.remove(&context_address);
-            }
+        if active {
+            state.contexts.insert(context_address);
+        } else {
+            state.contexts.remove(&context_address);
         }
-        let active = !state.runtime.contexts.is_empty();
-        state.runtime.flip_gate_effects.sync_active(active);
+        let has_active = !state.contexts.is_empty();
+        state.runtime.flip_gate_effects.sync_active(has_active);
     });
 }
 
 pub(crate) fn deactivate_present_context(context_address: usize) {
-    update_present_context(context_address, LutDecision::NotApplicable);
+    update_present_context(context_address, false);
 }
 
 pub(crate) fn begin_replace_assignments() -> ReplaceAssignmentsStart {
@@ -279,7 +328,7 @@ pub(crate) fn finish_reactivation() {
 
 pub(crate) fn reactivate_retained_state(
     payload: HookPayload,
-    lut_pipeline: LutPipeline,
+    assignments: Vec<LutAssignment>,
 ) -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
     let active = STATE.get_or_init(|| Mutex::new(None));
     let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
@@ -290,7 +339,7 @@ pub(crate) fn reactivate_retained_state(
         return None;
     }
     let mut state = retained.take()?;
-    update_payload_pipeline(&mut state, payload, lut_pipeline);
+    update_lut_assignments(&mut state, payload, assignments);
     let plan = (state.runtime.minhook, state.runtime.hooks.clone());
     *active = Some(state);
     Some(plan)
@@ -305,28 +354,32 @@ pub(crate) fn clear_present_session() {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplacePayloadPipelineError {
+pub enum ReplaceLutAssignmentsError {
     NotInitialized,
 }
 
-pub fn replace_payload_pipeline(
+pub fn replace_lut_assignments(
     payload: HookPayload,
-    lut_pipeline: LutPipeline,
-) -> Result<(), ReplacePayloadPipelineError> {
+    assignments: Vec<LutAssignment>,
+) -> Result<(), ReplaceLutAssignmentsError> {
     with_state_mut(|state| {
-        update_payload_pipeline(state, payload, lut_pipeline);
+        update_lut_assignments(state, payload, assignments);
     })
-    .ok_or(ReplacePayloadPipelineError::NotInitialized)
+    .ok_or(ReplaceLutAssignmentsError::NotInitialized)
 }
 
-fn update_payload_pipeline(state: &mut HookState, payload: HookPayload, lut_pipeline: LutPipeline) {
+fn update_lut_assignments(
+    state: &mut HookState,
+    payload: HookPayload,
+    assignments: Vec<LutAssignment>,
+) {
     state.payload = payload;
-    state.runtime.lut_pipeline = Arc::new(lut_pipeline);
+    state.assignments = Arc::new(assignments);
     clear_present_session_in(state);
 }
 
 fn clear_present_session_in(state: &mut HookState) {
-    state.runtime.contexts.clear();
+    state.contexts.clear();
     state.runtime.flip_gate_effects.restore();
 }
 
@@ -361,4 +414,82 @@ pub(crate) fn reset_state_for_tests() {
     crate::d3d11::reset_fake_render_result();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
     crate::minhook::reset_test_original_slots();
+}
+
+#[cfg(test)]
+mod tests {
+    use dwm_lut_payload::{
+        AdapterLuid, ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadAssignment,
+        PayloadLut,
+    };
+
+    use super::{assignments_from_payload, find_assignment};
+
+    fn identity_cube() -> PayloadLut {
+        PayloadLut {
+            size: 2,
+            domain_min: [0.0, 0.0, 0.0],
+            domain_max: [1.0, 1.0, 1.0],
+            values: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+            ],
+        }
+    }
+
+    fn payload(
+        assignments: impl IntoIterator<Item = (MonitorIdentity, ColorMode, PayloadLut)>,
+    ) -> HookPayload {
+        HookPayload {
+            assignments: assignments
+                .into_iter()
+                .map(|(identity, color_mode, lut)| PayloadAssignment {
+                    target: MonitorTarget {
+                        identity,
+                        color_mode,
+                    },
+                    lut,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn find_assignment_selects_by_identity_and_color_mode() {
+        let identity_a = MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 11,
+        };
+        let identity_b = MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 0,
+                low_part: 0x14e02,
+            },
+            target_id: 4357,
+        };
+        let assignments = assignments_from_payload(&payload([
+            (identity_a, ColorMode::Sdr, identity_cube()),
+            (identity_b, ColorMode::Sdr, identity_cube()),
+            (identity_b, ColorMode::Hdr, identity_cube()),
+        ]));
+
+        assert_eq!(
+            find_assignment(&assignments, identity_b, ColorMode::Sdr).map(|(index, _)| index),
+            Some(1)
+        );
+        assert_eq!(
+            find_assignment(&assignments, identity_b, ColorMode::Hdr).map(|(index, _)| index),
+            Some(2)
+        );
+        assert!(find_assignment(&assignments, identity_a, ColorMode::Hdr).is_none());
+    }
 }

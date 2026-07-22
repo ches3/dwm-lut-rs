@@ -15,8 +15,8 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::core::{Interface, PCSTR};
 
-use super::plan::{Vertex, dxgi_format_for_copy_texture};
-use crate::lut_pipeline::{BackBufferFormat, ShaderConstantsCBuffer};
+use super::plan::{BackBufferFormat, ShaderConstants, Vertex, dxgi_format_for_copy_texture};
+use crate::state::LutAssignment;
 
 pub(super) const LUT_VERTEX_SHADER_BYTECODE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/lut_pipeline_vs.cso"));
@@ -115,7 +115,7 @@ pub(super) fn create_vertex_buffer(device: &ID3D11Device) -> Option<ID3D11Buffer
 
 pub(super) fn create_constant_buffer(device: &ID3D11Device) -> Option<ID3D11Buffer> {
     let desc = D3D11_BUFFER_DESC {
-        ByteWidth: size_of::<ShaderConstantsCBuffer>() as u32,
+        ByteWidth: size_of::<ShaderConstants>() as u32,
         Usage: D3D11_USAGE_DEFAULT,
         BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
         CPUAccessFlags: 0,
@@ -210,9 +210,9 @@ pub(super) fn create_render_target_view(
 
 pub(super) fn create_lut_texture(
     device: &ID3D11Device,
-    lut: &crate::lut_pipeline::LoadedLut,
+    assignment: &LutAssignment,
 ) -> Option<(ID3D11Texture3D, ID3D11ShaderResourceView)> {
-    let texture = &lut.texture;
+    let texture = &assignment.texture;
     let desc = D3D11_TEXTURE3D_DESC {
         Width: texture.width,
         Height: texture.height,

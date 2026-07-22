@@ -1,18 +1,72 @@
 use std::collections::BTreeMap;
 
-use crate::lut_pipeline::{
-    BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DirtyRect,
-    LutPipeline, ResolvedLut, ShaderConstantsCBuffer,
-};
-use dwm_lut_payload::MonitorIdentity;
+use crate::present::DirtyRect;
+use crate::state::{LutAssignment, find_assignment};
+use dwm_lut_payload::{ColorMode, MonitorIdentity};
 
 use super::{BackBufferId, DrawPlanSkipReason};
+
+pub(crate) const DXGI_FORMAT_R16G16B16A16_FLOAT: u32 = 10;
+pub(crate) const DXGI_FORMAT_B8G8R8A8_UNORM: u32 = 87;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackBufferFormat {
+    Bgra8Unorm,
+    Rgba16Float,
+}
+
+impl BackBufferFormat {
+    pub(crate) const fn from_dxgi_format(format: u32) -> Option<Self> {
+        match format {
+            DXGI_FORMAT_B8G8R8A8_UNORM => Some(Self::Bgra8Unorm),
+            DXGI_FORMAT_R16G16B16A16_FLOAT => Some(Self::Rgba16Float),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn is_hdr(self) -> bool {
+        matches!(self, Self::Rgba16Float)
+    }
+
+    pub(crate) const fn color_mode(self) -> ColorMode {
+        match self {
+            Self::Bgra8Unorm => ColorMode::Sdr,
+            Self::Rgba16Float => ColorMode::Hdr,
+        }
+    }
+}
+
+const fn extend_domain(domain: [f32; 3]) -> [f32; 4] {
+    [domain[0], domain[1], domain[2], 0.0]
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Vertex {
     pub(super) position: [f32; 2],
     pub(super) texcoord: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ShaderConstants {
+    pub lut_size: u32,
+    pub hdr: u32,
+    pub padding: [f32; 2],
+    pub domain_min: [f32; 4],
+    pub domain_max: [f32; 4],
+}
+
+impl ShaderConstants {
+    fn for_assignment(assignment: &LutAssignment, format: BackBufferFormat) -> Self {
+        Self {
+            lut_size: assignment.metadata.size,
+            hdr: u32::from(format.is_hdr()),
+            padding: [0.0, 0.0],
+            domain_min: extend_domain(assignment.metadata.domain_min),
+            domain_max: extend_domain(assignment.metadata.domain_max),
+        }
+    }
 }
 
 #[repr(C)]
@@ -30,14 +84,33 @@ pub(super) struct Box3D {
 pub(super) struct GpuDrawPlan {
     pub(super) format: BackBufferFormat,
     pub(super) lut_index: usize,
-    pub(super) constants: ShaderConstantsCBuffer,
+    pub(super) constants: ShaderConstants,
     pub(super) dirty_rects: Vec<DirtyRect>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct DrawPlanSkip {
     pub(super) reason: DrawPlanSkipReason,
-    pub(super) resolved: Option<ResolvedLut>,
+    pub(super) lut_active: bool,
+    pub(super) lut_index: Option<usize>,
+}
+
+impl DrawPlanSkip {
+    const fn inactive(reason: DrawPlanSkipReason) -> Self {
+        Self {
+            reason,
+            lut_active: false,
+            lut_index: None,
+        }
+    }
+
+    const fn active(reason: DrawPlanSkipReason, lut_index: usize) -> Self {
+        Self {
+            reason,
+            lut_active: true,
+            lut_index: Some(lut_index),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,7 +190,7 @@ pub(super) const fn keeps_device_resource(key: ResourceKey, current: ResourceKey
 }
 
 pub(super) fn prepare_gpu_draw_plan(
-    pipeline: &LutPipeline,
+    assignments: &[LutAssignment],
     monitor_identity: Option<MonitorIdentity>,
     dxgi_format: u32,
     width: u32,
@@ -125,45 +198,45 @@ pub(super) fn prepare_gpu_draw_plan(
     dirty_rects: &[DirtyRect],
 ) -> Result<GpuDrawPlan, DrawPlanSkip> {
     let format = BackBufferFormat::from_dxgi_format(dxgi_format);
-    let resolved = monitor_identity
-        .zip(format)
-        .and_then(|(identity, format)| pipeline.resolve(identity, format));
+    let matched = monitor_identity.zip(format).and_then(|(identity, format)| {
+        find_assignment(assignments, identity, format.color_mode())
+            .map(|(lut_index, lut)| (format, lut_index, lut))
+    });
 
     if width == 0 || height == 0 {
-        return Err(DrawPlanSkip {
-            reason: DrawPlanSkipReason::ZeroSize,
-            resolved,
+        return Err(match matched {
+            Some((_, lut_index, _)) => {
+                DrawPlanSkip::active(DrawPlanSkipReason::ZeroSize, lut_index)
+            }
+            None => DrawPlanSkip::inactive(DrawPlanSkipReason::ZeroSize),
         });
     }
     if monitor_identity.is_none() {
-        return Err(DrawPlanSkip {
-            reason: DrawPlanSkipReason::MissingMonitorIdentity,
-            resolved: None,
-        });
+        return Err(DrawPlanSkip::inactive(
+            DrawPlanSkipReason::MissingMonitorIdentity,
+        ));
     }
     if format.is_none() {
-        return Err(DrawPlanSkip {
-            reason: DrawPlanSkipReason::UnsupportedFormat,
-            resolved: None,
-        });
+        return Err(DrawPlanSkip::inactive(
+            DrawPlanSkipReason::UnsupportedFormat,
+        ));
     }
-    let Some(resolved) = resolved else {
-        return Err(DrawPlanSkip {
-            reason: DrawPlanSkipReason::MissingAssignment,
-            resolved: None,
-        });
+    let Some((format, lut_index, lut)) = matched else {
+        return Err(DrawPlanSkip::inactive(
+            DrawPlanSkipReason::MissingAssignment,
+        ));
     };
     let dirty_rects = draw_rects_for_frame(dirty_rects, width, height);
     if dirty_rects.is_empty() {
-        return Err(DrawPlanSkip {
-            reason: DrawPlanSkipReason::EmptyDirtyRects,
-            resolved: Some(resolved),
-        });
+        return Err(DrawPlanSkip::active(
+            DrawPlanSkipReason::EmptyDirtyRects,
+            lut_index,
+        ));
     }
     Ok(GpuDrawPlan {
-        format: resolved.format,
-        lut_index: resolved.lut_index,
-        constants: resolved.shader_constants.to_cbuffer(),
+        format,
+        lut_index,
+        constants: ShaderConstants::for_assignment(lut, format),
         dirty_rects,
     })
 }
@@ -313,11 +386,11 @@ pub(super) fn present_dirty_rect_for_full_redraw(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lut_pipeline::{
-        BackBufferFormat, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, LoadedLut,
-        LutMetadata, ShaderTexture3D,
+    use crate::state::{LutAssignment, LutMetadata, ShaderTexture3D};
+    use dwm_lut_payload::{
+        AdapterLuid, ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadAssignment,
+        PayloadLut,
     };
-    use dwm_lut_payload::{AdapterLuid, ColorMode, MonitorIdentity, MonitorTarget};
     use std::cell::RefCell;
 
     fn test_identity() -> MonitorIdentity {
@@ -330,9 +403,9 @@ mod tests {
         }
     }
 
-    fn test_pipeline() -> LutPipeline {
-        fn loaded_lut(color_mode: ColorMode) -> LoadedLut {
-            LoadedLut {
+    fn test_assignments() -> Vec<LutAssignment> {
+        fn lut_assignment(color_mode: ColorMode) -> LutAssignment {
+            LutAssignment {
                 target: MonitorTarget {
                     identity: test_identity(),
                     color_mode,
@@ -351,9 +424,10 @@ mod tests {
             }
         }
 
-        LutPipeline {
-            luts: vec![loaded_lut(ColorMode::Sdr), loaded_lut(ColorMode::Hdr)],
-        }
+        vec![
+            lut_assignment(ColorMode::Sdr),
+            lut_assignment(ColorMode::Hdr),
+        ]
     }
 
     #[test]
@@ -436,7 +510,7 @@ mod tests {
 
     #[test]
     fn gpu_draw_plan_accepts_sdr_and_hdr_frames_with_size() {
-        let pipeline = test_pipeline();
+        let assignments = test_assignments();
         let dirty_rects = [DirtyRect {
             left: 0,
             top: 0,
@@ -446,7 +520,7 @@ mod tests {
 
         assert!(
             prepare_gpu_draw_plan(
-                &pipeline,
+                &assignments,
                 Some(test_identity()),
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 1920,
@@ -456,7 +530,7 @@ mod tests {
             .is_ok()
         );
         let hdr_plan = prepare_gpu_draw_plan(
-            &pipeline,
+            &assignments,
             Some(test_identity()),
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             1920,
@@ -470,10 +544,10 @@ mod tests {
     }
 
     #[test]
-    fn gpu_draw_plan_skip_preserves_only_resolved_assignments() {
-        let pipeline = test_pipeline();
+    fn gpu_draw_plan_skip_preserves_only_matched_assignments() {
+        let assignments = test_assignments();
         let zero_size_skip = prepare_gpu_draw_plan(
-            &pipeline,
+            &assignments,
             Some(test_identity()),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             0,
@@ -483,16 +557,13 @@ mod tests {
         .expect_err("zero-sized frames should skip drawing");
 
         assert_eq!(zero_size_skip.reason, DrawPlanSkipReason::ZeroSize);
-        let resolved = zero_size_skip
-            .resolved
-            .expect("a matching assignment should remain resolved");
-        assert_eq!(resolved.format, BackBufferFormat::Bgra8Unorm);
-        assert_eq!(resolved.lut_index, 0);
+        assert!(zero_size_skip.lut_active);
+        assert_eq!(zero_size_skip.lut_index, Some(0));
 
         let mut unmatched_identity = test_identity();
         unmatched_identity.target_id = unmatched_identity.target_id.saturating_add(1);
         let missing_assignment_skip = prepare_gpu_draw_plan(
-            &pipeline,
+            &assignments,
             Some(unmatched_identity),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
@@ -505,7 +576,8 @@ mod tests {
             missing_assignment_skip.reason,
             DrawPlanSkipReason::MissingAssignment
         );
-        assert_eq!(missing_assignment_skip.resolved, None);
+        assert!(!missing_assignment_skip.lut_active);
+        assert_eq!(missing_assignment_skip.lut_index, None);
     }
 
     #[test]
@@ -522,9 +594,9 @@ mod tests {
 
     #[test]
     fn gpu_draw_plan_expands_empty_dirty_rects_to_full_frame() {
-        let pipeline = test_pipeline();
+        let assignments = test_assignments();
         let plan = prepare_gpu_draw_plan(
-            &pipeline,
+            &assignments,
             Some(test_identity()),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
@@ -849,9 +921,9 @@ mod tests {
 
     #[test]
     fn gpu_draw_plan_ignores_dirty_rects_outside_the_frame() {
-        let pipeline = test_pipeline();
+        let assignments = test_assignments();
         let plan = prepare_gpu_draw_plan(
-            &pipeline,
+            &assignments,
             Some(test_identity()),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
@@ -883,7 +955,7 @@ mod tests {
             }]
         );
         let skip = prepare_gpu_draw_plan(
-            &pipeline,
+            &assignments,
             Some(test_identity()),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
@@ -898,17 +970,18 @@ mod tests {
         .expect_err("dirty rects outside the frame should skip drawing");
 
         assert_eq!(skip.reason, DrawPlanSkipReason::EmptyDirtyRects);
-        let resolved = skip
-            .resolved
-            .expect("a matching assignment should remain resolved");
-        assert_eq!(resolved.format, BackBufferFormat::Bgra8Unorm);
-        assert_eq!(resolved.lut_index, 0);
+        assert!(skip.lut_active);
+        assert_eq!(skip.lut_index, Some(0));
     }
 
     #[test]
     fn gpu_draw_plan_selects_lut_by_runtime_monitor_identity() {
-        fn loaded_lut(_label: &str, identity: MonitorIdentity, color_mode: ColorMode) -> LoadedLut {
-            LoadedLut {
+        fn lut_assignment(
+            _label: &str,
+            identity: MonitorIdentity,
+            color_mode: ColorMode,
+        ) -> LutAssignment {
+            LutAssignment {
                 target: MonitorTarget {
                     identity,
                     color_mode,
@@ -941,15 +1014,13 @@ mod tests {
             },
             target_id: 4357,
         };
-        let pipeline = LutPipeline {
-            luts: vec![
-                loaded_lut("PRIMARY", primary, ColorMode::Sdr),
-                loaded_lut("RIGHT", right, ColorMode::Sdr),
-            ],
-        };
+        let assignments = vec![
+            lut_assignment("PRIMARY", primary, ColorMode::Sdr),
+            lut_assignment("RIGHT", right, ColorMode::Sdr),
+        ];
 
         let plan = prepare_gpu_draw_plan(
-            &pipeline,
+            &assignments,
             Some(right),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
@@ -960,8 +1031,15 @@ mod tests {
 
         assert_eq!(plan.lut_index, 1);
         assert!(
-            prepare_gpu_draw_plan(&pipeline, None, DXGI_FORMAT_B8G8R8A8_UNORM, 1920, 1080, &[],)
-                .is_err()
+            prepare_gpu_draw_plan(
+                &assignments,
+                None,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                1920,
+                1080,
+                &[],
+            )
+            .is_err()
         );
     }
 
@@ -986,6 +1064,133 @@ mod tests {
 
         assert!(result);
         assert_eq!(&*events.borrow(), &["capture", "draw", "restore"]);
+    }
+
+    #[test]
+    fn shader_constants_match_hlsl_layout() {
+        use std::mem::size_of;
+        use std::ptr::addr_of;
+
+        let constants = ShaderConstants {
+            lut_size: 33,
+            hdr: 1,
+            padding: [0.0, 0.0],
+            domain_min: [-1.0, 0.0, 0.0, 0.0],
+            domain_max: [1.0, 1.0, 1.0, 0.0],
+        };
+
+        let base = (&constants as *const ShaderConstants) as usize;
+        assert_eq!(size_of::<ShaderConstants>(), 48);
+        assert_eq!(addr_of!(constants.lut_size) as usize - base, 0);
+        assert_eq!(addr_of!(constants.hdr) as usize - base, 4);
+        assert_eq!(addr_of!(constants.padding) as usize - base, 8);
+        assert_eq!(addr_of!(constants.domain_min) as usize - base, 16);
+        assert_eq!(addr_of!(constants.domain_max) as usize - base, 32);
+        assert_eq!(constants.padding, [0.0, 0.0]);
+    }
+
+    fn identity_cube() -> PayloadLut {
+        PayloadLut {
+            size: 2,
+            domain_min: [0.0, 0.0, 0.0],
+            domain_max: [1.0, 1.0, 1.0],
+            values: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+            ],
+        }
+    }
+
+    fn payload(
+        assignments: impl IntoIterator<Item = (MonitorIdentity, ColorMode, PayloadLut)>,
+    ) -> HookPayload {
+        HookPayload {
+            assignments: assignments
+                .into_iter()
+                .map(|(identity, color_mode, lut)| PayloadAssignment {
+                    target: MonitorTarget {
+                        identity,
+                        color_mode,
+                    },
+                    lut,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn gpu_draw_plan_builds_sdr_shader_constants() {
+        let identity = test_identity();
+        let assignments = crate::state::assignments_from_payload(&payload([(
+            identity,
+            ColorMode::Sdr,
+            identity_cube(),
+        )]));
+        let plan = prepare_gpu_draw_plan(
+            &assignments,
+            Some(identity),
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            1920,
+            1080,
+            &[],
+        )
+        .expect("SDR plan should exist");
+
+        assert_eq!(plan.format, BackBufferFormat::Bgra8Unorm);
+        assert_eq!(plan.constants.lut_size, 2);
+        assert_eq!(plan.constants.hdr, 0);
+        assert_eq!(plan.constants.domain_min, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(plan.constants.domain_max, [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(plan.constants.padding, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn gpu_draw_plan_builds_hdr_shader_constants() {
+        let identity = test_identity();
+        let assignments = crate::state::assignments_from_payload(&payload([(
+            identity,
+            ColorMode::Hdr,
+            identity_cube(),
+        )]));
+        let plan = prepare_gpu_draw_plan(
+            &assignments,
+            Some(identity),
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            1920,
+            1080,
+            &[],
+        )
+        .expect("HDR plan should exist");
+
+        assert_eq!(plan.format, BackBufferFormat::Rgba16Float);
+        assert_eq!(plan.constants.hdr, 1);
+    }
+
+    #[test]
+    fn gpu_draw_plan_preserves_non_default_domain_for_shader_constants() {
+        let identity = test_identity();
+        let mut lut = identity_cube();
+        lut.domain_min = [-1.0, 0.0, 0.0];
+        let assignments =
+            crate::state::assignments_from_payload(&payload([(identity, ColorMode::Sdr, lut)]));
+        let plan = prepare_gpu_draw_plan(
+            &assignments,
+            Some(identity),
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            1920,
+            1080,
+            &[],
+        )
+        .expect("plan should exist");
+
+        assert_eq!(plan.constants.domain_min, [-1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(plan.constants.domain_max, [1.0, 1.0, 1.0, 0.0]);
     }
 
     fn assert_vec2_near(actual: [f32; 2], expected: [f32; 2]) {

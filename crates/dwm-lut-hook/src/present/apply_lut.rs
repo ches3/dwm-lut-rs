@@ -4,7 +4,7 @@ use std::ptr;
 #[cfg(debug_assertions)]
 use std::sync::{Mutex, OnceLock};
 
-use crate::DirtyRect;
+use super::DirtyRect;
 use crate::state;
 use dwm_lut_payload::MonitorIdentity;
 
@@ -146,11 +146,11 @@ fn emit_present_lut_outcome(
     {
         if should_log_frame {
             debug_log!(
-                "event=present_lut_frame overlay_swap_chain=0x{:x} acquired=1 applied={} draw={} decision={:?} dxgi_format={:?} width={:?} height={:?} lut_index={:?} back_buffer_id={} dirty_rects={:?} present_dirty_rect={:?} monitor_identity={} hardware_protected={}",
+                "event=present_lut_frame overlay_swap_chain=0x{:x} acquired=1 applied={} draw={} lut_active={} dxgi_format={:?} width={:?} height={:?} lut_index={:?} back_buffer_id={} dirty_rects={:?} present_dirty_rect={:?} monitor_identity={} hardware_protected={}",
                 overlay_swap_chain,
                 u8::from(outcome.lut_applied()),
                 outcome.draw.as_str(),
-                outcome.decision,
+                u8::from(outcome.lut_active),
                 outcome.dxgi_format,
                 outcome.width,
                 outcome.height,
@@ -216,7 +216,7 @@ pub(crate) fn apply_lut(
         return outcome;
     }
 
-    let Some(lut_pipeline) = state::lut_pipeline() else {
+    let Some(assignments) = state::assignments() else {
         emit_present_lut_acquire_error(
             overlay_swap_chain,
             crate::d3d11::RenderAcquireError::Unavailable,
@@ -239,7 +239,7 @@ pub(crate) fn apply_lut(
             profile.swap_chain,
             inputs.monitor_identity,
             &inputs.dirty_rects,
-            &lut_pipeline,
+            &assignments,
         )
     } {
         Err(error) => {
@@ -258,7 +258,7 @@ pub(crate) fn apply_lut(
                 outcome.rect_vec =
                     full_present_rect_vec(rect, present_rect_storage, present_rect_vec_storage);
             }
-            state::update_present_context(this, render_outcome.decision);
+            state::update_present_context(this, render_outcome.lut_active);
         }
     }
 
@@ -297,12 +297,31 @@ mod tests {
         activate_context, initialize_test_state, initialize_test_state_from_payload,
         test_monitor_identity, test_payload,
     };
+    use super::DirtyRect;
     use super::{ApplyOutcome, apply_lut, empty_rect_vec_storage};
-    use crate::BackBufferFormat;
-    use crate::DirtyRect;
-    use crate::lut_pipeline::DXGI_FORMAT_R16G16B16A16_FLOAT;
+    use crate::d3d11::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT};
     use crate::state;
     use crate::state::HOOK_GLOBAL_TEST_LOCK;
+
+    fn sample_outcome(
+        lut_active: bool,
+        lut_index: Option<usize>,
+        dxgi_format: Option<u32>,
+        draw: crate::d3d11::PresentDrawStatus,
+        present_dirty_rect: Option<DirtyRect>,
+    ) -> crate::d3d11::PresentLutOutcome {
+        crate::d3d11::PresentLutOutcome {
+            lut_active,
+            present_dirty_rect,
+            draw,
+            dxgi_format,
+            width: None,
+            height: None,
+            lut_index,
+            #[cfg(debug_assertions)]
+            back_buffer_id: None,
+        }
+    }
 
     fn sample_inputs(hardware_protected: bool, dirty_rects: Vec<DirtyRect>) -> PresentInputs {
         PresentInputs {
@@ -345,27 +364,17 @@ mod tests {
             bottom: 64,
         }];
         let inputs = sample_inputs(false, dirty_rects.clone());
-        crate::d3d11::set_fake_render_result(Ok(crate::d3d11::PresentLutOutcome {
-            decision: crate::lut_pipeline::LutDecision::Apply {
-                format: BackBufferFormat::Bgra8Unorm,
-                lut_index: 0,
-            },
-            present_dirty_rect: None,
-            draw: crate::d3d11::PresentDrawStatus::Applied { full_redraw: false },
-            dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
-            width: None,
-            height: None,
-            lut_index: Some(0),
-            #[cfg(debug_assertions)]
-            back_buffer_id: None,
-        }));
+        crate::d3d11::set_fake_render_result(Ok(sample_outcome(
+            true,
+            Some(0),
+            Some(DXGI_FORMAT_B8G8R8A8_UNORM),
+            crate::d3d11::PresentDrawStatus::Applied { full_redraw: false },
+            None,
+        )));
 
         let _ = run_apply(this, overlay_swap_chain, &inputs);
 
-        let context = state::present_context(this)
-            .expect("successful LUT render should keep the context active");
-        assert_eq!(context.lut_index, 0);
-        assert_eq!(context.back_buffer_format, BackBufferFormat::Bgra8Unorm);
+        assert!(state::has_present_context(this));
         let render_call = crate::d3d11::fake_render_present_lut_call()
             .expect("renderer should receive present inputs");
         assert_eq!(render_call.overlay_swap_chain, overlay_swap_chain);
@@ -375,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_lut_records_decision_format_into_present_context() {
+    fn apply_lut_activates_context_for_hdr_render_plan() {
         let _guard = HOOK_GLOBAL_TEST_LOCK
             .lock()
             .expect("test mutex should lock");
@@ -391,27 +400,17 @@ mod tests {
                 bottom: 64,
             }],
         );
-        crate::d3d11::set_fake_render_result(Ok(crate::d3d11::PresentLutOutcome {
-            decision: crate::lut_pipeline::LutDecision::Apply {
-                format: BackBufferFormat::Rgba16Float,
-                lut_index: 1,
-            },
-            present_dirty_rect: None,
-            draw: crate::d3d11::PresentDrawStatus::Applied { full_redraw: false },
-            dxgi_format: Some(DXGI_FORMAT_R16G16B16A16_FLOAT),
-            width: None,
-            height: None,
-            lut_index: Some(1),
-            #[cfg(debug_assertions)]
-            back_buffer_id: None,
-        }));
+        crate::d3d11::set_fake_render_result(Ok(sample_outcome(
+            true,
+            Some(1),
+            Some(DXGI_FORMAT_R16G16B16A16_FLOAT),
+            crate::d3d11::PresentDrawStatus::Applied { full_redraw: false },
+            None,
+        )));
 
         let _ = run_apply(this, 0x2222, &inputs);
 
-        let context =
-            state::present_context(this).expect("HDR render plan should keep the context active");
-        assert_eq!(context.back_buffer_format, BackBufferFormat::Rgba16Float);
-        assert_eq!(context.lut_index, 1);
+        assert!(state::has_present_context(this));
         crate::d3d11::reset_fake_render_result();
     }
 
@@ -434,20 +433,13 @@ mod tests {
             right: 1920,
             bottom: 1080,
         };
-        crate::d3d11::set_fake_render_result(Ok(crate::d3d11::PresentLutOutcome {
-            decision: crate::lut_pipeline::LutDecision::Apply {
-                format: BackBufferFormat::Bgra8Unorm,
-                lut_index: 0,
-            },
-            present_dirty_rect: Some(full_rect),
-            draw: crate::d3d11::PresentDrawStatus::Applied { full_redraw: true },
-            dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
-            width: None,
-            height: None,
-            lut_index: Some(0),
-            #[cfg(debug_assertions)]
-            back_buffer_id: None,
-        }));
+        crate::d3d11::set_fake_render_result(Ok(sample_outcome(
+            true,
+            Some(0),
+            Some(DXGI_FORMAT_B8G8R8A8_UNORM),
+            crate::d3d11::PresentDrawStatus::Applied { full_redraw: true },
+            Some(full_rect),
+        )));
 
         let mut present_rect_storage = [DirtyRect {
             left: 0,
@@ -492,29 +484,19 @@ mod tests {
                 bottom: 64,
             }],
         );
-        crate::d3d11::set_fake_render_result(Ok(crate::d3d11::PresentLutOutcome {
-            decision: crate::lut_pipeline::LutDecision::Apply {
-                format: BackBufferFormat::Bgra8Unorm,
-                lut_index: 0,
-            },
-            present_dirty_rect: None,
-            draw: crate::d3d11::PresentDrawStatus::Failed(
+        crate::d3d11::set_fake_render_result(Ok(sample_outcome(
+            true,
+            Some(0),
+            Some(DXGI_FORMAT_B8G8R8A8_UNORM),
+            crate::d3d11::PresentDrawStatus::Failed(
                 crate::d3d11::PresentDrawFailReason::DrawFailed,
             ),
-            dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
-            width: None,
-            height: None,
-            lut_index: Some(0),
-            #[cfg(debug_assertions)]
-            back_buffer_id: None,
-        }));
+            None,
+        )));
 
         let _ = run_apply(this, 0x2222, &inputs);
 
-        let context = state::present_context(this)
-            .expect("apply decision should keep the context active across a missed render");
-        assert_eq!(context.lut_index, 0);
-        assert_eq!(context.back_buffer_format, BackBufferFormat::Bgra8Unorm);
+        assert!(state::has_present_context(this));
         crate::d3d11::reset_fake_render_result();
     }
 
@@ -535,23 +517,19 @@ mod tests {
                 bottom: 64,
             }],
         );
-        crate::d3d11::set_fake_render_result(Ok(crate::d3d11::PresentLutOutcome {
-            decision: crate::lut_pipeline::LutDecision::NotApplicable,
-            present_dirty_rect: None,
-            draw: crate::d3d11::PresentDrawStatus::Skipped(
+        crate::d3d11::set_fake_render_result(Ok(sample_outcome(
+            false,
+            None,
+            Some(DXGI_FORMAT_R16G16B16A16_FLOAT),
+            crate::d3d11::PresentDrawStatus::Skipped(
                 crate::d3d11::DrawPlanSkipReason::MissingAssignment,
             ),
-            dxgi_format: Some(DXGI_FORMAT_R16G16B16A16_FLOAT),
-            width: None,
-            height: None,
-            lut_index: None,
-            #[cfg(debug_assertions)]
-            back_buffer_id: None,
-        }));
+            None,
+        )));
 
         let _ = run_apply(this, 0x2222, &inputs);
 
-        assert!(state::present_context(this).is_none());
+        assert!(!state::has_present_context(this));
         crate::d3d11::reset_fake_render_result();
     }
 
@@ -563,13 +541,7 @@ mod tests {
         state::reset_state_for_tests();
         initialize_test_state_from_payload(test_payload(&[ColorMode::Hdr]));
         let this = 0x1111;
-        state::update_present_context(
-            this,
-            crate::lut_pipeline::LutDecision::Apply {
-                format: BackBufferFormat::Rgba16Float,
-                lut_index: 0,
-            },
-        );
+        state::update_present_context(this, true);
         crate::d3d11::reset_fake_render_result();
         let inputs = sample_inputs(
             false,
@@ -583,10 +555,7 @@ mod tests {
 
         let _ = run_apply(this, 0x2222, &inputs);
 
-        let context = state::present_context(this)
-            .expect("acquire failure must not clear an active HDR context");
-        assert_eq!(context.back_buffer_format, BackBufferFormat::Rgba16Float);
-        assert_eq!(context.lut_index, 0);
+        assert!(state::has_present_context(this));
     }
 
     #[test]
@@ -595,20 +564,13 @@ mod tests {
             .lock()
             .expect("test mutex should lock");
         initialize_test_state();
-        crate::d3d11::set_fake_render_result(Ok(crate::d3d11::PresentLutOutcome {
-            decision: crate::lut_pipeline::LutDecision::Apply {
-                format: BackBufferFormat::Bgra8Unorm,
-                lut_index: 0,
-            },
-            present_dirty_rect: None,
-            draw: crate::d3d11::PresentDrawStatus::Applied { full_redraw: false },
-            dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
-            width: None,
-            height: None,
-            lut_index: Some(0),
-            #[cfg(debug_assertions)]
-            back_buffer_id: None,
-        }));
+        crate::d3d11::set_fake_render_result(Ok(sample_outcome(
+            true,
+            Some(0),
+            Some(DXGI_FORMAT_B8G8R8A8_UNORM),
+            crate::d3d11::PresentDrawStatus::Applied { full_redraw: false },
+            None,
+        )));
 
         assert_eq!(state::begin_shutdown(), state::ShutdownStart::Started);
 

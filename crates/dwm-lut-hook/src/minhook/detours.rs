@@ -600,13 +600,7 @@ mod tests {
     }
 
     fn activate_context(context_address: usize) {
-        state::update_present_context(
-            context_address,
-            crate::lut_pipeline::LutDecision::Apply {
-                format: crate::BackBufferFormat::Bgra8Unorm,
-                lut_index: 0,
-            },
-        );
+        state::update_present_context(context_address, true);
     }
 
     #[test]
@@ -623,7 +617,7 @@ mod tests {
             unsafe { super::direct_flip_detour(0x1234, 0, 0, 0, 0, 0) },
             0
         );
-        assert!(state::present_context(0x1234).is_some());
+        assert!(state::has_present_context(0x1234));
     }
 
     #[test]
@@ -716,13 +710,10 @@ mod tests {
             bottom: 1080,
         };
         crate::d3d11::set_fake_render_result(Ok(crate::d3d11::PresentLutOutcome {
-            decision: crate::lut_pipeline::LutDecision::Apply {
-                format: crate::BackBufferFormat::Bgra8Unorm,
-                lut_index: 0,
-            },
+            lut_active: true,
             present_dirty_rect: Some(full_rect),
             draw: crate::d3d11::PresentDrawStatus::Applied { full_redraw: true },
-            dxgi_format: Some(crate::lut_pipeline::DXGI_FORMAT_B8G8R8A8_UNORM),
+            dxgi_format: Some(crate::d3d11::DXGI_FORMAT_B8G8R8A8_UNORM),
             width: None,
             height: None,
             lut_index: Some(0),
