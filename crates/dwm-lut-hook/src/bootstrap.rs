@@ -7,6 +7,7 @@ use dwm_lut_payload::{
 };
 
 use crate::flip_gate::FlipGateEffects;
+use crate::log;
 use std::sync::Arc;
 
 use crate::minhook::{
@@ -188,7 +189,7 @@ pub(crate) fn initialize_with_resolution(
 }
 
 pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) -> u32 {
-    debug_log!("event=initialize_start");
+    log::initialize_start();
 
     if payload_buffer.is_null() {
         return InitializeStatus::NullPayload as u32;
@@ -198,11 +199,7 @@ pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) 
         Ok(payload) => payload,
         Err(error) => {
             let status = map_payload_error_to_initialize_status(&error);
-            debug_log!(
-                "event=initialize_failed status={} error={}",
-                status as u32,
-                crate::debug_log::quoted(error.to_string())
-            );
+            log::initialize_failed(status, &error);
             return status as u32;
         }
     };
@@ -210,20 +207,24 @@ pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) 
     match initialize_from_payload(payload) {
         Ok(()) => {
             crate::desktop_redraw::request_desktop_redraw();
-            debug_log!("event=initialize_success");
+            log::initialize_success();
             InitializeStatus::Success as u32
         }
-        Err(error) => finish_initialize_error(error),
+        Err(error) => {
+            let message = error.to_string();
+            let status = map_hook_error(error);
+            log::initialize_failed(status, message);
+            status as u32
+        }
     }
 }
 
 pub(crate) fn ffi_shutdown() -> u32 {
-    debug_log!("event=shutdown_start");
+    log::shutdown_start();
     if is_initialization_in_progress() {
-        debug_log!(
-            "event=shutdown_finished status={} reason={}",
-            ShutdownStatus::AlreadyInProgress as u32,
-            crate::debug_log::quoted("initialization_in_progress")
+        log::shutdown_finished_reason(
+            ShutdownStatus::AlreadyInProgress,
+            "initialization_in_progress",
         );
         return ShutdownStatus::AlreadyInProgress as u32;
     }
@@ -231,86 +232,53 @@ pub(crate) fn ffi_shutdown() -> u32 {
     match begin_shutdown() {
         ShutdownStart::Started => {}
         ShutdownStart::NotInitialized => {
-            debug_log!(
-                "event=shutdown_finished status={} reason={}",
-                ShutdownStatus::NotInitialized as u32,
-                crate::debug_log::quoted("not_initialized")
-            );
+            log::shutdown_finished_reason(ShutdownStatus::NotInitialized, "not_initialized");
             return ShutdownStatus::NotInitialized as u32;
         }
         ShutdownStart::AlreadyInProgress => {
-            debug_log!(
-                "event=shutdown_finished status={} reason={}",
-                ShutdownStatus::AlreadyInProgress as u32,
-                crate::debug_log::quoted("already_in_progress")
-            );
+            log::shutdown_finished_reason(ShutdownStatus::AlreadyInProgress, "already_in_progress");
             return ShutdownStatus::AlreadyInProgress as u32;
         }
         ShutdownStart::AlreadyShutDown => {
-            debug_log!(
-                "event=shutdown_finished status={} reason={}",
-                ShutdownStatus::AlreadyShutDown as u32,
-                crate::debug_log::quoted("already_shutdown")
-            );
+            log::shutdown_finished_reason(ShutdownStatus::AlreadyShutDown, "already_shutdown");
             return ShutdownStatus::AlreadyShutDown as u32;
         }
     }
 
     let Some((minhook, hooks)) = minhook_cleanup_plan() else {
         clear_state_after_shutdown();
-        debug_log!(
-            "event=shutdown_finished status={} reason={}",
-            ShutdownStatus::Success as u32,
-            crate::debug_log::quoted("state_missing")
-        );
+        log::shutdown_finished_reason(ShutdownStatus::Success, "state_missing");
         return ShutdownStatus::Success as u32;
     };
 
     let cleanup_failures = {
         let _present_guard = lock_present_runtime();
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
         let renderer_device_count = crate::d3d11::shutdown_renderer_resources();
         crate::state::clear_present_session();
-        debug_log!(
-            "event=renderer_resources_released device_resource_count={}",
-            renderer_device_count
-        );
+        log::renderer_resources_released(renderer_device_count);
         crate::desktop_redraw::request_desktop_redraw();
         disable_registered_hooks(&minhook, &hooks)
     };
-    #[cfg(debug_assertions)]
-    {
-        for failure in &cleanup_failures {
-            debug_log!(
-                "event=minhook_cleanup_failed operation={:?} target={} status={}",
-                failure.operation,
-                crate::debug_log::quoted(failure.target.label()),
-                failure.status
-            );
-        }
+    for failure in &cleanup_failures {
+        log::minhook_cleanup_failed(*failure);
     }
 
     retain_state_after_shutdown();
     finish_shutdown();
     if !cleanup_failures.is_empty() {
-        debug_log!(
-            "event=shutdown_finished status={} cleanup_failure_count={}",
-            ShutdownStatus::MinHookCleanupFailed as u32,
-            cleanup_failures.len()
+        log::shutdown_finished_cleanup(
+            ShutdownStatus::MinHookCleanupFailed,
+            cleanup_failures.len(),
         );
         ShutdownStatus::MinHookCleanupFailed as u32
     } else {
-        debug_log!(
-            "event=shutdown_finished status={} cleanup_failure_count={}",
-            ShutdownStatus::Success as u32,
-            cleanup_failures.len()
-        );
+        log::shutdown_finished_cleanup(ShutdownStatus::Success, cleanup_failures.len());
         ShutdownStatus::Success as u32
     }
 }
 
 pub(crate) unsafe fn ffi_replace_assignments(payload_buffer: *const DwmLutPayloadBuffer) -> u32 {
-    debug_log!("event=replace_assignments_start");
+    log::replace_assignments_start();
 
     if payload_buffer.is_null() {
         return ReplaceAssignmentsStatus::NullPayload as u32;
@@ -320,21 +288,21 @@ pub(crate) unsafe fn ffi_replace_assignments(payload_buffer: *const DwmLutPayloa
         Ok(payload) => payload,
         Err(error) => {
             let status = map_payload_error_to_replace_assignments_status(&error);
-            debug_log!(
-                "event=replace_assignments_failed status={} error={}",
-                status as u32,
-                crate::debug_log::quoted(error.to_string())
-            );
+            log::replace_assignments_failed(status, &error);
             return status as u32;
         }
     };
 
     match replace_assignments(payload) {
         Ok(()) => {
-            debug_log!("event=replace_assignments_success");
+            log::replace_assignments_success();
             ReplaceAssignmentsStatus::Success as u32
         }
-        Err(error) => finish_replace_assignments_error(error),
+        Err(error) => {
+            let status = map_replace_assignments_error(&error);
+            log::replace_assignments_failed(status, &error);
+            status as u32
+        }
     }
 }
 
@@ -344,46 +312,19 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
     }
     let _guard = enter_replace_assignments()?;
 
-    debug_log!(
-        "event=replace_assignments_decoded assignment_count={}",
-        payload.assignments.len()
-    );
+    log::replace_assignments_decoded(payload.assignments.len());
 
     let assignments = assignments_from_payload(&payload);
-    debug_log!(
-        "event=replace_assignments_luts_prepared lut_count={}",
-        assignments.len()
-    );
+    log::replace_assignments_luts_prepared(assignments.len());
 
-    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let renderer_device_count = {
         let _present_guard = lock_present_runtime();
         replace_lut_assignments(payload, assignments)?;
         crate::d3d11::shutdown_renderer_resources()
     };
-    debug_log!(
-        "event=replace_assignments_renderer_resources_released device_resource_count={}",
-        renderer_device_count
-    );
+    log::replace_assignments_renderer_resources_released(renderer_device_count);
     crate::desktop_redraw::request_desktop_redraw();
     Ok(())
-}
-
-#[cfg(debug_assertions)]
-fn finish_replace_assignments_error(error: ReplaceAssignmentsError) -> u32 {
-    let error_message = error.to_string();
-    let status = map_replace_assignments_error(&error);
-    debug_log!(
-        "event=replace_assignments_failed status={} error={}",
-        status as u32,
-        crate::debug_log::quoted(error_message)
-    );
-    status as u32
-}
-
-#[cfg(not(debug_assertions))]
-fn finish_replace_assignments_error(error: ReplaceAssignmentsError) -> u32 {
-    map_replace_assignments_error(&error) as u32
 }
 
 fn map_replace_assignments_error(error: &ReplaceAssignmentsError) -> ReplaceAssignmentsStatus {
@@ -397,23 +338,6 @@ fn map_replace_assignments_error(error: &ReplaceAssignmentsError) -> ReplaceAssi
             map_payload_error_to_replace_assignments_status(error)
         }
     }
-}
-
-#[cfg(debug_assertions)]
-fn finish_initialize_error(error: HookError) -> u32 {
-    let error_message = error.to_string();
-    let status = map_hook_error(error);
-    debug_log!(
-        "event=initialize_failed status={} error={}",
-        status as u32,
-        crate::debug_log::quoted(error_message)
-    );
-    status as u32
-}
-
-#[cfg(not(debug_assertions))]
-fn finish_initialize_error(error: HookError) -> u32 {
-    map_hook_error(error) as u32
 }
 
 fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
@@ -430,22 +354,15 @@ fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
 fn selected_profile() -> Result<HookProfile, HookError> {
     let dwmcore_version = dwmcore_file_version()?;
     let entry = select_versioned_profile(dwmcore_version)?;
-    debug_log!(
-        "event=profile_selected min_version={} dwmcore_version={}",
-        entry.min_version,
-        dwmcore_version
-    );
+    log::profile_selected(entry.min_version, dwmcore_version);
     Ok((entry.profile)())
 }
 
 fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
-    debug_log!(
-        "event=payload_decoded assignment_count={}",
-        payload.assignments.len()
-    );
+    log::payload_decoded(payload.assignments.len());
 
     let assignments = assignments_from_payload(&payload);
-    debug_log!("event=luts_prepared lut_count={}", assignments.len());
+    log::luts_prepared(assignments.len());
 
     let Some((minhook, _hooks)) = reactivate_retained_state(payload, assignments) else {
         return Err(HookError::AlreadyInitialized);
@@ -455,14 +372,13 @@ fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
         return Err(HookError::MinHook(error));
     }
     finish_reactivation();
-    debug_log!("event=hooks_reenabled");
+    log::hooks_reenabled();
     Ok(())
 }
 
 fn install_prepared_state(state: HookState) -> Result<(), HookError> {
     let minhook = state.runtime.minhook;
     let hooks = state.runtime.hooks.clone();
-    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let hook_count = hooks.len();
 
     install_state(state).map_err(|state| {
@@ -477,7 +393,7 @@ fn install_prepared_state(state: HookState) -> Result<(), HookError> {
         return Err(HookError::MinHook(error));
     }
 
-    debug_log!("event=hooks_enabled hook_count={hook_count}");
+    log::hooks_enabled(hook_count);
     Ok(())
 }
 
@@ -498,39 +414,24 @@ fn prepare_initial_state_from_payload_with_profile_resolver<F>(
 where
     F: FnOnce(&HookProfile) -> Result<SignatureResolutionReport, HookResolveError>,
 {
-    debug_log!(
-        "event=payload_decoded assignment_count={}",
-        payload.assignments.len()
-    );
+    log::payload_decoded(payload.assignments.len());
 
     let assignments = assignments_from_payload(&payload);
-    debug_log!("event=luts_prepared lut_count={}", assignments.len());
+    log::luts_prepared(assignments.len());
 
     let resolution = resolver(&profile)?;
-    debug_log!(
-        "event=signatures_resolved module={} module_base=0x{:x} module_size=0x{:x} target_count={} skipped_count={}",
-        crate::debug_log::quoted(resolution.module.module_name),
+    log::signatures_resolved(
+        resolution.module.module_name,
         resolution.module.base_address,
         resolution.module.size,
         resolution.targets.len(),
-        resolution.skipped_signatures.len()
+        resolution.skipped_signatures.len(),
     );
-    #[cfg(debug_assertions)]
-    {
-        for target in &resolution.targets {
-            debug_log!(
-                "event=signature_resolved target={} address=0x{:x}",
-                crate::debug_log::quoted(target.target.label()),
-                target.address
-            );
-        }
-        for skipped in &resolution.skipped_signatures {
-            debug_log!(
-                "event=signature_skipped target={} reason={:?}",
-                crate::debug_log::quoted(skipped.target.label()),
-                skipped.reason
-            );
-        }
+    for target in &resolution.targets {
+        log::signature_resolved(target.target, target.address);
+    }
+    for skipped in &resolution.skipped_signatures {
+        log::signature_skipped(skipped.target, skipped.reason);
     }
 
     finalize_initial_state(payload, profile, resolution, assignments)
@@ -553,7 +454,7 @@ fn finalize_initial_state(
 ) -> Result<HookState, HookError> {
     let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
     let (minhook, registered_hooks) = register_plan(&registration_plan)?;
-    debug_log!("event=hooks_created hook_count={}", registered_hooks.len());
+    log::hooks_created(registered_hooks.len());
 
     let overlay_test_mode_address = resolution
         .targets
@@ -567,10 +468,9 @@ fn finalize_initial_state(
         .find(|target| target.target == crate::profile::HookTarget::DisableIndependentFlip)
         .map(|target| target.address)
         .filter(|address| *address != 0);
-    debug_log!(
-        "event=disable_independent_flip_address present={} address=0x{:x}",
+    log::disable_independent_flip_address(
         disable_independent_flip_address.is_some(),
-        disable_independent_flip_address.unwrap_or(0)
+        disable_independent_flip_address.unwrap_or(0),
     );
     let flip_gate_effects =
         FlipGateEffects::new(overlay_test_mode_address, disable_independent_flip_address);

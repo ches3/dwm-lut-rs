@@ -7,6 +7,7 @@ use apply_lut::apply_lut;
 use collect::{RectVec, collect_present_inputs};
 
 pub(crate) use apply_lut::empty_rect_vec_storage;
+pub(crate) use collect::PresentInputError;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,18 +45,7 @@ pub(crate) fn prepare_present(
             }
         }
         Err(error) => {
-            #[cfg(debug_assertions)]
-            {
-                debug_log!(
-                    "event=present_input_collect_error this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x} error={:?}",
-                    this,
-                    overlay_swap_chain,
-                    rect_vec,
-                    error
-                );
-            }
-            #[cfg(not(debug_assertions))]
-            let _ = error;
+            crate::log::present_input_collect_error(this, overlay_swap_chain, rect_vec, error);
             state::deactivate_present_context(this);
             PreparedPresent { rect_vec }
         }

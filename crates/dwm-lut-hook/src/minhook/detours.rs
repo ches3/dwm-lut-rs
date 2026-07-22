@@ -1,16 +1,16 @@
 use std::ffi::c_void;
 use std::ptr;
-#[cfg(debug_assertions)]
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 use crate::DirtyRect;
 use crate::flip_gate;
+#[cfg(debug_assertions)]
+use crate::log::SharedLimiter;
 use crate::profile::HookTarget;
 use crate::state;
 
 #[cfg(debug_assertions)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum FlipGateKind {
     OverlayContextDirectFlip,
     DirectFlipInfoEnsureIndependentFlip,
@@ -30,42 +30,19 @@ impl FlipGateKind {
             Self::IsAdvancedDirectFlipCompatible => "is_advanced_direct_flip_compatible",
         }
     }
-
-    const fn index(self) -> usize {
-        match self {
-            Self::OverlayContextDirectFlip => 0,
-            Self::DirectFlipInfoEnsureIndependentFlip => 1,
-            Self::IsDirectFlipSupportedOnTarget => 2,
-            Self::LegacySwapChainCheckDirectFlip => 3,
-            Self::IsAdvancedDirectFlipCompatible => 4,
-        }
-    }
 }
 
 #[cfg(debug_assertions)]
-const FLIP_GATE_DENIED_SAMPLE_INTERVAL: u64 = 600;
-
-#[cfg(debug_assertions)]
-static FLIP_GATE_DENIED_COUNTS: [AtomicU64; 5] = [
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-];
+static FLIP_GATE_DENIED_LIMITER: SharedLimiter<FlipGateKind> = SharedLimiter::new(600);
 
 #[cfg(debug_assertions)]
 fn record_flip_gate_denied(kind: FlipGateKind, original: bool, result: bool) {
     if !original || result {
         return;
     }
-    let denied = FLIP_GATE_DENIED_COUNTS[kind.index()].fetch_add(1, Ordering::Relaxed) + 1;
-    if denied == 1 || denied <= 8 || denied.is_multiple_of(FLIP_GATE_DENIED_SAMPLE_INTERVAL) {
-        debug_log!(
-            "event=flip_gate_denied gate={} denied_total={}",
-            kind.label(),
-            denied
-        );
+    let decision = FLIP_GATE_DENIED_LIMITER.sample(kind);
+    if decision.should_log {
+        crate::log::flip_gate_denied(kind.label(), decision.count);
     }
 }
 

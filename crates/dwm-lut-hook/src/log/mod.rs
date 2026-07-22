@@ -1,20 +1,78 @@
+mod events;
+
+pub(crate) use events::*;
+
 #[cfg(debug_assertions)]
-macro_rules! debug_log {
-    ($($arg:tt)*) => {
-        crate::debug_log::write(format_args!($($arg)*))
-    };
+use std::collections::BTreeMap;
+#[cfg(debug_assertions)]
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SampleDecision {
+    pub should_log: bool,
+    pub count: u64,
 }
 
-#[cfg(not(debug_assertions))]
-macro_rules! debug_log {
-    ($($arg:tt)*) => {};
+#[cfg(debug_assertions)]
+pub(crate) struct Limiter<K> {
+    counts: BTreeMap<K, u64>,
+}
+
+#[cfg(debug_assertions)]
+impl<K> Default for Limiter<K> {
+    fn default() -> Self {
+        Self {
+            counts: BTreeMap::new(),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl<K: Ord> Limiter<K> {
+    pub(crate) fn sample(&mut self, key: K, interval: u64) -> SampleDecision {
+        let count = self.counts.entry(key).or_insert(0);
+        *count = count.saturating_add(1);
+        let count = *count;
+        SampleDecision {
+            should_log: count == 1 || count.is_multiple_of(interval),
+            count,
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+pub(crate) struct SharedLimiter<K> {
+    interval: u64,
+    limiter: OnceLock<Mutex<Limiter<K>>>,
+}
+
+#[cfg(debug_assertions)]
+impl<K: Ord> SharedLimiter<K> {
+    pub(crate) const fn new(interval: u64) -> Self {
+        Self {
+            interval,
+            limiter: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn sample(&self, key: K) -> SampleDecision {
+        self.limiter
+            .get_or_init(|| Mutex::new(Limiter::default()))
+            .lock()
+            .map(|mut limiter| limiter.sample(key, self.interval))
+            .unwrap_or(SampleDecision {
+                should_log: true,
+                count: 1,
+            })
+    }
 }
 
 #[cfg(debug_assertions)]
 static LOG_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[cfg(debug_assertions)]
-pub(crate) fn quoted(value: impl std::fmt::Display) -> String {
+fn quoted(value: impl std::fmt::Display) -> String {
     let value = value.to_string();
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('"');
@@ -33,7 +91,7 @@ pub(crate) fn quoted(value: impl std::fmt::Display) -> String {
 }
 
 #[cfg(debug_assertions)]
-pub(crate) fn write(args: std::fmt::Arguments<'_>) {
+fn write(args: std::fmt::Arguments<'_>) {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::sync::atomic::Ordering;
@@ -102,4 +160,38 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     let month = month_part + if month_part < 10 { 3 } else { -9 };
 
     (year + i64::from(month <= 2), month as u32, day as u32)
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use super::Limiter;
+
+    #[test]
+    fn limiter_emits_first_and_every_interval() {
+        let mut limiter = Limiter::default();
+        let interval = 300;
+        let decision = limiter.sample(1u8, interval);
+        assert!(decision.should_log);
+        assert_eq!(decision.count, 1);
+        for expected in 2..interval {
+            let decision = limiter.sample(1u8, interval);
+            assert!(!decision.should_log);
+            assert_eq!(decision.count, expected);
+        }
+        let decision = limiter.sample(1u8, interval);
+        assert!(decision.should_log);
+        assert_eq!(decision.count, interval);
+        let decision = limiter.sample(1u8, interval);
+        assert!(!decision.should_log);
+        assert_eq!(decision.count, interval + 1);
+    }
+
+    #[test]
+    fn limiter_tracks_keys_independently() {
+        let mut limiter = Limiter::default();
+        assert!(limiter.sample(1u8, 300).should_log);
+        assert!(limiter.sample(2u8, 300).should_log);
+        assert!(!limiter.sample(1u8, 300).should_log);
+        assert!(!limiter.sample(2u8, 300).should_log);
+    }
 }

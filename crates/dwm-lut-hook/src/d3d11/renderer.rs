@@ -287,11 +287,10 @@ impl D3D11Renderer {
                     .unwrap_or_else(|_| back_buffer.as_raw() as usize);
                 #[cfg(debug_assertions)]
                 if self.back_buffer_identity_fallbacks.insert(identity) {
-                    debug_log!(
-                        "event=back_buffer_identity_fallback reason={} back_buffer=0x{:x} identity=0x{:x}",
+                    crate::log::back_buffer_identity_fallback(
                         _reason,
                         back_buffer.as_raw() as usize,
-                        identity
+                        identity,
                     );
                 }
                 BackBufferId::ComIdentity(identity)

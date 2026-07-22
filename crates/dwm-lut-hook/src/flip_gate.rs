@@ -133,30 +133,27 @@ impl FlipGateEffects {
         if enabled && !patch.applied {
             if !is_writable_i32(patch.address) {
                 patch.rejected = true;
-                debug_log!(
-                    "event=disable_independent_flip_rejected reason={}",
-                    crate::debug_log::quoted("page_not_writable")
+                crate::log::disable_independent_flip_rejected(
+                    crate::log::DisableIndependentFlipRejectReason::PageNotWritable,
                 );
                 return;
             }
             let original_value = unsafe { read_i32(patch.address) };
             if original_value != 0 && original_value != 1 {
                 patch.rejected = true;
-                debug_log!(
-                    "event=disable_independent_flip_rejected reason={} value={}",
-                    crate::debug_log::quoted("unexpected_value"),
-                    original_value
+                crate::log::disable_independent_flip_rejected(
+                    crate::log::DisableIndependentFlipRejectReason::UnexpectedValue(original_value),
                 );
                 return;
             }
             patch.original_value = Some(original_value);
             unsafe { write_i32(patch.address, 1) };
             patch.applied = true;
-            debug_log!("event=disable_independent_flip_applied value=1");
+            crate::log::disable_independent_flip_applied();
         } else if !enabled && patch.applied {
             unsafe { write_i32(patch.address, patch.original_value.unwrap_or(0)) };
             patch.applied = false;
-            debug_log!("event=disable_independent_flip_restored");
+            crate::log::disable_independent_flip_restored();
         }
     }
 
@@ -173,7 +170,7 @@ impl FlipGateEffects {
         self.overlays_enabled_override = value;
         #[cfg(not(test))]
         crate::minhook::set_overlays_enabled_override(value);
-        debug_log!("event=overlays_enabled_override value={value:?}");
+        crate::log::overlays_enabled_override(value);
     }
 }
 

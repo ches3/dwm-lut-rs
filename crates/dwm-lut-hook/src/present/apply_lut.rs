@@ -1,184 +1,53 @@
-#[cfg(debug_assertions)]
-use std::collections::BTreeMap;
 use std::ptr;
-#[cfg(debug_assertions)]
-use std::sync::{Mutex, OnceLock};
 
 use super::DirtyRect;
+#[cfg(debug_assertions)]
+use crate::d3d11::{BackBufferId, PresentDrawStatus};
+#[cfg(debug_assertions)]
+use crate::log::SharedLimiter;
+use crate::log::{self, PresentLutAcquireFailReason};
 use crate::state;
 use dwm_lut_payload::MonitorIdentity;
 
 use super::collect::{PresentInputs, RectVec};
 
 #[cfg(debug_assertions)]
-const PRESENT_DIAGNOSTIC_SAMPLE_INTERVAL: u64 = 600;
-
-#[cfg(debug_assertions)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PresentDetourLogKey {
+struct PresentLutLogKey {
     overlay_swap_chain: usize,
+    back_buffer: Option<BackBufferId>,
 }
 
 #[cfg(debug_assertions)]
-struct DiagnosticLogLimiter<K> {
-    counts: BTreeMap<K, u64>,
-}
+static PRESENT_LUT_LOG_LIMITER: SharedLimiter<PresentLutLogKey> = SharedLimiter::new(300);
 
-#[cfg(debug_assertions)]
-impl<K> Default for DiagnosticLogLimiter<K> {
-    fn default() -> Self {
-        Self {
-            counts: BTreeMap::new(),
-        }
-    }
-}
-
-#[cfg(debug_assertions)]
-impl<K: Ord> DiagnosticLogLimiter<K> {
-    fn should_log(&mut self, key: K) -> bool {
-        self.should_log_interval(key, PRESENT_DIAGNOSTIC_SAMPLE_INTERVAL)
-    }
-
-    fn should_log_interval(&mut self, key: K, interval: u64) -> bool {
-        let count = self.counts.entry(key).or_insert(0);
-        *count = count.saturating_add(1);
-        *count == 1 || *count <= 8 || (*count).is_multiple_of(interval)
-    }
-}
-
-#[cfg(debug_assertions)]
-fn should_log_diagnostic<K: Ord>(
-    limiter: &OnceLock<Mutex<DiagnosticLogLimiter<K>>>,
-    key: K,
-) -> bool {
-    limiter
-        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
-        .lock()
-        .map(|mut limiter| limiter.should_log(key))
-        .unwrap_or(true)
-}
-
-#[cfg(debug_assertions)]
-static PRESENT_DETOUR_LOG_LIMITER: OnceLock<Mutex<DiagnosticLogLimiter<PresentDetourLogKey>>> =
-    OnceLock::new();
-
-#[cfg(debug_assertions)]
-static HW_PRESENT_DETOUR_LOG_LIMITER: OnceLock<Mutex<DiagnosticLogLimiter<PresentDetourLogKey>>> =
-    OnceLock::new();
-
-#[cfg(debug_assertions)]
-const HW_PRESENT_DETOUR_LOG_INTERVAL: u64 = 32;
-
-#[cfg(debug_assertions)]
-fn should_log_hw_present_detour_enter(overlay_swap_chain: usize) -> bool {
-    HW_PRESENT_DETOUR_LOG_LIMITER
-        .get_or_init(|| Mutex::new(DiagnosticLogLimiter::default()))
-        .lock()
-        .map(|mut limiter| {
-            limiter.should_log_interval(
-                PresentDetourLogKey { overlay_swap_chain },
-                HW_PRESENT_DETOUR_LOG_INTERVAL,
-            )
-        })
-        .unwrap_or(true)
-}
-
-fn should_log_present_detour_enter(overlay_swap_chain: usize, hardware_protected: bool) -> bool {
-    #[cfg(debug_assertions)]
-    {
-        if hardware_protected {
-            return should_log_hw_present_detour_enter(overlay_swap_chain);
-        }
-        should_log_diagnostic(
-            &PRESENT_DETOUR_LOG_LIMITER,
-            PresentDetourLogKey { overlay_swap_chain },
-        )
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = (overlay_swap_chain, hardware_protected);
-        false
-    }
-}
-
-fn emit_present_lut_acquire_error(
-    overlay_swap_chain: usize,
-    error: crate::d3d11::RenderAcquireError,
-    should_log_frame: bool,
-) {
-    #[cfg(debug_assertions)]
-    {
-        if should_log_frame {
-            debug_log!(
-                "event=present_lut_frame overlay_swap_chain=0x{:x} acquired=0 reason={}",
-                overlay_swap_chain,
-                error.as_str()
-            );
-        }
-    }
-    #[cfg(not(debug_assertions))]
-    let _ = (overlay_swap_chain, error, should_log_frame);
-}
-
-fn emit_present_lut_lock_miss(overlay_swap_chain: usize, should_log_frame: bool) {
-    #[cfg(debug_assertions)]
-    {
-        if should_log_frame {
-            debug_log!(
-                "event=present_lut_frame overlay_swap_chain=0x{:x} acquired=0 reason=lock_miss",
-                overlay_swap_chain
-            );
-        }
-    }
-    #[cfg(not(debug_assertions))]
-    let _ = (overlay_swap_chain, should_log_frame);
-}
-
-fn emit_present_lut_outcome(
+fn log_present_lut_frame(
     overlay_swap_chain: usize,
     hardware_protected: bool,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
     outcome: crate::d3d11::PresentLutOutcome,
-    should_log_frame: bool,
 ) {
     #[cfg(debug_assertions)]
     {
-        if should_log_frame {
-            debug_log!(
-                "event=present_lut_frame overlay_swap_chain=0x{:x} acquired=1 applied={} draw={} lut_active={} dxgi_format={:?} width={:?} height={:?} lut_index={:?} back_buffer_id={} dirty_rects={:?} present_dirty_rect={:?} monitor_identity={} hardware_protected={}",
+        let is_err = matches!(outcome.draw, PresentDrawStatus::Failed(_));
+        if !is_err {
+            let key = PresentLutLogKey {
                 overlay_swap_chain,
-                u8::from(outcome.lut_applied()),
-                outcome.draw.as_str(),
-                u8::from(outcome.lut_active),
-                outcome.dxgi_format,
-                outcome.width,
-                outcome.height,
-                outcome.lut_index,
-                crate::debug_log::quoted(outcome.back_buffer_id_for_log()),
-                dirty_rects,
-                outcome.present_dirty_rect,
-                crate::debug_log::quoted(format_monitor_identity_for_log(monitor_identity)),
-                u8::from(hardware_protected)
-            );
+                back_buffer: outcome.back_buffer_id,
+            };
+            if !PRESENT_LUT_LOG_LIMITER.sample(key).should_log {
+                return;
+            }
         }
     }
-    #[cfg(not(debug_assertions))]
-    let _ = (
+    log::present_lut_frame(
         overlay_swap_chain,
         hardware_protected,
         monitor_identity,
         dirty_rects,
         outcome,
-        should_log_frame,
     );
-}
-
-#[cfg(debug_assertions)]
-fn format_monitor_identity_for_log(identity: Option<MonitorIdentity>) -> String {
-    identity
-        .map(|identity| format!("{}:{}", identity.adapter_luid, identity.target_id))
-        .unwrap_or_else(|| "none".to_owned())
 }
 
 #[derive(Debug)]
@@ -196,19 +65,8 @@ pub(crate) fn apply_lut(
 ) -> ApplyOutcome {
     let mut outcome = ApplyOutcome { rect_vec };
 
-    let should_log_frame =
-        should_log_present_detour_enter(overlay_swap_chain, inputs.hardware_protected);
-    if should_log_frame {
-        debug_log!(
-            "event=present_detour_enter this=0x{:x} overlay_swap_chain=0x{:x} rect_vec=0x{:x}",
-            this,
-            overlay_swap_chain,
-            rect_vec
-        );
-    }
-
     let Some(_present_guard) = state::try_lock_present_runtime() else {
-        emit_present_lut_lock_miss(overlay_swap_chain, should_log_frame);
+        log::present_lut_acquire_failed(overlay_swap_chain, PresentLutAcquireFailReason::LockMiss);
         return outcome;
     };
 
@@ -217,18 +75,16 @@ pub(crate) fn apply_lut(
     }
 
     let Some(assignments) = state::assignments() else {
-        emit_present_lut_acquire_error(
+        log::present_lut_acquire_failed(
             overlay_swap_chain,
-            crate::d3d11::RenderAcquireError::Unavailable,
-            should_log_frame,
+            PresentLutAcquireFailReason::from(crate::d3d11::RenderAcquireError::Unavailable),
         );
         return outcome;
     };
     let Some(profile) = state::hook_profile() else {
-        emit_present_lut_acquire_error(
+        log::present_lut_acquire_failed(
             overlay_swap_chain,
-            crate::d3d11::RenderAcquireError::Unavailable,
-            should_log_frame,
+            PresentLutAcquireFailReason::from(crate::d3d11::RenderAcquireError::Unavailable),
         );
         return outcome;
     };
@@ -243,16 +99,18 @@ pub(crate) fn apply_lut(
         )
     } {
         Err(error) => {
-            emit_present_lut_acquire_error(overlay_swap_chain, error, should_log_frame);
+            log::present_lut_acquire_failed(
+                overlay_swap_chain,
+                PresentLutAcquireFailReason::from(error),
+            );
         }
         Ok(render_outcome) => {
-            emit_present_lut_outcome(
+            log_present_lut_frame(
                 overlay_swap_chain,
                 inputs.hardware_protected,
                 inputs.monitor_identity,
                 &inputs.dirty_rects,
                 render_outcome,
-                should_log_frame,
             );
             if let Some(rect) = render_outcome.present_dirty_rect {
                 outcome.rect_vec =

@@ -1,9 +1,8 @@
-#[macro_use]
-mod debug_log;
 mod bootstrap;
 mod d3d11;
 mod desktop_redraw;
 mod flip_gate;
+mod log;
 mod minhook;
 mod present;
 mod profile;
