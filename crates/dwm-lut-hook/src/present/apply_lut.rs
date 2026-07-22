@@ -362,8 +362,7 @@ mod tests {
 
         let _ = run_apply(this, overlay_swap_chain, &inputs);
 
-        let context = state::lut_bypass_runtime()
-            .and_then(|runtime| runtime.context(this).cloned())
+        let context = state::present_context(this)
             .expect("successful LUT render should keep the context active");
         assert_eq!(context.lut_index, 0);
         assert_eq!(context.back_buffer_format, BackBufferFormat::Bgra8Unorm);
@@ -376,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_lut_records_decision_format_into_bypass_state() {
+    fn apply_lut_records_decision_format_into_present_context() {
         let _guard = HOOK_GLOBAL_TEST_LOCK
             .lock()
             .expect("test mutex should lock");
@@ -409,9 +408,8 @@ mod tests {
 
         let _ = run_apply(this, 0x2222, &inputs);
 
-        let context = state::lut_bypass_runtime()
-            .and_then(|runtime| runtime.context(this).cloned())
-            .expect("HDR render plan should keep the context active");
+        let context =
+            state::present_context(this).expect("HDR render plan should keep the context active");
         assert_eq!(context.back_buffer_format, BackBufferFormat::Rgba16Float);
         assert_eq!(context.lut_index, 1);
         crate::d3d11::reset_fake_render_result();
@@ -513,8 +511,7 @@ mod tests {
 
         let _ = run_apply(this, 0x2222, &inputs);
 
-        let context = state::lut_bypass_runtime()
-            .and_then(|runtime| runtime.context(this).cloned())
+        let context = state::present_context(this)
             .expect("apply decision should keep the context active across a missed render");
         assert_eq!(context.lut_index, 0);
         assert_eq!(context.back_buffer_format, BackBufferFormat::Bgra8Unorm);
@@ -554,11 +551,7 @@ mod tests {
 
         let _ = run_apply(this, 0x2222, &inputs);
 
-        assert!(
-            state::lut_bypass_runtime()
-                .and_then(|runtime| runtime.context(this).cloned())
-                .is_none()
-        );
+        assert!(state::present_context(this).is_none());
         crate::d3d11::reset_fake_render_result();
     }
 
@@ -590,8 +583,7 @@ mod tests {
 
         let _ = run_apply(this, 0x2222, &inputs);
 
-        let context = state::lut_bypass_runtime()
-            .and_then(|runtime| runtime.context(this).cloned())
+        let context = state::present_context(this)
             .expect("acquire failure must not clear an active HDR context");
         assert_eq!(context.back_buffer_format, BackBufferFormat::Rgba16Float);
         assert_eq!(context.lut_index, 0);

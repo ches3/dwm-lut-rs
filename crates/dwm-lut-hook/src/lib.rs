@@ -4,7 +4,7 @@ mod debug_log;
 mod bootstrap;
 mod d3d11;
 mod desktop_redraw;
-mod lut_bypass;
+mod flip_gate;
 mod lut_pipeline;
 mod minhook;
 mod present;
@@ -13,8 +13,8 @@ mod resolver;
 mod state;
 
 pub use bootstrap::HookError;
-pub use lut_bypass::{
-    ContextLutState, DisableIndependentFlipPatch, LutBypassRuntime, OverlayTestModeControl,
+pub use flip_gate::{
+    ContextLutState, DisableIndependentFlipPatch, FlipGateEffects, OverlayTestModeControl,
     OverlayTestModePatch,
 };
 pub use lut_pipeline::{
@@ -33,10 +33,8 @@ pub use resolver::{
     SkippedSignatureReason, resolve_profile,
 };
 pub use state::{
-    HookRegistrationPlan, HookRegistrationTarget, HookRuntime, HookState,
-    evaluate_direct_flip_compatible, evaluate_direct_flip_support_compatible,
-    evaluate_ensure_independent_flip_state, evaluate_overlay_test_mode, hook_profile,
-    is_initialized, lut_bypass_runtime,
+    HookRegistrationPlan, HookRegistrationTarget, HookRuntime, HookState, has_active_contexts,
+    has_lut_assignments, has_present_context, hook_profile, is_initialized, present_context,
 };
 
 use std::ffi::c_void;
@@ -77,29 +75,31 @@ pub extern "system" fn dwm_lut_direct_flip_compatible(
     original_compatible: i32,
 ) -> i32 {
     let original_compatible = original_compatible != 0;
-    i32::from(
-        state::evaluate_direct_flip_compatible(context_address, original_compatible)
-            .unwrap_or(original_compatible),
-    )
+    let result = flip_gate::direct_flip_compatible(
+        state::has_present_context(context_address),
+        original_compatible,
+    );
+    i32::from(result)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn dwm_lut_ensure_independent_flip_state(original_status: i32) -> i32 {
-    state::evaluate_ensure_independent_flip_state().unwrap_or(original_status)
+    flip_gate::ensure_independent_flip_state(state::has_lut_assignments())
+        .unwrap_or(original_status)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn dwm_lut_direct_flip_support_compatible(original_compatible: i32) -> i32 {
     let original_compatible = original_compatible != 0;
-    i32::from(
-        state::evaluate_direct_flip_support_compatible(original_compatible)
-            .unwrap_or(original_compatible),
-    )
+    i32::from(flip_gate::direct_flip_support_compatible(
+        state::has_lut_assignments(),
+        original_compatible,
+    ))
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn dwm_lut_overlay_test_mode(original_mode: i32) -> i32 {
-    state::evaluate_overlay_test_mode(original_mode).unwrap_or(original_mode)
+    flip_gate::overlay_test_mode(state::has_active_contexts(), original_mode)
 }
 
 /// # Safety
@@ -121,7 +121,7 @@ pub unsafe extern "system" fn DllMain(
         }
     } else if reason == DLL_PROCESS_DETACH {
         state::mark_process_detaching();
-        state::restore_overlay_test_mode();
+        state::clear_present_session();
     }
 
     TRUE

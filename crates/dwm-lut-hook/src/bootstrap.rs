@@ -6,7 +6,7 @@ use dwm_lut_payload::{
     ShutdownStatus, deserialize_payload_buffer,
 };
 
-use crate::LutBypassRuntime;
+use crate::flip_gate::FlipGateEffects;
 use std::sync::Arc;
 
 use crate::lut_pipeline::LutPipeline;
@@ -270,7 +270,7 @@ pub(crate) fn ffi_shutdown() -> u32 {
         let _present_guard = lock_present_runtime();
         #[cfg_attr(not(debug_assertions), allow(unused_variables))]
         let renderer_device_count = crate::d3d11::shutdown_renderer_resources();
-        crate::state::restore_overlay_test_mode();
+        crate::state::clear_present_session();
         debug_log!(
             "event=renderer_resources_released device_resource_count={}",
             renderer_device_count
@@ -578,11 +578,8 @@ fn finalize_initial_state(
         disable_independent_flip_address.is_some(),
         disable_independent_flip_address.unwrap_or(0)
     );
-    let lut_bypass = LutBypassRuntime::new(
-        !payload.assignments.is_empty(),
-        overlay_test_mode_address,
-        disable_independent_flip_address,
-    );
+    let flip_gate_effects =
+        FlipGateEffects::new(overlay_test_mode_address, disable_independent_flip_address);
 
     Ok(HookState {
         payload,
@@ -591,7 +588,8 @@ fn finalize_initial_state(
             minhook,
             lut_pipeline: Arc::new(lut_pipeline),
             hooks: registered_hooks,
-            lut_bypass,
+            contexts: Default::default(),
+            flip_gate_effects,
         },
     })
 }
@@ -918,7 +916,7 @@ mod tests {
         let shutdown_calls = crate::minhook::test_minhook_call_counts();
         assert!(!state::is_initialized());
         assert!(state::hook_profile().is_none());
-        assert!(state::lut_bypass_runtime().is_none());
+        assert!(!state::has_active_contexts());
         assert_eq!(shutdown_calls.disable_calls, initialized_calls.create_calls);
         assert_eq!(shutdown_calls.remove_calls, 0);
         assert_eq!(shutdown_calls.uninitialize_calls, 0);

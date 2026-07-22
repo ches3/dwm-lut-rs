@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 #[cfg(not(test))]
 use std::ffi::c_void;
 #[cfg(not(test))]
@@ -10,7 +9,7 @@ use windows::Win32::System::Memory::{
     PAGE_GUARD, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
 };
 
-use crate::lut_pipeline::{BackBufferFormat, LutDecision};
+use crate::lut_pipeline::BackBufferFormat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayTestModeControl {
@@ -31,6 +30,14 @@ impl OverlayTestModeControl {
         match self {
             Self::Unmodified => original_mode,
             Self::ForceMode5 => 5,
+        }
+    }
+
+    pub const fn from_active_contexts(has_active_contexts: bool) -> Self {
+        if has_active_contexts {
+            Self::ForceMode5
+        } else {
+            Self::Unmodified
         }
     }
 }
@@ -57,18 +64,15 @@ pub struct DisableIndependentFlipPatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LutBypassRuntime {
+pub struct FlipGateEffects {
     pub overlay_test_mode_control: OverlayTestModeControl,
     pub overlay_test_mode_patch: Option<OverlayTestModePatch>,
     pub disable_independent_flip_patch: Option<DisableIndependentFlipPatch>,
     pub overlays_enabled_override: Option<bool>,
-    pub has_lut_assignments: bool,
-    pub contexts: BTreeMap<usize, ContextLutState>,
 }
 
-impl LutBypassRuntime {
+impl FlipGateEffects {
     pub fn new(
-        has_lut_assignments: bool,
         overlay_test_mode_address: Option<usize>,
         disable_independent_flip_address: Option<usize>,
     ) -> Self {
@@ -90,91 +94,19 @@ impl LutBypassRuntime {
                     rejected: false,
                 }),
             overlays_enabled_override: None,
-            has_lut_assignments,
-            contexts: BTreeMap::new(),
         }
     }
 
-    pub(crate) fn update_from_decision(&mut self, context_address: usize, decision: LutDecision) {
-        match decision {
-            LutDecision::Apply { format, lut_index } => {
-                self.contexts.insert(
-                    context_address,
-                    ContextLutState {
-                        back_buffer_format: format,
-                        lut_index,
-                    },
-                );
-            }
-            LutDecision::NotApplicable => {
-                self.contexts.remove(&context_address);
-            }
-        }
-
-        let active = self.has_active_contexts();
-        self.set_overlay_test_mode_control(self.overlay_test_mode_control());
+    pub fn sync_active(&mut self, active: bool) {
+        self.set_overlay_test_mode_control(OverlayTestModeControl::from_active_contexts(active));
         self.set_disable_independent_flip_enabled(active);
         self.set_overlays_enabled_override(active);
     }
 
-    pub fn direct_flip_compatible(
-        &mut self,
-        context_address: usize,
-        original_compatible: bool,
-    ) -> bool {
-        if self.contexts.contains_key(&context_address) {
-            false
-        } else {
-            original_compatible
-        }
-    }
-
-    pub fn ensure_independent_flip_state(&self) -> Option<i32> {
-        if self.has_lut_assignments {
-            Some(0)
-        } else {
-            None
-        }
-    }
-
-    pub fn direct_flip_support_compatible(&self, original_compatible: bool) -> bool {
-        if self.has_lut_assignments {
-            false
-        } else {
-            original_compatible
-        }
-    }
-
-    pub fn overlay_test_mode(&self, original_mode: i32) -> i32 {
-        self.overlay_test_mode_control().apply(original_mode)
-    }
-
-    pub fn restore_overlay_test_mode(&mut self) {
+    pub fn restore(&mut self) {
         self.set_overlay_test_mode_control(OverlayTestModeControl::Unmodified);
         self.set_disable_independent_flip_enabled(false);
         self.set_overlays_enabled_override(false);
-    }
-
-    pub fn reload_for_new_payload(&mut self, has_lut_assignments: bool) {
-        self.contexts.clear();
-        self.has_lut_assignments = has_lut_assignments;
-        self.restore_overlay_test_mode();
-    }
-
-    pub fn context(&self, context_address: usize) -> Option<&ContextLutState> {
-        self.contexts.get(&context_address)
-    }
-
-    pub fn has_active_contexts(&self) -> bool {
-        !self.contexts.is_empty()
-    }
-
-    fn overlay_test_mode_control(&self) -> OverlayTestModeControl {
-        if self.has_active_contexts() {
-            OverlayTestModeControl::ForceMode5
-        } else {
-            OverlayTestModeControl::Unmodified
-        }
     }
 
     fn set_overlay_test_mode_control(&mut self, control: OverlayTestModeControl) {
@@ -253,10 +185,33 @@ impl LutBypassRuntime {
     }
 }
 
-impl Default for LutBypassRuntime {
+impl Default for FlipGateEffects {
     fn default() -> Self {
-        Self::new(false, None, None)
+        Self::new(None, None)
     }
+}
+
+pub fn direct_flip_compatible(has_present_context: bool, original_compatible: bool) -> bool {
+    !has_present_context && original_compatible
+}
+
+pub fn ensure_independent_flip_state(has_lut_assignments: bool) -> Option<i32> {
+    if has_lut_assignments { Some(0) } else { None }
+}
+
+pub fn direct_flip_support_compatible(
+    has_lut_assignments: bool,
+    original_compatible: bool,
+) -> bool {
+    if has_lut_assignments {
+        false
+    } else {
+        original_compatible
+    }
+}
+
+pub fn overlay_test_mode(has_active_contexts: bool, original_mode: i32) -> i32 {
+    OverlayTestModeControl::from_active_contexts(has_active_contexts).apply(original_mode)
 }
 
 unsafe fn read_i32(address: usize) -> i32 {
@@ -299,12 +254,17 @@ fn is_writable_i32(address: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use dwm_lut_payload::{
         AdapterLuid, ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadAssignment,
         PayloadLut,
     };
 
-    use super::{LutBypassRuntime, OverlayTestModeControl};
+    use super::{
+        ContextLutState, FlipGateEffects, OverlayTestModeControl, direct_flip_compatible,
+        direct_flip_support_compatible, ensure_independent_flip_state, overlay_test_mode,
+    };
     use crate::lut_pipeline::{BackBufferFormat, LutDecision, LutPipeline};
 
     fn test_identity() -> MonitorIdentity {
@@ -334,33 +294,66 @@ mod tests {
         })
     }
 
-    fn apply_decision(runtime: &mut LutBypassRuntime, pipeline: &LutPipeline, context: usize) {
+    fn apply_decision(
+        contexts: &mut BTreeMap<usize, ContextLutState>,
+        effects: &mut FlipGateEffects,
+        pipeline: &LutPipeline,
+        context: usize,
+    ) {
         let decision = pipeline.decide(test_identity(), BackBufferFormat::Bgra8Unorm);
-        runtime.update_from_decision(context, decision);
+        match decision {
+            LutDecision::Apply { format, lut_index } => {
+                contexts.insert(
+                    context,
+                    ContextLutState {
+                        back_buffer_format: format,
+                        lut_index,
+                    },
+                );
+            }
+            LutDecision::NotApplicable => {
+                contexts.remove(&context);
+            }
+        }
+        effects.sync_active(!contexts.is_empty());
+    }
+
+    fn deactivate(
+        contexts: &mut BTreeMap<usize, ContextLutState>,
+        effects: &mut FlipGateEffects,
+        context: usize,
+    ) {
+        contexts.remove(&context);
+        effects.sync_active(!contexts.is_empty());
     }
 
     #[test]
     fn present_activation_blocks_promotion_for_same_context_only() {
         let pipeline = pipeline_for_single_sdr_monitor();
-        let mut runtime = LutBypassRuntime::new(true, None, None);
+        let mut contexts = BTreeMap::new();
+        let mut effects = FlipGateEffects::new(None, None);
+        let has_luts = !pipeline.luts.is_empty();
 
-        apply_decision(&mut runtime, &pipeline, 0x1234);
+        apply_decision(&mut contexts, &mut effects, &pipeline, 0x1234);
 
         assert_eq!(
-            runtime.overlay_test_mode_control,
+            effects.overlay_test_mode_control,
             OverlayTestModeControl::ForceMode5
         );
-        assert!(!runtime.direct_flip_compatible(0x1234, true));
-        assert!(!runtime.direct_flip_support_compatible(true));
-        assert_eq!(runtime.ensure_independent_flip_state(), Some(0));
-        assert_eq!(runtime.overlay_test_mode(0), 5);
-        assert!(runtime.direct_flip_compatible(0x4321, true));
+        assert!(!direct_flip_compatible(
+            contexts.contains_key(&0x1234),
+            true
+        ));
+        assert!(!direct_flip_support_compatible(has_luts, true));
+        assert_eq!(ensure_independent_flip_state(has_luts), Some(0));
+        assert_eq!(overlay_test_mode(!contexts.is_empty(), 0), 5);
+        assert!(direct_flip_compatible(contexts.contains_key(&0x4321), true));
         assert_eq!(
-            runtime.overlay_test_mode_control,
+            effects.overlay_test_mode_control,
             OverlayTestModeControl::ForceMode5
         );
 
-        let context = runtime.context(0x1234).expect("context should exist");
+        let context = contexts.get(&0x1234).expect("context should exist");
         assert_eq!(context.lut_index, 0);
         assert_eq!(context.back_buffer_format, BackBufferFormat::Bgra8Unorm);
     }
@@ -368,64 +361,58 @@ mod tests {
     #[test]
     fn present_deactivation_clears_promotion_block_for_that_context() {
         let pipeline = pipeline_for_single_sdr_monitor();
-        let mut runtime = LutBypassRuntime::new(true, None, None);
+        let mut contexts = BTreeMap::new();
+        let mut effects = FlipGateEffects::new(None, None);
+        let has_luts = !pipeline.luts.is_empty();
 
-        apply_decision(&mut runtime, &pipeline, 0x1234);
-        runtime.update_from_decision(0x1234, LutDecision::NotApplicable);
+        apply_decision(&mut contexts, &mut effects, &pipeline, 0x1234);
+        deactivate(&mut contexts, &mut effects, 0x1234);
 
-        assert!(runtime.direct_flip_compatible(0x1234, true));
-        assert!(!runtime.direct_flip_support_compatible(true));
-        assert_eq!(runtime.ensure_independent_flip_state(), Some(0));
-        assert_eq!(runtime.overlay_test_mode(0), 0);
-        assert!(runtime.context(0x1234).is_none());
+        assert!(direct_flip_compatible(contexts.contains_key(&0x1234), true));
+        assert!(!direct_flip_support_compatible(has_luts, true));
+        assert_eq!(ensure_independent_flip_state(has_luts), Some(0));
+        assert_eq!(overlay_test_mode(!contexts.is_empty(), 0), 0);
+        assert!(!contexts.contains_key(&0x1234));
     }
 
     #[test]
     fn overlay_test_mode_global_is_patched_only_while_context_is_active() {
         let pipeline = pipeline_for_single_sdr_monitor();
-        let mut overlay_test_mode = 0i32;
-        let mut runtime = LutBypassRuntime::new(
-            true,
-            Some((&mut overlay_test_mode as *mut i32) as usize),
-            None,
-        );
+        let mut overlay_mode = 0i32;
+        let mut contexts = BTreeMap::new();
+        let mut effects =
+            FlipGateEffects::new(Some((&mut overlay_mode as *mut i32) as usize), None);
 
-        apply_decision(&mut runtime, &pipeline, 0x1234);
-        assert_eq!(overlay_test_mode, 5);
+        apply_decision(&mut contexts, &mut effects, &pipeline, 0x1234);
+        assert_eq!(overlay_mode, 5);
 
-        runtime.update_from_decision(0x1234, LutDecision::NotApplicable);
-        assert_eq!(overlay_test_mode, 0);
+        deactivate(&mut contexts, &mut effects, 0x1234);
+        assert_eq!(overlay_mode, 0);
     }
 
     #[test]
     fn ensure_independent_flip_state_blocks_only_with_lut_assignments() {
-        let mut without_assignments = LutBypassRuntime::new(false, None, None);
-        assert_eq!(without_assignments.ensure_independent_flip_state(), None);
-
-        let with_assignments = LutBypassRuntime::new(true, None, None);
-        assert_eq!(with_assignments.ensure_independent_flip_state(), Some(0));
-
-        without_assignments.reload_for_new_payload(true);
-        assert_eq!(without_assignments.ensure_independent_flip_state(), Some(0));
+        assert_eq!(ensure_independent_flip_state(false), None);
+        assert_eq!(ensure_independent_flip_state(true), Some(0));
     }
 
     #[test]
     fn disable_independent_flip_is_patched_only_while_context_is_active() {
         let pipeline = pipeline_for_single_sdr_monitor();
         let mut disable_independent_flip = 0i32;
-        let mut runtime = LutBypassRuntime::new(
-            true,
+        let mut contexts = BTreeMap::new();
+        let mut effects = FlipGateEffects::new(
             None,
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
         assert_eq!(disable_independent_flip, 0);
 
-        apply_decision(&mut runtime, &pipeline, 0x1234);
+        apply_decision(&mut contexts, &mut effects, &pipeline, 0x1234);
         assert_eq!(disable_independent_flip, 1);
 
-        runtime.update_from_decision(0x1234, LutDecision::NotApplicable);
-        assert!(!runtime.has_active_contexts());
+        deactivate(&mut contexts, &mut effects, 0x1234);
+        assert!(contexts.is_empty());
         assert_eq!(disable_independent_flip, 0);
     }
 
@@ -433,17 +420,17 @@ mod tests {
     fn disable_independent_flip_rejects_unexpected_value() {
         let pipeline = pipeline_for_single_sdr_monitor();
         let mut disable_independent_flip = 7i32;
-        let mut runtime = LutBypassRuntime::new(
-            true,
+        let mut contexts = BTreeMap::new();
+        let mut effects = FlipGateEffects::new(
             None,
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
-        apply_decision(&mut runtime, &pipeline, 0x1234);
+        apply_decision(&mut contexts, &mut effects, &pipeline, 0x1234);
 
         assert_eq!(disable_independent_flip, 7);
         assert!(
-            runtime
+            effects
                 .disable_independent_flip_patch
                 .as_ref()
                 .is_some_and(|patch| patch.rejected && !patch.applied)
@@ -454,52 +441,54 @@ mod tests {
     fn overlays_enabled_override_returns_true_when_dif_is_applied() {
         let pipeline = pipeline_for_single_sdr_monitor();
         let mut disable_independent_flip = 0i32;
-        let mut runtime = LutBypassRuntime::new(
-            true,
+        let mut contexts = BTreeMap::new();
+        let mut effects = FlipGateEffects::new(
             None,
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
-        apply_decision(&mut runtime, &pipeline, 0x1234);
+        apply_decision(&mut contexts, &mut effects, &pipeline, 0x1234);
 
         assert_eq!(disable_independent_flip, 1);
-        assert_eq!(runtime.overlays_enabled_override, Some(true));
+        assert_eq!(effects.overlays_enabled_override, Some(true));
     }
 
     #[test]
     fn overlays_enabled_override_returns_false_when_dif_is_unavailable() {
         let pipeline = pipeline_for_single_sdr_monitor();
-        let mut runtime = LutBypassRuntime::new(true, None, None);
+        let mut contexts = BTreeMap::new();
+        let mut effects = FlipGateEffects::new(None, None);
 
-        apply_decision(&mut runtime, &pipeline, 0x1234);
+        apply_decision(&mut contexts, &mut effects, &pipeline, 0x1234);
 
-        assert_eq!(runtime.overlays_enabled_override, Some(false));
+        assert_eq!(effects.overlays_enabled_override, Some(false));
     }
 
     #[test]
-    fn reload_for_new_payload_clears_active_contexts_and_restores_overlay_test_mode() {
+    fn restore_clears_active_effects() {
         let pipeline = pipeline_for_single_sdr_monitor();
-        let mut overlay_test_mode = 0i32;
+        let mut overlay_mode = 0i32;
         let mut disable_independent_flip = 0i32;
-        let mut runtime = LutBypassRuntime::new(
-            true,
-            Some((&mut overlay_test_mode as *mut i32) as usize),
+        let mut contexts = BTreeMap::new();
+        let mut effects = FlipGateEffects::new(
+            Some((&mut overlay_mode as *mut i32) as usize),
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
-        apply_decision(&mut runtime, &pipeline, 0x1234);
+        apply_decision(&mut contexts, &mut effects, &pipeline, 0x1234);
 
-        assert!(runtime.has_active_contexts());
-        assert_eq!(overlay_test_mode, 5);
+        assert!(!contexts.is_empty());
+        assert_eq!(overlay_mode, 5);
         assert_eq!(disable_independent_flip, 1);
-        assert_eq!(runtime.overlays_enabled_override, Some(true));
+        assert_eq!(effects.overlays_enabled_override, Some(true));
 
-        runtime.reload_for_new_payload(true);
+        contexts.clear();
+        effects.restore();
 
-        assert!(!runtime.has_active_contexts());
-        assert_eq!(overlay_test_mode, 0);
+        assert!(contexts.is_empty());
+        assert_eq!(overlay_mode, 0);
         assert_eq!(disable_independent_flip, 0);
-        assert_eq!(runtime.overlays_enabled_override, None);
-        assert_eq!(runtime.overlay_test_mode(0), 0);
+        assert_eq!(effects.overlays_enabled_override, None);
+        assert_eq!(overlay_test_mode(false, 0), 0);
     }
 }

@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
 use dwm_lut_payload::HookPayload;
 
-use crate::lut_bypass::LutBypassRuntime;
+use crate::flip_gate::{ContextLutState, FlipGateEffects};
 use crate::lut_pipeline::{LutDecision, LutPipeline};
 use crate::minhook::{MinHookRuntime, RegisteredHook};
 use crate::profile::{HookProfile, HookTarget};
@@ -47,7 +48,8 @@ pub struct HookRuntime {
     pub minhook: MinHookRuntime,
     pub lut_pipeline: Arc<LutPipeline>,
     pub hooks: Vec<RegisteredHook>,
-    pub lut_bypass: LutBypassRuntime,
+    pub contexts: BTreeMap<usize, ContextLutState>,
+    pub flip_gate_effects: FlipGateEffects,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,8 +130,20 @@ pub(crate) fn lut_pipeline() -> Option<Arc<LutPipeline>> {
     with_state(|state| state.runtime.lut_pipeline.clone())
 }
 
-pub fn lut_bypass_runtime() -> Option<LutBypassRuntime> {
-    with_state(|state| state.runtime.lut_bypass.clone())
+pub fn present_context(context_address: usize) -> Option<ContextLutState> {
+    with_state(|state| state.runtime.contexts.get(&context_address).copied()).flatten()
+}
+
+pub fn has_present_context(context_address: usize) -> bool {
+    with_state(|state| state.runtime.contexts.contains_key(&context_address)).unwrap_or(false)
+}
+
+pub fn has_active_contexts() -> bool {
+    with_state(|state| !state.runtime.contexts.is_empty()).unwrap_or(false)
+}
+
+pub fn has_lut_assignments() -> bool {
+    with_state(|state| !state.runtime.lut_pipeline.luts.is_empty()).unwrap_or(false)
 }
 
 pub(crate) fn is_runtime_active() -> bool {
@@ -141,10 +155,22 @@ pub(crate) fn is_runtime_active() -> bool {
 
 pub(crate) fn update_present_context(context_address: usize, decision: LutDecision) {
     let _ = with_state_mut(|state| {
-        state
-            .runtime
-            .lut_bypass
-            .update_from_decision(context_address, decision);
+        match decision {
+            LutDecision::Apply { format, lut_index } => {
+                state.runtime.contexts.insert(
+                    context_address,
+                    ContextLutState {
+                        back_buffer_format: format,
+                        lut_index,
+                    },
+                );
+            }
+            LutDecision::NotApplicable => {
+                state.runtime.contexts.remove(&context_address);
+            }
+        }
+        let active = !state.runtime.contexts.is_empty();
+        state.runtime.flip_gate_effects.sync_active(active);
     });
 }
 
@@ -274,37 +300,8 @@ pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHo
     with_state(|state| (state.runtime.minhook, state.runtime.hooks.clone()))
 }
 
-pub fn evaluate_direct_flip_compatible(
-    context_address: usize,
-    original_compatible: bool,
-) -> Option<bool> {
-    with_state_mut(|state| {
-        state
-            .runtime
-            .lut_bypass
-            .direct_flip_compatible(context_address, original_compatible)
-    })
-}
-
-pub fn evaluate_ensure_independent_flip_state() -> Option<i32> {
-    with_state(|state| state.runtime.lut_bypass.ensure_independent_flip_state()).flatten()
-}
-
-pub fn evaluate_direct_flip_support_compatible(original_compatible: bool) -> Option<bool> {
-    with_state(|state| {
-        state
-            .runtime
-            .lut_bypass
-            .direct_flip_support_compatible(original_compatible)
-    })
-}
-
-pub fn evaluate_overlay_test_mode(original_mode: i32) -> Option<i32> {
-    with_state(|state| state.runtime.lut_bypass.overlay_test_mode(original_mode))
-}
-
-pub(crate) fn restore_overlay_test_mode() {
-    let _ = with_state_mut(|state| state.runtime.lut_bypass.restore_overlay_test_mode());
+pub(crate) fn clear_present_session() {
+    let _ = with_state_mut(clear_present_session_in);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,13 +320,14 @@ pub fn replace_payload_pipeline(
 }
 
 fn update_payload_pipeline(state: &mut HookState, payload: HookPayload, lut_pipeline: LutPipeline) {
-    let has_lut_assignments = !payload.assignments.is_empty();
     state.payload = payload;
     state.runtime.lut_pipeline = Arc::new(lut_pipeline);
-    state
-        .runtime
-        .lut_bypass
-        .reload_for_new_payload(has_lut_assignments);
+    clear_present_session_in(state);
+}
+
+fn clear_present_session_in(state: &mut HookState) {
+    state.runtime.contexts.clear();
+    state.runtime.flip_gate_effects.restore();
 }
 
 fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {

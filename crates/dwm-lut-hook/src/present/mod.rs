@@ -310,10 +310,6 @@ mod tests {
         );
 
         assert_eq!(prepared.rect_vec, 0);
-        assert!(
-            state::lut_bypass_runtime()
-                .and_then(|runtime| runtime.context(0x1234).cloned())
-                .is_none()
-        );
+        assert!(state::present_context(0x1234).is_none());
     }
 }

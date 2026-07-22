@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 use crate::DirtyRect;
+use crate::flip_gate;
 use crate::profile::HookTarget;
 use crate::state;
 
@@ -228,13 +229,13 @@ unsafe fn forward_bool1(slot: &AtomicPtr<c_void>, this: usize) -> u8 {
 fn evaluate_bool_detour(
     #[cfg(debug_assertions)] kind: FlipGateKind,
     original: u8,
-    evaluate: impl FnOnce(bool) -> Option<bool>,
+    evaluate: impl FnOnce(bool) -> bool,
 ) -> u8 {
     if !state::is_runtime_active() {
         return original;
     }
     let original_bool = original != 0;
-    let result_bool = evaluate(original_bool).unwrap_or(original_bool);
+    let result_bool = evaluate(original_bool);
     #[cfg(debug_assertions)]
     record_flip_gate_denied(kind, original_bool, result_bool);
     bool_to_u8(result_bool)
@@ -254,13 +255,14 @@ unsafe extern "system" fn direct_flip_detour(
         #[cfg(debug_assertions)]
         FlipGateKind::OverlayContextDirectFlip,
         original,
-        |original| state::evaluate_direct_flip_compatible(this, original),
+        |original| flip_gate::direct_flip_compatible(state::has_present_context(this), original),
     )
 }
 
 unsafe extern "system" fn ensure_independent_flip_state_detour(this: usize) -> i32 {
     if state::is_runtime_active()
-        && let Some(blocked_status) = state::evaluate_ensure_independent_flip_state()
+        && let Some(blocked_status) =
+            flip_gate::ensure_independent_flip_state(state::has_lut_assignments())
     {
         #[cfg(debug_assertions)]
         record_flip_gate_denied(
@@ -295,7 +297,9 @@ unsafe extern "system" fn is_direct_flip_supported_on_target_detour(
         #[cfg(debug_assertions)]
         FlipGateKind::IsDirectFlipSupportedOnTarget,
         original,
-        state::evaluate_direct_flip_support_compatible,
+        |original| {
+            flip_gate::direct_flip_support_compatible(state::has_lut_assignments(), original)
+        },
     )
 }
 
@@ -316,7 +320,9 @@ unsafe extern "system" fn legacy_check_direct_flip_support_detour(
         #[cfg(debug_assertions)]
         FlipGateKind::LegacySwapChainCheckDirectFlip,
         original,
-        state::evaluate_direct_flip_support_compatible,
+        |original| {
+            flip_gate::direct_flip_support_compatible(state::has_lut_assignments(), original)
+        },
     )
 }
 
@@ -326,7 +332,9 @@ unsafe extern "system" fn is_advanced_direct_flip_compatible_detour(this: usize)
         #[cfg(debug_assertions)]
         FlipGateKind::IsAdvancedDirectFlipCompatible,
         original,
-        state::evaluate_direct_flip_support_compatible,
+        |original| {
+            flip_gate::direct_flip_support_compatible(state::has_lut_assignments(), original)
+        },
     )
 }
 
@@ -615,11 +623,7 @@ mod tests {
             unsafe { super::direct_flip_detour(0x1234, 0, 0, 0, 0, 0) },
             0
         );
-        assert!(
-            state::lut_bypass_runtime()
-                .and_then(|runtime| runtime.context(0x1234).cloned())
-                .is_some()
-        );
+        assert!(state::present_context(0x1234).is_some());
     }
 
     #[test]

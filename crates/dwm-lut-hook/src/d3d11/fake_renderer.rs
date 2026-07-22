@@ -68,9 +68,7 @@ pub(crate) unsafe fn render_present_lut(
         });
     }
     if let Ok(mut context_active) = context_active_slot().lock() {
-        *context_active = Some(
-            crate::state::lut_bypass_runtime().is_some_and(|runtime| runtime.has_active_contexts()),
-        );
+        *context_active = Some(crate::state::has_active_contexts());
     }
     result_slot()
         .lock()
