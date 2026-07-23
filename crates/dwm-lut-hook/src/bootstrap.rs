@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use dwm_lut_payload::{
     DwmLutPayloadBuffer, HookPayload, InitializeStatus, PayloadError, ReplaceAssignmentsStatus,
-    ShutdownStatus, deserialize_payload_buffer,
+    ResolveFailureKind, ShutdownStatus, deserialize_payload_buffer,
 };
 
 use crate::flip_gate::FlipGateEffects;
@@ -192,15 +192,15 @@ pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) 
     log::initialize_start();
 
     if payload_buffer.is_null() {
-        return InitializeStatus::NullPayload as u32;
+        return InitializeStatus::NullPayload.to_code();
     }
 
     let payload = match unsafe { deserialize_payload_buffer(payload_buffer) } {
         Ok(payload) => payload,
         Err(error) => {
-            let status = map_payload_error_to_initialize_status(&error);
+            let status = InitializeStatus::from(&error);
             log::initialize_failed(status, &error);
-            return status as u32;
+            return status.to_code();
         }
     };
 
@@ -208,13 +208,13 @@ pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) 
         Ok(()) => {
             crate::desktop_redraw::request_desktop_redraw();
             log::initialize_success();
-            InitializeStatus::Success as u32
+            InitializeStatus::Success.to_code()
         }
         Err(error) => {
             let message = error.to_string();
-            let status = map_hook_error(error);
+            let status = InitializeStatus::from(error);
             log::initialize_failed(status, message);
-            status as u32
+            status.to_code()
         }
     }
 }
@@ -280,7 +280,7 @@ pub(crate) unsafe fn ffi_replace_assignments(payload_buffer: *const DwmLutPayloa
     let payload = match unsafe { deserialize_payload_buffer(payload_buffer) } {
         Ok(payload) => payload,
         Err(error) => {
-            let status = map_payload_error_to_replace_assignments_status(&error);
+            let status = ReplaceAssignmentsStatus::from(&error);
             log::replace_assignments_failed(status, &error);
             return status as u32;
         }
@@ -323,9 +323,7 @@ fn map_replace_assignments_error(error: &ReplaceAssignmentsError) -> ReplaceAssi
             ReplaceAssignmentsStatus::NotInitialized
         }
         ReplaceAssignmentsError::AlreadyInProgress => ReplaceAssignmentsStatus::AlreadyInProgress,
-        ReplaceAssignmentsError::Payload(error) => {
-            map_payload_error_to_replace_assignments_status(error)
-        }
+        ReplaceAssignmentsError::Payload(error) => ReplaceAssignmentsStatus::from(error),
     }
 }
 
@@ -454,149 +452,56 @@ fn finalize_initial_state(
     })
 }
 
-fn map_resolve_status(error: HookResolveError) -> InitializeStatus {
-    match error {
-        HookResolveError::ModuleNotLoaded { .. } => InitializeStatus::DwmcoreModuleNotLoaded,
-        HookResolveError::InvalidModuleImage { .. } => InitializeStatus::DwmcoreImageInvalid,
-        HookResolveError::ModuleAccessFailed { .. } => InitializeStatus::DwmcoreImageAccessFailed,
-        HookResolveError::ModuleImageMismatch { .. } => InitializeStatus::DwmcoreImageMismatch,
-        HookResolveError::SignatureNotFound { target, .. } => match target {
-            crate::profile::HookTarget::Present => InitializeStatus::PresentSignatureNotFound,
-            crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
-                InitializeStatus::DirectFlipSignatureNotFound
-            }
-            crate::profile::HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
-                InitializeStatus::DirectFlipInfoEnsureIndependentFlipSignatureNotFound
-            }
-            crate::profile::HookTarget::IsDirectFlipSupportedOnTarget => {
-                InitializeStatus::IsDirectFlipSupportedOnTargetSignatureNotFound
-            }
-            crate::profile::HookTarget::LegacySwapChainCheckDirectFlipSupport => {
-                InitializeStatus::LegacySwapChainCheckDirectFlipSignatureNotFound
-            }
-            crate::profile::HookTarget::IsAdvancedDirectFlipCompatible => {
-                InitializeStatus::IsAdvancedDirectFlipCompatibleSignatureNotFound
-            }
-            crate::profile::HookTarget::OverlayTestMode => {
-                InitializeStatus::OverlayTestModeNotFound
-            }
-            crate::profile::HookTarget::DisableIndependentFlip => {
-                InitializeStatus::DisableIndependentFlipNotFound
-            }
-            crate::profile::HookTarget::OverlaysEnabled => {
-                unreachable!("optional OverlaysEnabled resolution errors are skipped")
-            }
-        },
-        HookResolveError::SignatureAmbiguous { target, .. } => match target {
-            crate::profile::HookTarget::Present => InitializeStatus::PresentSignatureAmbiguous,
-            crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
-                InitializeStatus::DirectFlipSignatureAmbiguous
-            }
-            crate::profile::HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
-                InitializeStatus::DirectFlipInfoEnsureIndependentFlipSignatureAmbiguous
-            }
-            crate::profile::HookTarget::IsDirectFlipSupportedOnTarget => {
-                InitializeStatus::IsDirectFlipSupportedOnTargetSignatureAmbiguous
-            }
-            crate::profile::HookTarget::LegacySwapChainCheckDirectFlipSupport => {
-                InitializeStatus::LegacySwapChainCheckDirectFlipSignatureAmbiguous
-            }
-            crate::profile::HookTarget::IsAdvancedDirectFlipCompatible => {
-                InitializeStatus::IsAdvancedDirectFlipCompatibleSignatureAmbiguous
-            }
-            crate::profile::HookTarget::OverlayTestMode => {
-                InitializeStatus::OverlayTestModeAmbiguous
-            }
-            crate::profile::HookTarget::DisableIndependentFlip => {
-                InitializeStatus::DisableIndependentFlipAmbiguous
-            }
-            crate::profile::HookTarget::OverlaysEnabled => {
-                unreachable!("optional OverlaysEnabled resolution errors are skipped")
-            }
-        },
-        HookResolveError::ConflictingPrologue { target, .. } => match target {
-            crate::profile::HookTarget::Present => InitializeStatus::PresentPrologueConflict,
-            crate::profile::HookTarget::IsCandidateDirectFlipCompatible => {
-                InitializeStatus::DirectFlipPrologueConflict
-            }
-            crate::profile::HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
-                InitializeStatus::DirectFlipInfoEnsureIndependentFlipPrologueConflict
-            }
-            crate::profile::HookTarget::IsDirectFlipSupportedOnTarget => {
-                InitializeStatus::IsDirectFlipSupportedOnTargetPrologueConflict
-            }
-            crate::profile::HookTarget::LegacySwapChainCheckDirectFlipSupport => {
-                InitializeStatus::LegacySwapChainCheckDirectFlipPrologueConflict
-            }
-            crate::profile::HookTarget::IsAdvancedDirectFlipCompatible => {
-                InitializeStatus::IsAdvancedDirectFlipCompatiblePrologueConflict
-            }
-            crate::profile::HookTarget::OverlaysEnabled => {
-                InitializeStatus::OverlaysEnabledPrologueConflict
-            }
-            crate::profile::HookTarget::OverlayTestMode
-            | crate::profile::HookTarget::DisableIndependentFlip => {
-                InitializeStatus::DwmcoreImageInvalid
-            }
-        },
-    }
-}
-
-fn map_hook_error(error: HookError) -> InitializeStatus {
-    match error {
-        HookError::AlreadyInitialized => InitializeStatus::AlreadyInitialized,
-        HookError::ProfileSelect(error) => match error {
-            ProfileSelectError::UnsupportedDwmcoreVersion { .. } => {
-                InitializeStatus::UnsupportedDwmcoreVersion
-            }
-            ProfileSelectError::DwmcoreModuleNotLoaded => InitializeStatus::DwmcoreModuleNotLoaded,
-            ProfileSelectError::DwmcoreVersionQueryFailed => {
-                InitializeStatus::DwmcoreVersionQueryFailed
-            }
-        },
-        HookError::Resolve(error) => map_resolve_status(error),
-        HookError::Payload(error) => map_payload_error_to_initialize_status(&error),
-        HookError::MinHook(error) => match error.operation {
-            crate::minhook::MinHookOperation::Initialize => {
-                InitializeStatus::MinHookInitializeFailed
-            }
-            crate::minhook::MinHookOperation::CreateHook(_) => {
-                InitializeStatus::MinHookCreateHookFailed
-            }
-            crate::minhook::MinHookOperation::EnableHook => {
-                InitializeStatus::MinHookEnableHookFailed
-            }
-        },
-    }
-}
-
-fn map_payload_error_to_initialize_status(error: &PayloadError) -> InitializeStatus {
-    match error {
-        PayloadError::EmptyBuffer | PayloadError::TooLarge { .. } => {
-            InitializeStatus::InvalidPayload
+impl From<HookResolveError> for InitializeStatus {
+    fn from(error: HookResolveError) -> Self {
+        match error {
+            HookResolveError::ModuleNotLoaded { .. } => Self::DwmcoreModuleNotLoaded,
+            HookResolveError::InvalidModuleImage { .. } => Self::DwmcoreImageInvalid,
+            HookResolveError::ModuleAccessFailed { .. } => Self::DwmcoreImageAccessFailed,
+            HookResolveError::ModuleImageMismatch { .. } => Self::DwmcoreImageMismatch,
+            HookResolveError::SignatureNotFound { target } => Self::Resolve {
+                kind: ResolveFailureKind::NotFound,
+                target: target.into(),
+            },
+            HookResolveError::SignatureAmbiguous { target, .. } => Self::Resolve {
+                kind: ResolveFailureKind::Ambiguous,
+                target: target.into(),
+            },
+            HookResolveError::ConflictingPrologue { target, .. } => Self::Resolve {
+                kind: ResolveFailureKind::PrologueConflict,
+                target: target.into(),
+            },
         }
-        PayloadError::NoAssignments => InitializeStatus::PayloadHasNoAssignments,
-        _ => InitializeStatus::PayloadDecodeFailed,
     }
 }
 
-fn map_payload_error_to_replace_assignments_status(
-    error: &PayloadError,
-) -> ReplaceAssignmentsStatus {
-    match error {
-        PayloadError::EmptyBuffer | PayloadError::TooLarge { .. } => {
-            ReplaceAssignmentsStatus::InvalidPayload
+impl From<HookError> for InitializeStatus {
+    fn from(error: HookError) -> Self {
+        match error {
+            HookError::AlreadyInitialized => Self::AlreadyInitialized,
+            HookError::ProfileSelect(error) => match error {
+                ProfileSelectError::UnsupportedDwmcoreVersion { .. } => {
+                    Self::UnsupportedDwmcoreVersion
+                }
+                ProfileSelectError::DwmcoreModuleNotLoaded => Self::DwmcoreModuleNotLoaded,
+                ProfileSelectError::DwmcoreVersionQueryFailed => Self::DwmcoreVersionQueryFailed,
+            },
+            HookError::Resolve(error) => error.into(),
+            HookError::Payload(error) => InitializeStatus::from(&error),
+            HookError::MinHook(error) => match error.operation {
+                crate::minhook::MinHookOperation::Initialize => Self::MinHookInitializeFailed,
+                crate::minhook::MinHookOperation::CreateHook(_) => Self::MinHookCreateHookFailed,
+                crate::minhook::MinHookOperation::EnableHook => Self::MinHookEnableHookFailed,
+            },
         }
-        PayloadError::NoAssignments => ReplaceAssignmentsStatus::PayloadHasNoAssignments,
-        _ => ReplaceAssignmentsStatus::PayloadDecodeFailed,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use dwm_lut_payload::{
-        AdapterLuid, ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadAssignment,
-        PayloadLut, ShutdownStatus,
+        AdapterLuid, ColorMode, HookPayload, InitializeStatus, MonitorIdentity, MonitorTarget,
+        PayloadAssignment, PayloadLut, ShutdownStatus,
     };
 
     use crate::profile::{DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError};
@@ -693,16 +598,13 @@ mod tests {
 
     #[test]
     fn module_access_failure_has_distinct_initialize_status() {
-        let status = super::map_resolve_status(HookResolveError::ModuleAccessFailed {
+        let status = InitializeStatus::from(HookResolveError::ModuleAccessFailed {
             module_name: crate::profile::HOOK_MODULE_NAME,
             operation: "map image view",
             error_code: 5,
         });
 
-        assert_eq!(
-            status,
-            dwm_lut_payload::InitializeStatus::DwmcoreImageAccessFailed
-        );
+        assert_eq!(status, InitializeStatus::DwmcoreImageAccessFailed);
     }
 
     #[test]
@@ -715,20 +617,23 @@ mod tests {
                         revision: 0,
                     },
                 },
-                dwm_lut_payload::InitializeStatus::UnsupportedDwmcoreVersion,
+                InitializeStatus::UnsupportedDwmcoreVersion,
             ),
             (
                 ProfileSelectError::DwmcoreModuleNotLoaded,
-                dwm_lut_payload::InitializeStatus::DwmcoreModuleNotLoaded,
+                InitializeStatus::DwmcoreModuleNotLoaded,
             ),
             (
                 ProfileSelectError::DwmcoreVersionQueryFailed,
-                dwm_lut_payload::InitializeStatus::DwmcoreVersionQueryFailed,
+                InitializeStatus::DwmcoreVersionQueryFailed,
             ),
         ];
 
         for (error, expected) in cases {
-            assert_eq!(super::map_hook_error(error.into()), expected);
+            assert_eq!(
+                InitializeStatus::from(super::HookError::from(error)),
+                expected
+            );
         }
     }
 

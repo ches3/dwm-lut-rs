@@ -4,7 +4,9 @@ use bincode::{Decode, Encode};
 
 mod status;
 
-pub use status::{InitializeStatus, ReplaceAssignmentsStatus, ShutdownStatus};
+pub use status::{
+    HookTargetId, InitializeStatus, ReplaceAssignmentsStatus, ResolveFailureKind, ShutdownStatus,
+};
 
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("dwm-lut-rs supports only 64-bit Windows targets");
@@ -110,6 +112,34 @@ pub enum PayloadError {
     },
     NonFiniteLutValue,
     NonFiniteDomain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadFailureKind {
+    Invalid,
+    NoAssignments,
+    DecodeFailed,
+}
+
+impl PayloadError {
+    pub fn failure_kind(&self) -> PayloadFailureKind {
+        match self {
+            Self::EmptyBuffer | Self::TooLarge { .. } => PayloadFailureKind::Invalid,
+            Self::NoAssignments => PayloadFailureKind::NoAssignments,
+            Self::HeaderTooShort { .. }
+            | Self::UnsupportedVersion { .. }
+            | Self::InvalidHeaderLength { .. }
+            | Self::LengthMismatch { .. }
+            | Self::Encode(_)
+            | Self::Decode(_)
+            | Self::TrailingBytes { .. }
+            | Self::LutTooSmall { .. }
+            | Self::LutEntryCountOverflow { .. }
+            | Self::LutEntryCountMismatch { .. }
+            | Self::NonFiniteLutValue
+            | Self::NonFiniteDomain => PayloadFailureKind::DecodeFailed,
+        }
+    }
 }
 
 impl fmt::Display for PayloadError {

@@ -13,6 +13,7 @@ use std::fmt;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 
+use dwm_lut_payload::HookTargetId;
 use windows_sys::Win32::Foundation::MAX_PATH;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 
@@ -149,24 +150,26 @@ pub enum HookTarget {
 }
 
 impl HookTarget {
-    pub const fn label(self) -> &'static str {
+    pub const fn to_id(self) -> HookTargetId {
         match self {
-            Self::Present => "Present",
-            Self::IsCandidateDirectFlipCompatible => "IsCandidateDirectFlipCompatible",
+            Self::Present => HookTargetId::Present,
+            Self::IsCandidateDirectFlipCompatible => HookTargetId::IsCandidateDirectFlipCompatible,
             Self::DirectFlipInfoEnsureIndependentFlipState => {
-                "CDirectFlipInfo::EnsureIndependentFlipState"
+                HookTargetId::DirectFlipInfoEnsureIndependentFlipState
             }
-            Self::IsDirectFlipSupportedOnTarget => "COverlayContext::IsDirectFlipSupportedOnTarget",
+            Self::IsDirectFlipSupportedOnTarget => HookTargetId::IsDirectFlipSupportedOnTarget,
             Self::LegacySwapChainCheckDirectFlipSupport => {
-                "CLegacySwapChain::CheckDirectFlipSupport"
+                HookTargetId::LegacySwapChainCheckDirectFlipSupport
             }
-            Self::IsAdvancedDirectFlipCompatible => {
-                "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible"
-            }
-            Self::OverlayTestMode => "OverlayTestMode",
-            Self::DisableIndependentFlip => "DisableIndependentFlip",
-            Self::OverlaysEnabled => "COverlayContext::OverlaysEnabled",
+            Self::IsAdvancedDirectFlipCompatible => HookTargetId::IsAdvancedDirectFlipCompatible,
+            Self::OverlayTestMode => HookTargetId::OverlayTestMode,
+            Self::DisableIndependentFlip => HookTargetId::DisableIndependentFlip,
+            Self::OverlaysEnabled => HookTargetId::OverlaysEnabled,
         }
+    }
+
+    pub const fn label(self) -> &'static str {
+        self.to_id().label()
     }
 
     pub const fn is_function_hook_target(self) -> bool {
@@ -175,6 +178,12 @@ impl HookTarget {
 
     pub const fn is_required_signature(self) -> bool {
         matches!(self, Self::Present | Self::OverlayTestMode)
+    }
+}
+
+impl From<HookTarget> for HookTargetId {
+    fn from(value: HookTarget) -> Self {
+        value.to_id()
     }
 }
 

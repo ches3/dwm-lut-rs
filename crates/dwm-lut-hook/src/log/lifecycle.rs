@@ -78,7 +78,7 @@ pub(crate) fn initialize_failed(status: InitializeStatus, error: impl std::fmt::
     {
         super::write(format_args!(
             "event=initialize_failed status={} error={}",
-            status as u32,
+            status.to_code(),
             super::quoted(error)
         ));
     }

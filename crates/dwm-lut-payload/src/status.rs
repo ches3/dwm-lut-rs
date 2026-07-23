@@ -1,95 +1,155 @@
 use std::fmt;
 
-#[repr(u32)]
+const RESOLVE_CODE_BASE: u32 = 0x0001_0000;
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveFailureKind {
+    NotFound = 1,
+    Ambiguous = 2,
+    PrologueConflict = 3,
+}
+
+impl ResolveFailureKind {
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::NotFound),
+            2 => Some(Self::Ambiguous),
+            3 => Some(Self::PrologueConflict),
+            _ => None,
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookTargetId {
+    Present = 1,
+    IsCandidateDirectFlipCompatible = 2,
+    DirectFlipInfoEnsureIndependentFlipState = 3,
+    IsDirectFlipSupportedOnTarget = 4,
+    LegacySwapChainCheckDirectFlipSupport = 5,
+    IsAdvancedDirectFlipCompatible = 6,
+    OverlayTestMode = 7,
+    DisableIndependentFlip = 8,
+    OverlaysEnabled = 9,
+}
+
+impl HookTargetId {
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Present),
+            2 => Some(Self::IsCandidateDirectFlipCompatible),
+            3 => Some(Self::DirectFlipInfoEnsureIndependentFlipState),
+            4 => Some(Self::IsDirectFlipSupportedOnTarget),
+            5 => Some(Self::LegacySwapChainCheckDirectFlipSupport),
+            6 => Some(Self::IsAdvancedDirectFlipCompatible),
+            7 => Some(Self::OverlayTestMode),
+            8 => Some(Self::DisableIndependentFlip),
+            9 => Some(Self::OverlaysEnabled),
+            _ => None,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Present => "Present",
+            Self::IsCandidateDirectFlipCompatible => "IsCandidateDirectFlipCompatible",
+            Self::DirectFlipInfoEnsureIndependentFlipState => {
+                "CDirectFlipInfo::EnsureIndependentFlipState"
+            }
+            Self::IsDirectFlipSupportedOnTarget => "COverlayContext::IsDirectFlipSupportedOnTarget",
+            Self::LegacySwapChainCheckDirectFlipSupport => {
+                "CLegacySwapChain::CheckDirectFlipSupport"
+            }
+            Self::IsAdvancedDirectFlipCompatible => {
+                "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible"
+            }
+            Self::OverlayTestMode => "OverlayTestMode",
+            Self::DisableIndependentFlip => "DisableIndependentFlip",
+            Self::OverlaysEnabled => "COverlayContext::OverlaysEnabled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitializeStatus {
-    Success = 0,
-    NullPayload = 1,
-    InvalidPayload = 2,
-    AlreadyInitialized = 3,
-    DwmcoreModuleNotLoaded = 4,
-    DwmcoreImageInvalid = 5,
-    PresentSignatureNotFound = 6,
-    PresentSignatureAmbiguous = 7,
-    DirectFlipSignatureNotFound = 8,
-    DirectFlipSignatureAmbiguous = 9,
-    PayloadDecodeFailed = 12,
-    PayloadHasNoAssignments = 13,
-    OverlayTestModeNotFound = 21,
-    OverlayTestModeAmbiguous = 22,
-    MinHookLoadFailed = 25,
-    MinHookGetProcAddressFailed = 26,
-    MinHookInitializeFailed = 27,
-    MinHookCreateHookFailed = 28,
-    MinHookEnableHookFailed = 29,
-    DwmcoreImageMismatch = 30,
-    PresentPrologueConflict = 31,
-    DirectFlipPrologueConflict = 32,
-    DwmcoreImageAccessFailed = 37,
-    UnsupportedDwmcoreVersion = 38,
-    DisableIndependentFlipNotFound = 39,
-    DisableIndependentFlipAmbiguous = 40,
-    DirectFlipInfoEnsureIndependentFlipSignatureNotFound = 41,
-    DirectFlipInfoEnsureIndependentFlipSignatureAmbiguous = 42,
-    DirectFlipInfoEnsureIndependentFlipPrologueConflict = 43,
-    IsDirectFlipSupportedOnTargetSignatureNotFound = 44,
-    IsDirectFlipSupportedOnTargetSignatureAmbiguous = 45,
-    IsDirectFlipSupportedOnTargetPrologueConflict = 46,
-    LegacySwapChainCheckDirectFlipSignatureNotFound = 47,
-    LegacySwapChainCheckDirectFlipSignatureAmbiguous = 48,
-    LegacySwapChainCheckDirectFlipPrologueConflict = 49,
-    IsAdvancedDirectFlipCompatibleSignatureNotFound = 50,
-    IsAdvancedDirectFlipCompatibleSignatureAmbiguous = 51,
-    IsAdvancedDirectFlipCompatiblePrologueConflict = 52,
-    OverlaysEnabledPrologueConflict = 53,
-    DwmcoreVersionQueryFailed = 54,
+    Success,
+    NullPayload,
+    InvalidPayload,
+    AlreadyInitialized,
+    DwmcoreModuleNotLoaded,
+    DwmcoreImageInvalid,
+    DwmcoreImageAccessFailed,
+    DwmcoreImageMismatch,
+    DwmcoreVersionQueryFailed,
+    UnsupportedDwmcoreVersion,
+    PayloadDecodeFailed,
+    PayloadHasNoAssignments,
+    MinHookInitializeFailed,
+    MinHookCreateHookFailed,
+    MinHookEnableHookFailed,
+    Resolve {
+        kind: ResolveFailureKind,
+        target: HookTargetId,
+    },
 }
 
 impl InitializeStatus {
-    pub fn from_code(code: u32) -> Option<Self> {
-        Some(match code {
-            0 => Self::Success,
-            1 => Self::NullPayload,
-            2 => Self::InvalidPayload,
-            3 => Self::AlreadyInitialized,
-            4 => Self::DwmcoreModuleNotLoaded,
-            5 => Self::DwmcoreImageInvalid,
-            6 => Self::PresentSignatureNotFound,
-            7 => Self::PresentSignatureAmbiguous,
-            8 => Self::DirectFlipSignatureNotFound,
-            9 => Self::DirectFlipSignatureAmbiguous,
-            12 => Self::PayloadDecodeFailed,
-            13 => Self::PayloadHasNoAssignments,
-            21 => Self::OverlayTestModeNotFound,
-            22 => Self::OverlayTestModeAmbiguous,
-            25 => Self::MinHookLoadFailed,
-            26 => Self::MinHookGetProcAddressFailed,
-            27 => Self::MinHookInitializeFailed,
-            28 => Self::MinHookCreateHookFailed,
-            29 => Self::MinHookEnableHookFailed,
-            30 => Self::DwmcoreImageMismatch,
-            31 => Self::PresentPrologueConflict,
-            32 => Self::DirectFlipPrologueConflict,
-            37 => Self::DwmcoreImageAccessFailed,
-            38 => Self::UnsupportedDwmcoreVersion,
-            39 => Self::DisableIndependentFlipNotFound,
-            40 => Self::DisableIndependentFlipAmbiguous,
-            41 => Self::DirectFlipInfoEnsureIndependentFlipSignatureNotFound,
-            42 => Self::DirectFlipInfoEnsureIndependentFlipSignatureAmbiguous,
-            43 => Self::DirectFlipInfoEnsureIndependentFlipPrologueConflict,
-            44 => Self::IsDirectFlipSupportedOnTargetSignatureNotFound,
-            45 => Self::IsDirectFlipSupportedOnTargetSignatureAmbiguous,
-            46 => Self::IsDirectFlipSupportedOnTargetPrologueConflict,
-            47 => Self::LegacySwapChainCheckDirectFlipSignatureNotFound,
-            48 => Self::LegacySwapChainCheckDirectFlipSignatureAmbiguous,
-            49 => Self::LegacySwapChainCheckDirectFlipPrologueConflict,
-            50 => Self::IsAdvancedDirectFlipCompatibleSignatureNotFound,
-            51 => Self::IsAdvancedDirectFlipCompatibleSignatureAmbiguous,
-            52 => Self::IsAdvancedDirectFlipCompatiblePrologueConflict,
-            53 => Self::OverlaysEnabledPrologueConflict,
-            54 => Self::DwmcoreVersionQueryFailed,
-            _ => return None,
-        })
+    pub const fn to_code(self) -> u32 {
+        match self {
+            Self::Success => 0,
+            Self::NullPayload => 1,
+            Self::InvalidPayload => 2,
+            Self::AlreadyInitialized => 3,
+            Self::DwmcoreModuleNotLoaded => 4,
+            Self::DwmcoreImageInvalid => 5,
+            Self::DwmcoreImageAccessFailed => 6,
+            Self::DwmcoreImageMismatch => 7,
+            Self::DwmcoreVersionQueryFailed => 8,
+            Self::UnsupportedDwmcoreVersion => 9,
+            Self::PayloadDecodeFailed => 10,
+            Self::PayloadHasNoAssignments => 11,
+            Self::MinHookInitializeFailed => 12,
+            Self::MinHookCreateHookFailed => 13,
+            Self::MinHookEnableHookFailed => 14,
+            Self::Resolve { kind, target } => {
+                RESOLVE_CODE_BASE | ((kind as u32) << 8) | (target as u32)
+            }
+        }
+    }
+
+    pub const fn from_code(code: u32) -> Option<Self> {
+        if code & 0xFFFF_0000 == RESOLVE_CODE_BASE {
+            let kind = match ResolveFailureKind::from_u8(((code >> 8) & 0xFF) as u8) {
+                Some(kind) => kind,
+                None => return None,
+            };
+            let target = match HookTargetId::from_u8((code & 0xFF) as u8) {
+                Some(target) => target,
+                None => return None,
+            };
+            return Some(Self::Resolve { kind, target });
+        }
+
+        match code {
+            0 => Some(Self::Success),
+            1 => Some(Self::NullPayload),
+            2 => Some(Self::InvalidPayload),
+            3 => Some(Self::AlreadyInitialized),
+            4 => Some(Self::DwmcoreModuleNotLoaded),
+            5 => Some(Self::DwmcoreImageInvalid),
+            6 => Some(Self::DwmcoreImageAccessFailed),
+            7 => Some(Self::DwmcoreImageMismatch),
+            8 => Some(Self::DwmcoreVersionQueryFailed),
+            9 => Some(Self::UnsupportedDwmcoreVersion),
+            10 => Some(Self::PayloadDecodeFailed),
+            11 => Some(Self::PayloadHasNoAssignments),
+            12 => Some(Self::MinHookInitializeFailed),
+            13 => Some(Self::MinHookCreateHookFailed),
+            14 => Some(Self::MinHookEnableHookFailed),
+            _ => None,
+        }
     }
 }
 
@@ -102,42 +162,14 @@ impl fmt::Display for InitializeStatus {
             Self::AlreadyInitialized => write!(f, "hook DLL is already initialized"),
             Self::DwmcoreModuleNotLoaded => write!(f, "dwmcore.dll was not loaded in the target"),
             Self::DwmcoreImageInvalid => write!(f, "dwmcore.dll was not a valid PE image"),
-            Self::PresentSignatureNotFound => write!(f, "Present signature was not found"),
-            Self::PresentSignatureAmbiguous => {
-                write!(f, "Present signature matched multiple locations")
+            Self::DwmcoreImageAccessFailed => {
+                write!(f, "dwmcore.dll backing image could not be accessed")
             }
-            Self::DirectFlipSignatureNotFound => {
-                write!(f, "IsCandidateDirectFlipCompatible signature was not found")
-            }
-            Self::DirectFlipSignatureAmbiguous => write!(
-                f,
-                "IsCandidateDirectFlipCompatible signature matched multiple locations"
-            ),
-            Self::PayloadDecodeFailed => write!(f, "payload could not be decoded"),
-            Self::PayloadHasNoAssignments => {
-                write!(f, "payload does not contain any LUT assignments")
-            }
-            Self::OverlayTestModeNotFound => write!(f, "OverlayTestMode reference was not found"),
-            Self::OverlayTestModeAmbiguous => {
-                write!(f, "OverlayTestMode reference matched multiple locations")
-            }
-            Self::MinHookLoadFailed => write!(f, "MinHook DLL could not be loaded"),
-            Self::MinHookGetProcAddressFailed => write!(f, "MinHook exports could not be resolved"),
-            Self::MinHookInitializeFailed => write!(f, "MH_Initialize failed"),
-            Self::MinHookCreateHookFailed => write!(f, "MH_CreateHook failed"),
-            Self::MinHookEnableHookFailed => write!(f, "MH_EnableHook failed"),
             Self::DwmcoreImageMismatch => {
                 write!(f, "loaded dwmcore.dll does not match its backing file")
             }
-            Self::PresentPrologueConflict => {
-                write!(f, "Present prologue is modified by a conflicting hook")
-            }
-            Self::DirectFlipPrologueConflict => write!(
-                f,
-                "IsCandidateDirectFlipCompatible prologue is modified by a conflicting hook"
-            ),
-            Self::DwmcoreImageAccessFailed => {
-                write!(f, "dwmcore.dll backing image could not be accessed")
+            Self::DwmcoreVersionQueryFailed => {
+                write!(f, "dwmcore.dll FileVersion could not be queried")
             }
             Self::UnsupportedDwmcoreVersion => {
                 write!(
@@ -145,69 +177,24 @@ impl fmt::Display for InitializeStatus {
                     "dwmcore.dll FileVersion is below the minimum supported hook profile"
                 )
             }
-            Self::DisableIndependentFlipNotFound => {
-                write!(f, "DisableIndependentFlip reference was not found")
+            Self::PayloadDecodeFailed => write!(f, "payload could not be decoded"),
+            Self::PayloadHasNoAssignments => {
+                write!(f, "payload does not contain any LUT assignments")
             }
-            Self::DisableIndependentFlipAmbiguous => {
-                write!(
-                    f,
-                    "DisableIndependentFlip reference matched multiple locations"
-                )
-            }
-            Self::DirectFlipInfoEnsureIndependentFlipSignatureNotFound => write!(
-                f,
-                "CDirectFlipInfo::EnsureIndependentFlipState signature was not found"
-            ),
-            Self::DirectFlipInfoEnsureIndependentFlipSignatureAmbiguous => write!(
-                f,
-                "CDirectFlipInfo::EnsureIndependentFlipState signature matched multiple locations"
-            ),
-            Self::DirectFlipInfoEnsureIndependentFlipPrologueConflict => write!(
-                f,
-                "CDirectFlipInfo::EnsureIndependentFlipState prologue is modified by a conflicting hook"
-            ),
-            Self::IsDirectFlipSupportedOnTargetSignatureNotFound => write!(
-                f,
-                "COverlayContext::IsDirectFlipSupportedOnTarget signature was not found"
-            ),
-            Self::IsDirectFlipSupportedOnTargetSignatureAmbiguous => write!(
-                f,
-                "COverlayContext::IsDirectFlipSupportedOnTarget signature matched multiple locations"
-            ),
-            Self::IsDirectFlipSupportedOnTargetPrologueConflict => write!(
-                f,
-                "COverlayContext::IsDirectFlipSupportedOnTarget prologue is modified by a conflicting hook"
-            ),
-            Self::LegacySwapChainCheckDirectFlipSignatureNotFound => write!(
-                f,
-                "CLegacySwapChain::CheckDirectFlipSupport signature was not found"
-            ),
-            Self::LegacySwapChainCheckDirectFlipSignatureAmbiguous => write!(
-                f,
-                "CLegacySwapChain::CheckDirectFlipSupport signature matched multiple locations"
-            ),
-            Self::LegacySwapChainCheckDirectFlipPrologueConflict => write!(
-                f,
-                "CLegacySwapChain::CheckDirectFlipSupport prologue is modified by a conflicting hook"
-            ),
-            Self::IsAdvancedDirectFlipCompatibleSignatureNotFound => write!(
-                f,
-                "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible signature was not found"
-            ),
-            Self::IsAdvancedDirectFlipCompatibleSignatureAmbiguous => write!(
-                f,
-                "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible signature matched multiple locations"
-            ),
-            Self::IsAdvancedDirectFlipCompatiblePrologueConflict => write!(
-                f,
-                "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible prologue is modified by a conflicting hook"
-            ),
-            Self::OverlaysEnabledPrologueConflict => write!(
-                f,
-                "COverlayContext::OverlaysEnabled prologue is modified by a conflicting hook"
-            ),
-            Self::DwmcoreVersionQueryFailed => {
-                write!(f, "dwmcore.dll FileVersion could not be queried")
+            Self::MinHookInitializeFailed => write!(f, "MH_Initialize failed"),
+            Self::MinHookCreateHookFailed => write!(f, "MH_CreateHook failed"),
+            Self::MinHookEnableHookFailed => write!(f, "MH_EnableHook failed"),
+            Self::Resolve { kind, target } => {
+                let label = target.label();
+                match kind {
+                    ResolveFailureKind::NotFound => write!(f, "{label} was not found"),
+                    ResolveFailureKind::Ambiguous => {
+                        write!(f, "{label} matched multiple locations")
+                    }
+                    ResolveFailureKind::PrologueConflict => {
+                        write!(f, "{label} prologue is modified by a conflicting hook")
+                    }
+                }
             }
         }
     }
@@ -260,6 +247,38 @@ impl fmt::Display for ReplaceAssignmentsStatus {
     }
 }
 
+impl From<crate::PayloadFailureKind> for InitializeStatus {
+    fn from(kind: crate::PayloadFailureKind) -> Self {
+        match kind {
+            crate::PayloadFailureKind::Invalid => Self::InvalidPayload,
+            crate::PayloadFailureKind::NoAssignments => Self::PayloadHasNoAssignments,
+            crate::PayloadFailureKind::DecodeFailed => Self::PayloadDecodeFailed,
+        }
+    }
+}
+
+impl From<&crate::PayloadError> for InitializeStatus {
+    fn from(error: &crate::PayloadError) -> Self {
+        error.failure_kind().into()
+    }
+}
+
+impl From<crate::PayloadFailureKind> for ReplaceAssignmentsStatus {
+    fn from(kind: crate::PayloadFailureKind) -> Self {
+        match kind {
+            crate::PayloadFailureKind::Invalid => Self::InvalidPayload,
+            crate::PayloadFailureKind::NoAssignments => Self::PayloadHasNoAssignments,
+            crate::PayloadFailureKind::DecodeFailed => Self::PayloadDecodeFailed,
+        }
+    }
+}
+
+impl From<&crate::PayloadError> for ReplaceAssignmentsStatus {
+    fn from(error: &crate::PayloadError) -> Self {
+        error.failure_kind().into()
+    }
+}
+
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownStatus {
@@ -292,5 +311,52 @@ impl fmt::Display for ShutdownStatus {
             Self::AlreadyShutDown => write!(f, "hook DLL is already shut down"),
             Self::MinHookCleanupFailed => write!(f, "MinHook cleanup failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HookTargetId, InitializeStatus, RESOLVE_CODE_BASE, ResolveFailureKind};
+
+    #[test]
+    fn success_code_is_zero() {
+        assert_eq!(InitializeStatus::Success.to_code(), 0);
+        assert_eq!(
+            InitializeStatus::from_code(0),
+            Some(InitializeStatus::Success)
+        );
+    }
+
+    #[test]
+    fn resolve_codes_pack_kind_and_target() {
+        let present_not_found = InitializeStatus::Resolve {
+            kind: ResolveFailureKind::NotFound,
+            target: HookTargetId::Present,
+        };
+        assert_eq!(present_not_found.to_code(), 0x0001_0101);
+        assert_eq!(
+            InitializeStatus::from_code(0x0001_0101),
+            Some(present_not_found)
+        );
+
+        let overlays_prologue = InitializeStatus::Resolve {
+            kind: ResolveFailureKind::PrologueConflict,
+            target: HookTargetId::OverlaysEnabled,
+        };
+        assert_eq!(overlays_prologue.to_code(), 0x0001_0309);
+        assert_eq!(
+            InitializeStatus::from_code(0x0001_0309),
+            Some(overlays_prologue)
+        );
+    }
+
+    #[test]
+    fn invalid_codes_are_rejected() {
+        assert_eq!(InitializeStatus::from_code(RESOLVE_CODE_BASE), None);
+        assert_eq!(InitializeStatus::from_code(0x0001_0001), None);
+        assert_eq!(InitializeStatus::from_code(0x0001_0100), None);
+        assert_eq!(InitializeStatus::from_code(0x0002_0101), None);
+        assert_eq!(InitializeStatus::from_code(15), None);
+        assert_eq!(InitializeStatus::from_code(u32::MAX), None);
     }
 }
