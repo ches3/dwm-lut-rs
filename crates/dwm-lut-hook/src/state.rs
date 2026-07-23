@@ -287,15 +287,6 @@ pub(crate) fn begin_shutdown() -> ShutdownStart {
     }
 }
 
-pub(crate) fn mark_process_detaching() {
-    let _ = LIFECYCLE.compare_exchange(
-        LIFECYCLE_RUNNING,
-        LIFECYCLE_SHUT_DOWN,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    );
-}
-
 pub(crate) fn clear_state_after_shutdown() {
     if let Some(state) = STATE.get()
         && let Ok(mut guard) = state.lock()

@@ -106,15 +106,11 @@ pub unsafe extern "system" fn DllMain(
     _reserved: *mut c_void,
 ) -> i32 {
     const DLL_PROCESS_ATTACH: u32 = 1;
-    const DLL_PROCESS_DETACH: u32 = 0;
 
     if reason == DLL_PROCESS_ATTACH {
         unsafe {
             DisableThreadLibraryCalls(module);
         }
-    } else if reason == DLL_PROCESS_DETACH {
-        state::mark_process_detaching();
-        state::clear_present_session();
     }
 
     TRUE
