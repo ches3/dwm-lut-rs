@@ -1,31 +1,29 @@
-use std::fmt;
+mod error;
+
+pub use error::{HookError, ReplaceAssignmentsError};
+
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dwm_lut_payload::{
-    DwmLutPayloadBuffer, HookPayload, InitializeStatus, PayloadError, ReplaceAssignmentsStatus,
-    ResolveFailureKind, ShutdownStatus, deserialize_payload_buffer,
+    DwmLutPayloadBuffer, HookPayload, InitializeStatus, ReplaceAssignmentsStatus, ShutdownStatus,
+    deserialize_payload_buffer,
 };
 
 use crate::flip_gate::FlipGateEffects;
 use crate::log;
-use std::sync::Arc;
-
 use crate::minhook::{
-    MinHookError, disable_registered_hooks, enable_registered_hooks, register_plan,
-    unregister_registered_hooks,
+    disable_registered_hooks, enable_registered_hooks, register_plan, unregister_registered_hooks,
 };
-use crate::profile::{
-    HookProfile, ProfileSelectError, dwmcore_file_version, select_versioned_profile,
-};
-use crate::state::{LutAssignment, assignments_from_payload};
-
+use crate::profile::{HookProfile, dwmcore_file_version, select_versioned_profile};
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
+use crate::state::assignments_from_payload;
 use crate::state::{
-    HookRegistrationPlan, HookRuntime, HookState, ReplaceAssignmentsStart,
-    ReplaceLutAssignmentsError, ShutdownStart, begin_replace_assignments, begin_shutdown,
-    can_initialize, clear_state_after_shutdown, finish_reactivation, finish_replace_assignments,
-    finish_shutdown, has_retained_state, install_state, lock_present_runtime, minhook_cleanup_plan,
-    reactivate_retained_state, replace_lut_assignments, retain_state_after_shutdown,
+    HookRegistrationPlan, HookRuntime, HookState, ReplaceAssignmentsStart, ShutdownStart,
+    begin_replace_assignments, begin_shutdown, can_initialize, clear_state_after_shutdown,
+    finish_reactivation, finish_replace_assignments, finish_shutdown, has_retained_state,
+    install_state, lock_present_runtime, minhook_cleanup_plan, reactivate_retained_state,
+    replace_lut_assignments, retain_state_after_shutdown,
 };
 
 static INITIALIZATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -34,7 +32,7 @@ struct InitializationGuard;
 
 impl Drop for InitializationGuard {
     fn drop(&mut self) {
-        clear_initialization_in_progress();
+        INITIALIZATION_IN_PROGRESS.store(false, Ordering::Release);
     }
 }
 
@@ -51,12 +49,15 @@ fn enter_initialization() -> Result<InitializationGuard, HookError> {
         return Err(HookError::AlreadyInitialized);
     }
 
-    if !mark_initialization_in_progress() {
+    if INITIALIZATION_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         return Err(HookError::AlreadyInitialized);
     }
 
     if !can_initialize() {
-        clear_initialization_in_progress();
+        INITIALIZATION_IN_PROGRESS.store(false, Ordering::Release);
         return Err(HookError::AlreadyInitialized);
     }
 
@@ -73,105 +74,9 @@ fn enter_replace_assignments() -> Result<ReplaceAssignmentsGuard, ReplaceAssignm
     }
 }
 
-fn is_initialization_in_progress() -> bool {
-    INITIALIZATION_IN_PROGRESS.load(Ordering::Acquire)
-}
-
-fn mark_initialization_in_progress() -> bool {
-    INITIALIZATION_IN_PROGRESS
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-}
-
-fn clear_initialization_in_progress() {
-    INITIALIZATION_IN_PROGRESS.store(false, Ordering::Release);
-}
-
 #[cfg(test)]
 pub(crate) fn reset_initialization_guard_for_tests() {
-    clear_initialization_in_progress();
-}
-
-#[derive(Debug)]
-pub enum HookError {
-    AlreadyInitialized,
-    ProfileSelect(ProfileSelectError),
-    Payload(PayloadError),
-    MinHook(MinHookError),
-    Resolve(HookResolveError),
-}
-
-impl fmt::Display for HookError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AlreadyInitialized => write!(f, "hook is already initialized"),
-            Self::ProfileSelect(error) => write!(f, "{error}"),
-            Self::Payload(error) => write!(f, "{error}"),
-            Self::MinHook(error) => write!(f, "{error}"),
-            Self::Resolve(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl std::error::Error for HookError {}
-
-impl From<HookResolveError> for HookError {
-    fn from(value: HookResolveError) -> Self {
-        Self::Resolve(value)
-    }
-}
-
-impl From<PayloadError> for HookError {
-    fn from(value: PayloadError) -> Self {
-        Self::Payload(value)
-    }
-}
-
-impl From<MinHookError> for HookError {
-    fn from(value: MinHookError) -> Self {
-        Self::MinHook(value)
-    }
-}
-
-impl From<ProfileSelectError> for HookError {
-    fn from(value: ProfileSelectError) -> Self {
-        Self::ProfileSelect(value)
-    }
-}
-
-#[derive(Debug)]
-pub enum ReplaceAssignmentsError {
-    NotInitialized,
-    AlreadyInProgress,
-    Payload(PayloadError),
-    State(ReplaceLutAssignmentsError),
-}
-
-impl fmt::Display for ReplaceAssignmentsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotInitialized => write!(f, "hook is not initialized"),
-            Self::AlreadyInProgress => write!(f, "hook initialization or shutdown is in progress"),
-            Self::Payload(error) => write!(f, "{error}"),
-            Self::State(ReplaceLutAssignmentsError::NotInitialized) => {
-                write!(f, "hook is not initialized")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ReplaceAssignmentsError {}
-
-impl From<PayloadError> for ReplaceAssignmentsError {
-    fn from(value: PayloadError) -> Self {
-        Self::Payload(value)
-    }
-}
-
-impl From<ReplaceLutAssignmentsError> for ReplaceAssignmentsError {
-    fn from(value: ReplaceLutAssignmentsError) -> Self {
-        Self::State(value)
-    }
+    INITIALIZATION_IN_PROGRESS.store(false, Ordering::Release);
 }
 
 #[cfg(test)]
@@ -184,7 +89,7 @@ pub(crate) fn initialize_with_resolution(
     if has_retained_state() {
         return reactivate_from_payload(payload);
     }
-    let state = prepare_initial_state_with_resolution(profile, payload, resolution)?;
+    let state = prepare_initial_state(profile, payload, |_| Ok(resolution))?;
     install_prepared_state(state)
 }
 
@@ -221,7 +126,7 @@ pub(crate) unsafe fn ffi_initialize(payload_buffer: *const DwmLutPayloadBuffer) 
 
 pub(crate) fn ffi_shutdown() -> u32 {
     log::shutdown_start();
-    if is_initialization_in_progress() {
+    if INITIALIZATION_IN_PROGRESS.load(Ordering::Acquire) {
         log::shutdown_finished(log::ShutdownFinished::InitializationInProgress);
         return ShutdownStatus::AlreadyInProgress as u32;
     }
@@ -292,7 +197,7 @@ pub(crate) unsafe fn ffi_replace_assignments(payload_buffer: *const DwmLutPayloa
             ReplaceAssignmentsStatus::Success as u32
         }
         Err(error) => {
-            let status = map_replace_assignments_error(&error);
+            let status = ReplaceAssignmentsStatus::from(&error);
             log::replace_assignments_failed(status, &error);
             status as u32
         }
@@ -300,7 +205,7 @@ pub(crate) unsafe fn ffi_replace_assignments(payload_buffer: *const DwmLutPayloa
 }
 
 fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsError> {
-    if is_initialization_in_progress() {
+    if INITIALIZATION_IN_PROGRESS.load(Ordering::Acquire) {
         return Err(ReplaceAssignmentsError::AlreadyInProgress);
     }
     let _guard = enter_replace_assignments()?;
@@ -316,17 +221,6 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
     Ok(())
 }
 
-fn map_replace_assignments_error(error: &ReplaceAssignmentsError) -> ReplaceAssignmentsStatus {
-    match error {
-        ReplaceAssignmentsError::NotInitialized
-        | ReplaceAssignmentsError::State(ReplaceLutAssignmentsError::NotInitialized) => {
-            ReplaceAssignmentsStatus::NotInitialized
-        }
-        ReplaceAssignmentsError::AlreadyInProgress => ReplaceAssignmentsStatus::AlreadyInProgress,
-        ReplaceAssignmentsError::Payload(error) => ReplaceAssignmentsStatus::from(error),
-    }
-}
-
 fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
     let _guard = enter_initialization()?;
 
@@ -334,15 +228,13 @@ fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
         return reactivate_from_payload(payload);
     }
 
-    let state = prepare_initial_state_from_payload(payload)?;
-    install_prepared_state(state)
-}
-
-fn selected_profile() -> Result<HookProfile, HookError> {
     let dwmcore_version = dwmcore_file_version()?;
     let entry = select_versioned_profile(dwmcore_version)?;
     log::profile_selected(entry.min_version, dwmcore_version);
-    Ok((entry.profile)())
+    let profile = (entry.profile)();
+
+    let state = prepare_initial_state(profile, payload, resolve_profile)?;
+    install_prepared_state(state)
 }
 
 fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
@@ -365,7 +257,7 @@ fn install_prepared_state(state: HookState) -> Result<(), HookError> {
     let hooks = state.runtime.hooks.clone();
 
     install_state(state).map_err(|state| {
-        rollback_registered_state_hooks(&state);
+        unregister_registered_hooks(&state.runtime.minhook, &state.runtime.hooks);
         HookError::AlreadyInitialized
     })?;
 
@@ -380,16 +272,7 @@ fn install_prepared_state(state: HookState) -> Result<(), HookError> {
     Ok(())
 }
 
-fn rollback_registered_state_hooks(state: &HookState) {
-    unregister_registered_hooks(&state.runtime.minhook, &state.runtime.hooks);
-}
-
-fn prepare_initial_state_from_payload(payload: HookPayload) -> Result<HookState, HookError> {
-    let profile = selected_profile()?;
-    prepare_initial_state_from_payload_with_profile_resolver(profile, payload, resolve_profile)
-}
-
-fn prepare_initial_state_from_payload_with_profile_resolver<F>(
+fn prepare_initial_state<F>(
     profile: HookProfile,
     payload: HookPayload,
     resolver: F,
@@ -402,24 +285,6 @@ where
     let resolution = resolver(&profile)?;
     log::signatures(&resolution);
 
-    finalize_initial_state(payload, profile, resolution, assignments)
-}
-
-#[cfg(test)]
-pub(crate) fn prepare_initial_state_with_resolution(
-    profile: HookProfile,
-    payload: HookPayload,
-    resolution: SignatureResolutionReport,
-) -> Result<HookState, HookError> {
-    prepare_initial_state_from_payload_with_profile_resolver(profile, payload, |_| Ok(resolution))
-}
-
-fn finalize_initial_state(
-    payload: HookPayload,
-    profile: HookProfile,
-    resolution: SignatureResolutionReport,
-    assignments: Vec<LutAssignment>,
-) -> Result<HookState, HookError> {
     let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
     let (minhook, registered_hooks) = register_plan(&registration_plan)?;
     log::hooks(log::HooksPhase::Created, &registered_hooks);
@@ -452,51 +317,6 @@ fn finalize_initial_state(
     })
 }
 
-impl From<HookResolveError> for InitializeStatus {
-    fn from(error: HookResolveError) -> Self {
-        match error {
-            HookResolveError::ModuleNotLoaded { .. } => Self::DwmcoreModuleNotLoaded,
-            HookResolveError::InvalidModuleImage { .. } => Self::DwmcoreImageInvalid,
-            HookResolveError::ModuleAccessFailed { .. } => Self::DwmcoreImageAccessFailed,
-            HookResolveError::ModuleImageMismatch { .. } => Self::DwmcoreImageMismatch,
-            HookResolveError::SignatureNotFound { target } => Self::Resolve {
-                kind: ResolveFailureKind::NotFound,
-                target: target.into(),
-            },
-            HookResolveError::SignatureAmbiguous { target, .. } => Self::Resolve {
-                kind: ResolveFailureKind::Ambiguous,
-                target: target.into(),
-            },
-            HookResolveError::ConflictingPrologue { target, .. } => Self::Resolve {
-                kind: ResolveFailureKind::PrologueConflict,
-                target: target.into(),
-            },
-        }
-    }
-}
-
-impl From<HookError> for InitializeStatus {
-    fn from(error: HookError) -> Self {
-        match error {
-            HookError::AlreadyInitialized => Self::AlreadyInitialized,
-            HookError::ProfileSelect(error) => match error {
-                ProfileSelectError::UnsupportedDwmcoreVersion { .. } => {
-                    Self::UnsupportedDwmcoreVersion
-                }
-                ProfileSelectError::DwmcoreModuleNotLoaded => Self::DwmcoreModuleNotLoaded,
-                ProfileSelectError::DwmcoreVersionQueryFailed => Self::DwmcoreVersionQueryFailed,
-            },
-            HookError::Resolve(error) => error.into(),
-            HookError::Payload(error) => InitializeStatus::from(&error),
-            HookError::MinHook(error) => match error.operation {
-                crate::minhook::MinHookOperation::Initialize => Self::MinHookInitializeFailed,
-                crate::minhook::MinHookOperation::CreateHook(_) => Self::MinHookCreateHookFailed,
-                crate::minhook::MinHookOperation::EnableHook => Self::MinHookEnableHookFailed,
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use dwm_lut_payload::{
@@ -509,6 +329,8 @@ mod tests {
         HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport,
     };
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK};
+
+    use super::HookError;
 
     fn test_profile() -> HookProfile {
         crate::profile::latest_registered_profile()
@@ -569,24 +391,20 @@ mod tests {
             .expect("test mutex should lock");
         crate::minhook::reset_test_minhook_behavior(None, None, None, None);
 
-        let error = super::prepare_initial_state_from_payload_with_profile_resolver(
-            test_profile(),
-            test_payload(),
-            |_| {
-                Err(HookResolveError::ConflictingPrologue {
-                    target: HookTarget::Present,
-                    rva: 0x1000,
-                    mismatch_offset: 0,
-                    expected: 0x40,
-                    actual: 0xE9,
-                })
-            },
-        )
+        let error = super::prepare_initial_state(test_profile(), test_payload(), |_| {
+            Err(HookResolveError::ConflictingPrologue {
+                target: HookTarget::Present,
+                rva: 0x1000,
+                mismatch_offset: 0,
+                expected: 0x40,
+                actual: 0xE9,
+            })
+        })
         .expect_err("prologue conflict should stop initialization");
 
         assert!(matches!(
             error,
-            super::HookError::Resolve(HookResolveError::ConflictingPrologue {
+            HookError::Resolve(HookResolveError::ConflictingPrologue {
                 target: HookTarget::Present,
                 ..
             })
@@ -630,10 +448,7 @@ mod tests {
         ];
 
         for (error, expected) in cases {
-            assert_eq!(
-                InitializeStatus::from(super::HookError::from(error)),
-                expected
-            );
+            assert_eq!(InitializeStatus::from(HookError::from(error)), expected);
         }
     }
 
@@ -653,7 +468,7 @@ mod tests {
         )
         .expect_err("enable failure should abort initialization");
 
-        assert!(matches!(error, super::HookError::MinHook(_)));
+        assert!(matches!(error, HookError::MinHook(_)));
         let calls = crate::minhook::test_minhook_call_counts();
         assert!(calls.create_calls > 0);
         assert_eq!(calls.enable_calls, 1);
