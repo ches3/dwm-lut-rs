@@ -6,8 +6,7 @@ use dwm_lut_payload::{ColorMode, HookPayload, MonitorIdentity, MonitorTarget, Pa
 
 use crate::flip_gate::FlipGateEffects;
 use crate::minhook::{MinHookRuntime, RegisteredHook};
-use crate::profile::{HookProfile, HookTarget};
-use crate::resolver::SignatureResolutionReport;
+use crate::profile::HookProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LutMetadata {
@@ -70,39 +69,6 @@ pub(crate) fn find_assignment(
     assignments.iter().enumerate().find(|(_, assignment)| {
         assignment.target.identity == identity && assignment.target.color_mode == color_mode
     })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HookRegistrationTarget {
-    pub target: HookTarget,
-    pub address: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HookRegistrationPlan {
-    pub module_name: &'static str,
-    pub module_base_address: usize,
-    pub module_size: usize,
-    pub targets: Vec<HookRegistrationTarget>,
-}
-
-impl HookRegistrationPlan {
-    pub fn from_resolution(resolution: &SignatureResolutionReport) -> Self {
-        Self {
-            module_name: resolution.module.module_name,
-            module_base_address: resolution.module.base_address,
-            module_size: resolution.module.size,
-            targets: resolution
-                .targets
-                .iter()
-                .filter(|target| target.target.is_function_hook_target())
-                .map(|target| HookRegistrationTarget {
-                    target: target.target,
-                    address: target.address,
-                })
-                .collect(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

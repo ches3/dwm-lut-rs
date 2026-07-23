@@ -19,11 +19,11 @@ use crate::profile::{HookProfile, dwmcore_file_version, select_versioned_profile
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::assignments_from_payload;
 use crate::state::{
-    HookRegistrationPlan, HookRuntime, HookState, ReplaceAssignmentsStart, ShutdownStart,
-    begin_replace_assignments, begin_shutdown, can_initialize, clear_state_after_shutdown,
-    finish_reactivation, finish_replace_assignments, finish_shutdown, has_retained_state,
-    install_state, lock_present_runtime, minhook_cleanup_plan, reactivate_retained_state,
-    replace_lut_assignments, retain_state_after_shutdown,
+    HookRuntime, HookState, ReplaceAssignmentsStart, ShutdownStart, begin_replace_assignments,
+    begin_shutdown, can_initialize, clear_state_after_shutdown, finish_reactivation,
+    finish_replace_assignments, finish_shutdown, has_retained_state, install_state,
+    lock_present_runtime, minhook_cleanup_plan, reactivate_retained_state, replace_lut_assignments,
+    retain_state_after_shutdown,
 };
 
 static INITIALIZATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -285,24 +285,13 @@ where
     let resolution = resolver(&profile)?;
     log::signatures(&resolution);
 
-    let registration_plan = HookRegistrationPlan::from_resolution(&resolution);
-    let (minhook, registered_hooks) = register_plan(&registration_plan)?;
+    let (minhook, registered_hooks) = register_plan(&resolution.function_targets)?;
     log::hooks(log::HooksPhase::Created, &registered_hooks);
 
-    let overlay_test_mode_address = resolution
-        .targets
-        .iter()
-        .find(|target| target.target == crate::profile::HookTarget::OverlayTestMode)
-        .map(|target| target.address)
-        .filter(|address| *address != 0);
-    let disable_independent_flip_address = resolution
-        .targets
-        .iter()
-        .find(|target| target.target == crate::profile::HookTarget::DisableIndependentFlip)
-        .map(|target| target.address)
-        .filter(|address| *address != 0);
-    let flip_gate_effects =
-        FlipGateEffects::new(overlay_test_mode_address, disable_independent_flip_address);
+    let flip_gate_effects = FlipGateEffects::new(
+        resolution.overlay_test_mode,
+        resolution.disable_independent_flip,
+    );
 
     Ok(HookState {
         payload,
@@ -325,9 +314,7 @@ mod tests {
     };
 
     use crate::profile::{DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError};
-    use crate::resolver::{
-        HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport,
-    };
+    use crate::resolver::{HookResolveError, SignatureResolutionReport};
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK};
 
     use super::HookError;
@@ -356,31 +343,6 @@ mod tests {
                     values: vec![[0.0, 0.0, 0.0]; 8],
                 },
             }],
-        }
-    }
-
-    fn synthetic_resolution(profile: &HookProfile) -> SignatureResolutionReport {
-        let base_address = 0x1800_0000usize;
-        SignatureResolutionReport {
-            module: LoadedModule {
-                module_name: crate::profile::HOOK_MODULE_NAME,
-                base_address,
-                size: 0x20_0000,
-            },
-            targets: profile
-                .signatures
-                .iter()
-                .enumerate()
-                .map(|(index, signature)| ResolvedTarget {
-                    target: signature.target,
-                    address: if signature.target.is_function_hook_target() {
-                        base_address + 0x1000 + index * 0x100
-                    } else {
-                        0
-                    },
-                })
-                .collect(),
-            skipped_signatures: Vec::new(),
         }
     }
 
@@ -464,7 +426,7 @@ mod tests {
         let error = super::initialize_with_resolution(
             profile,
             test_payload(),
-            synthetic_resolution(&profile),
+            SignatureResolutionReport::synthetic_for_tests(&profile),
         )
         .expect_err("enable failure should abort initialization");
 
@@ -488,8 +450,12 @@ mod tests {
         state::reset_state_for_tests();
         let profile = test_profile();
 
-        super::initialize_with_resolution(profile, test_payload(), synthetic_resolution(&profile))
-            .expect("initial initialization should succeed");
+        super::initialize_with_resolution(
+            profile,
+            test_payload(),
+            SignatureResolutionReport::synthetic_for_tests(&profile),
+        )
+        .expect("initial initialization should succeed");
         let initialized_calls = crate::minhook::test_minhook_call_counts();
 
         assert_eq!(super::ffi_shutdown(), ShutdownStatus::Success as u32);
@@ -501,8 +467,12 @@ mod tests {
         assert_eq!(shutdown_calls.remove_calls, 0);
         assert_eq!(shutdown_calls.uninitialize_calls, 0);
 
-        super::initialize_with_resolution(profile, test_payload(), synthetic_resolution(&profile))
-            .expect("reinitialization should reuse registered hooks");
+        super::initialize_with_resolution(
+            profile,
+            test_payload(),
+            SignatureResolutionReport::synthetic_for_tests(&profile),
+        )
+        .expect("reinitialization should reuse registered hooks");
         let reinitialized_calls = crate::minhook::test_minhook_call_counts();
         assert!(state::is_initialized());
         assert_eq!(

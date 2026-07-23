@@ -174,16 +174,26 @@ pub(crate) fn signatures(report: &SignatureResolutionReport) {
     #[cfg(debug_assertions)]
     {
         super::write(format_args!(
-            "event=signatures module={} module_size=0x{:x} target_count={} skipped_count={}",
+            "event=signatures module={} module_size=0x{:x}",
             super::quoted(report.module.module_name),
             report.module.size,
-            report.targets.len(),
-            report.skipped_signatures.len()
         ));
-        for target in &report.targets {
+        for target in &report.function_targets {
             super::write(format_args!(
                 "event=signature_resolved target={}",
                 super::quoted(target.target.label())
+            ));
+        }
+        if report.overlay_test_mode.is_some() {
+            super::write(format_args!(
+                "event=signature_resolved target={}",
+                super::quoted(crate::profile::HookTarget::OverlayTestMode.label())
+            ));
+        }
+        if report.disable_independent_flip.is_some() {
+            super::write(format_args!(
+                "event=signature_resolved target={}",
+                super::quoted(crate::profile::HookTarget::DisableIndependentFlip.label())
             ));
         }
         for skipped in &report.skipped_signatures {

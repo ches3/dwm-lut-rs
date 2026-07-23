@@ -68,7 +68,7 @@ pub(crate) mod test_support {
     use crate::HookProfile;
     use crate::minhook;
     use crate::profile::HookTarget;
-    use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
+    use crate::resolver::SignatureResolutionReport;
     use crate::state;
 
     use super::collect::{RectVec, read_dirty_rects};
@@ -121,31 +121,6 @@ pub(crate) mod test_support {
         }
     }
 
-    fn synthetic_resolution(profile: &HookProfile) -> SignatureResolutionReport {
-        let base_address = 0x1800_0000usize;
-        SignatureResolutionReport {
-            module: LoadedModule {
-                module_name: crate::profile::HOOK_MODULE_NAME,
-                base_address,
-                size: 0x20_0000,
-            },
-            targets: profile
-                .signatures
-                .iter()
-                .enumerate()
-                .map(|(index, signature)| ResolvedTarget {
-                    target: signature.target,
-                    address: if !signature.target.is_function_hook_target() {
-                        0
-                    } else {
-                        base_address + 0x1000 + index * 0x100
-                    },
-                })
-                .collect(),
-            skipped_signatures: Vec::new(),
-        }
-    }
-
     fn identity_lut() -> PayloadLut {
         PayloadLut {
             size: 2,
@@ -186,7 +161,7 @@ pub(crate) mod test_support {
 
     pub(crate) fn initialize_test_state_from_payload(payload: HookPayload) {
         let profile = test_profile();
-        let resolution = synthetic_resolution(&profile);
+        let resolution = SignatureResolutionReport::synthetic_for_tests(&profile);
         crate::bootstrap::initialize_with_resolution(profile, payload, resolution)
             .expect("initialization should succeed with synthetic resolution");
     }

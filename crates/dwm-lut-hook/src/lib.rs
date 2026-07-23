@@ -25,9 +25,9 @@ pub use resolver::{
     SkippedSignatureReason, resolve_profile,
 };
 pub use state::{
-    HookRegistrationPlan, HookRegistrationTarget, HookRuntime, HookState, LutAssignment,
-    LutMetadata, ShaderTexture3D, assignments_from_payload, cube_to_texture, has_active_contexts,
-    has_lut_assignments, has_present_context, hook_profile, is_initialized,
+    HookRuntime, HookState, LutAssignment, LutMetadata, ShaderTexture3D, assignments_from_payload,
+    cube_to_texture, has_active_contexts, has_lut_assignments, has_present_context, hook_profile,
+    is_initialized,
 };
 
 use std::ffi::c_void;

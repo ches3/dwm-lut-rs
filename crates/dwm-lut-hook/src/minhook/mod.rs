@@ -18,7 +18,7 @@ pub(crate) fn original_pointer_for_target(
 }
 
 use crate::profile::HookTarget;
-use crate::state::HookRegistrationPlan;
+use crate::resolver::ResolvedTarget;
 
 pub type MhStatus = i32;
 
@@ -176,7 +176,7 @@ pub struct RegisteredHook {
 }
 
 pub(crate) fn register_plan(
-    plan: &HookRegistrationPlan,
+    targets: &[ResolvedTarget],
 ) -> Result<(MinHookRuntime, Vec<RegisteredHook>), MinHookError> {
     let apis = minhook_apis();
     let status = unsafe { (apis.initialize)() };
@@ -188,7 +188,7 @@ pub(crate) fn register_plan(
     }
     let owns_initialization = status == MH_OK;
 
-    let registered = match create_plan_hooks_with_apis(plan, apis) {
+    let registered = match create_plan_hooks_with_apis(targets, apis) {
         Ok(registered) => registered,
         Err(error) => {
             if !error.has_remove_hook_cleanup_failure() && owns_initialization {
@@ -235,10 +235,10 @@ pub(crate) fn reset_test_original_slots() {
 }
 
 pub(crate) fn create_plan_hooks_with_apis(
-    plan: &HookRegistrationPlan,
+    targets: &[ResolvedTarget],
     apis: MinHookApis,
 ) -> Result<Vec<RegisteredHook>, MinHookError> {
-    create_hooks_for_plan(plan, apis).map(registered_hooks_from_created)
+    create_hooks_for_targets(targets, apis).map(registered_hooks_from_created)
 }
 
 fn enable_created_hooks_with_apis(apis: MinHookApis) -> Result<(), MinHookError> {
@@ -253,13 +253,13 @@ fn enable_created_hooks_with_apis(apis: MinHookApis) -> Result<(), MinHookError>
     Ok(())
 }
 
-fn create_hooks_for_plan(
-    plan: &HookRegistrationPlan,
+fn create_hooks_for_targets(
+    targets: &[ResolvedTarget],
     apis: MinHookApis,
 ) -> Result<Vec<CreatedHook>, MinHookError> {
-    let mut created = Vec::with_capacity(plan.targets.len());
+    let mut created = Vec::with_capacity(targets.len());
 
-    for target in &plan.targets {
+    for target in targets {
         let detour = detour_for_target(target.target);
         let original_slot = original_slot_for_target(target.target);
         let target_address = target.address as *mut c_void;
@@ -569,9 +569,8 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use crate::profile::HookTarget;
-    use crate::state::{
-        HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK, HookRegistrationPlan, HookRegistrationTarget,
-    };
+    use crate::resolver::ResolvedTarget;
+    use crate::state::HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK;
 
     use super::{
         MinHookCleanupOperation, MinHookOperation, detours, disable_registered_hooks,
@@ -579,19 +578,14 @@ mod tests {
         unregister_registered_hooks, unregister_registered_hooks_with_apis,
     };
 
-    fn plan_with_targets(targets: &[(HookTarget, usize)]) -> HookRegistrationPlan {
-        HookRegistrationPlan {
-            module_name: crate::profile::HOOK_MODULE_NAME,
-            module_base_address: 0x1800_0000,
-            module_size: 0x20_0000,
-            targets: targets
-                .iter()
-                .map(|(target, address)| HookRegistrationTarget {
-                    target: *target,
-                    address: *address,
-                })
-                .collect(),
-        }
+    fn targets(entries: &[(HookTarget, usize)]) -> Vec<ResolvedTarget> {
+        entries
+            .iter()
+            .map(|(target, address)| ResolvedTarget {
+                target: *target,
+                address: *address,
+            })
+            .collect()
     }
 
     fn reset_controlled_behavior(create_fail_on: Option<usize>, enable_fail_on: Option<usize>) {
@@ -613,13 +607,13 @@ mod tests {
     #[test]
     fn registration_maps_targets_to_detours_and_original_slots() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        let plan = plan_with_targets(&[
+        let targets = targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
         ]);
 
         super::reset_test_minhook_behavior(None, None, None, None);
-        let (_runtime, registered) = register_plan(&plan).expect("registration should succeed");
+        let (_runtime, registered) = register_plan(&targets).expect("registration should succeed");
 
         assert_eq!(registered.len(), 2);
         assert_eq!(registered[0].target, HookTarget::Present);
@@ -650,10 +644,10 @@ mod tests {
     fn register_plan_defers_hook_enablement() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         super::reset_test_minhook_behavior(None, None, None, None);
-        let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
+        let targets = targets(&[(HookTarget::Present, 0x1800_1000)]);
 
         let (runtime, registered) =
-            register_plan(&plan).expect("register should create hooks without enabling them");
+            register_plan(&targets).expect("register should create hooks without enabling them");
         assert_eq!(registered.len(), 1);
         assert_eq!(test_minhook_call_counts().enable_calls, 0);
 
@@ -667,13 +661,13 @@ mod tests {
     fn create_failure_removes_previously_created_hooks() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_controlled_behavior(Some(3), None);
-        let plan = plan_with_targets(&[
+        let targets = targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
             (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
         ]);
 
-        let error = register_plan(&plan).expect_err("third create should fail");
+        let error = register_plan(&targets).expect_err("third create should fail");
 
         assert_eq!(
             error.operation,
@@ -692,13 +686,13 @@ mod tests {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_controlled_behavior(Some(3), None);
         set_controlled_cleanup_failures(None, Some(1));
-        let plan = plan_with_targets(&[
+        let targets = targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
             (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
         ]);
 
-        let error = register_plan(&plan).expect_err("third create should fail");
+        let error = register_plan(&targets).expect_err("third create should fail");
 
         assert_eq!(
             error.operation,
@@ -732,12 +726,12 @@ mod tests {
     fn unregister_disables_and_removes_registered_hooks() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_controlled_behavior(None, None);
-        let plan = plan_with_targets(&[
+        let targets = targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
         ]);
 
-        let (runtime, registered) = register_plan(&plan).expect("registration should succeed");
+        let (runtime, registered) = register_plan(&targets).expect("registration should succeed");
         let cleanup_failures = unregister_registered_hooks_with_apis(&registered, runtime.apis);
 
         let calls = test_minhook_call_counts();
@@ -762,11 +756,11 @@ mod tests {
     fn disable_keeps_registered_hooks_and_original_slots() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_controlled_behavior(None, None);
-        let plan = plan_with_targets(&[
+        let targets = targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
         ]);
-        let (runtime, registered) = register_plan(&plan).expect("registration should succeed");
+        let (runtime, registered) = register_plan(&targets).expect("registration should succeed");
 
         let cleanup_failures = disable_registered_hooks(&runtime, &registered);
 
@@ -793,9 +787,9 @@ mod tests {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_controlled_behavior(None, None);
         set_controlled_cleanup_failures(None, Some(1));
-        let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
+        let targets = targets(&[(HookTarget::Present, 0x1800_1000)]);
 
-        let (runtime, registered) = register_plan(&plan).expect("registration should succeed");
+        let (runtime, registered) = register_plan(&targets).expect("registration should succeed");
         let cleanup_failures = unregister_registered_hooks_with_apis(&registered, runtime.apis);
 
         assert_eq!(cleanup_failures.len(), 1);
@@ -818,8 +812,8 @@ mod tests {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_controlled_behavior(None, None);
         set_controlled_cleanup_failures(None, Some(1));
-        let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
-        let (runtime, registered) = register_plan(&plan).expect("registration should succeed");
+        let targets = targets(&[(HookTarget::Present, 0x1800_1000)]);
+        let (runtime, registered) = register_plan(&targets).expect("registration should succeed");
 
         let cleanup_failures = unregister_registered_hooks(&runtime, &registered);
 
@@ -834,8 +828,8 @@ mod tests {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         reset_controlled_behavior(None, None);
         set_controlled_cleanup_failures(Some(1), None);
-        let plan = plan_with_targets(&[(HookTarget::Present, 0x1800_1000)]);
-        let (runtime, registered) = register_plan(&plan).expect("registration should succeed");
+        let targets = targets(&[(HookTarget::Present, 0x1800_1000)]);
+        let (runtime, registered) = register_plan(&targets).expect("registration should succeed");
 
         let cleanup_failures = unregister_registered_hooks(&runtime, &registered);
 

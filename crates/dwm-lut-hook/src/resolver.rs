@@ -129,8 +129,39 @@ pub struct SkippedSignature {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureResolutionReport {
     pub module: LoadedModule,
-    pub targets: Vec<ResolvedTarget>,
+    pub function_targets: Vec<ResolvedTarget>,
+    pub overlay_test_mode: Option<usize>,
+    pub disable_independent_flip: Option<usize>,
     pub skipped_signatures: Vec<SkippedSignature>,
+}
+
+impl SignatureResolutionReport {
+    #[cfg(test)]
+    pub(crate) fn synthetic_for_tests(profile: &HookProfile) -> Self {
+        let base_address = 0x1800_0000usize;
+        let function_targets = profile
+            .signatures
+            .iter()
+            .enumerate()
+            .filter(|(_, signature)| signature.target.is_function_hook_target())
+            .map(|(index, signature)| ResolvedTarget {
+                target: signature.target,
+                address: base_address + 0x1000 + index * 0x100,
+            })
+            .collect();
+
+        Self {
+            module: LoadedModule {
+                module_name: HOOK_MODULE_NAME,
+                base_address,
+                size: 0x20_0000,
+            },
+            function_targets,
+            overlay_test_mode: None,
+            disable_independent_flip: None,
+            skipped_signatures: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,12 +294,20 @@ pub(crate) fn resolve_profile_from_image(
     module: LoadedModule,
     image: &[u8],
 ) -> Result<SignatureResolutionReport, HookResolveError> {
-    let mut targets = Vec::with_capacity(profile.signatures.len());
+    let mut function_targets = Vec::with_capacity(profile.signatures.len());
+    let mut overlay_test_mode = None;
+    let mut disable_independent_flip = None;
     let mut skipped_signatures = Vec::new();
 
     for signature in profile.signatures {
         match resolve_signature(module, image, signature) {
-            Ok(target) => targets.push(target),
+            Ok(target) => match target.target {
+                HookTarget::OverlayTestMode => overlay_test_mode = Some(target.address),
+                HookTarget::DisableIndependentFlip => {
+                    disable_independent_flip = Some(target.address);
+                }
+                _ => function_targets.push(target),
+            },
             Err(error) if !signature.target.is_required_signature() => {
                 skipped_signatures.push(skipped_signature_from_error(error)?);
             }
@@ -278,7 +317,9 @@ pub(crate) fn resolve_profile_from_image(
 
     Ok(SignatureResolutionReport {
         module,
-        targets,
+        function_targets,
+        overlay_test_mode,
+        disable_independent_flip,
         skipped_signatures,
     })
 }
@@ -304,11 +345,7 @@ fn validate_live_prologues(
     resolution: &SignatureResolutionReport,
     live_image: &[u8],
 ) -> Result<(), HookResolveError> {
-    for target in resolution
-        .targets
-        .iter()
-        .filter(|target| target.target.is_function_hook_target())
-    {
+    for target in &resolution.function_targets {
         let signature = profile
             .signatures
             .iter()
@@ -588,8 +625,8 @@ unsafe fn read_u32(base: *const u8, offset: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        HookResolveError, LoadedModule, find_signature_offsets, resolve_profile_from_clean_image,
-        resolve_profile_from_image,
+        HookResolveError, LoadedModule, ResolvedTarget, find_signature_offsets,
+        resolve_profile_from_clean_image, resolve_profile_from_image,
     };
     use crate::profile::{
         AobToken, HOOK_MODULE_NAME, HookProfile, HookSignature, HookTarget, SignatureLocator,
@@ -626,7 +663,7 @@ mod tests {
         let report = resolve_profile_from_clean_image(&profile, module, &live_image, &clean_image)
             .expect("matching live prologue should resolve");
 
-        assert_eq!(report.targets[0].address, module.base_address + 1);
+        assert_eq!(report.function_targets[0].address, module.base_address + 1);
     }
 
     #[test]
@@ -672,6 +709,57 @@ mod tests {
             signatures: PROLOGUE_TEST_SIGNATURES,
             ..test_profile()
         }
+    }
+
+    #[test]
+    fn resolve_profile_separates_function_and_global_targets() {
+        let image = [0xAA, 0xBB, 0xCC];
+        let module = LoadedModule {
+            module_name: HOOK_MODULE_NAME,
+            base_address: 0x2000_0000,
+            size: image.len(),
+        };
+        const SIGNATURES: &[HookSignature] = &[
+            HookSignature {
+                target: HookTarget::Present,
+                locator: SignatureLocator::Aob {
+                    tokens: &[AobToken::Exact(0xAA)],
+                },
+            },
+            HookSignature {
+                target: HookTarget::OverlayTestMode,
+                locator: SignatureLocator::Aob {
+                    tokens: &[AobToken::Exact(0xBB)],
+                },
+            },
+            HookSignature {
+                target: HookTarget::DisableIndependentFlip,
+                locator: SignatureLocator::Aob {
+                    tokens: &[AobToken::Exact(0xCC)],
+                },
+            },
+        ];
+        let profile = HookProfile {
+            signatures: SIGNATURES,
+            ..test_profile()
+        };
+
+        let report = resolve_profile_from_image(&profile, module, &image)
+            .expect("resolution should succeed");
+
+        assert_eq!(
+            report.function_targets,
+            vec![ResolvedTarget {
+                target: HookTarget::Present,
+                address: module.base_address,
+            }]
+        );
+        assert_eq!(report.overlay_test_mode, Some(module.base_address + 1));
+        assert_eq!(
+            report.disable_independent_flip,
+            Some(module.base_address + 2)
+        );
+        assert!(report.skipped_signatures.is_empty());
     }
 
     #[test]
@@ -725,7 +813,7 @@ mod tests {
         let report =
             resolve_profile_from_image(&profile, module, &image).expect("optional miss is allowed");
 
-        assert_eq!(report.targets.len(), 1);
+        assert_eq!(report.function_targets.len(), 1);
         assert_eq!(
             report.skipped_signatures,
             vec![crate::resolver::SkippedSignature {
@@ -765,7 +853,7 @@ mod tests {
         let report = resolve_profile_from_image(&profile, module, &image)
             .expect("optional ambiguity is allowed");
 
-        assert_eq!(report.targets.len(), 1);
+        assert_eq!(report.function_targets.len(), 1);
         assert_eq!(
             report.skipped_signatures,
             vec![crate::resolver::SkippedSignature {

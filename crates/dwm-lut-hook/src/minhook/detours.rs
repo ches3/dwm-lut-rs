@@ -350,7 +350,7 @@ mod tests {
     };
 
     use crate::HookProfile;
-    use crate::resolver::{LoadedModule, ResolvedTarget, SignatureResolutionReport};
+    use crate::resolver::SignatureResolutionReport;
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK};
 
     fn test_profile() -> HookProfile {
@@ -539,35 +539,10 @@ mod tests {
         }
     }
 
-    fn synthetic_resolution(profile: &HookProfile) -> SignatureResolutionReport {
-        let base_address = 0x1800_0000usize;
-        SignatureResolutionReport {
-            module: LoadedModule {
-                module_name: crate::profile::HOOK_MODULE_NAME,
-                base_address,
-                size: 0x20_0000,
-            },
-            targets: profile
-                .signatures
-                .iter()
-                .enumerate()
-                .map(|(index, signature)| ResolvedTarget {
-                    target: signature.target,
-                    address: if signature.target.is_function_hook_target() {
-                        base_address + 0x1000 + index * 0x100
-                    } else {
-                        0
-                    },
-                })
-                .collect(),
-            skipped_signatures: Vec::new(),
-        }
-    }
-
     fn initialize_test_state() {
         state::reset_state_for_tests();
         let profile = test_profile();
-        let resolution = synthetic_resolution(&profile);
+        let resolution = SignatureResolutionReport::synthetic_for_tests(&profile);
         crate::bootstrap::initialize_with_resolution(
             profile,
             test_payload(&[ColorMode::Sdr]),
