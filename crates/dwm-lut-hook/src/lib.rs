@@ -15,6 +15,8 @@ pub use flip_gate::{
 };
 pub use minhook::{MinHookError, MinHookRuntime, MinHookState, RegisteredHook};
 pub use present::DirtyRect;
+#[cfg(feature = "xtask")]
+pub use profile::file_version_from_path;
 pub use profile::{
     AobToken, DwmcoreVersion, HOOK_MODULE_NAME, HookProfile, HookSignature, HookTarget,
     MonitorIdentityOffsets, ProfileSelectError, SignatureLocator, SwapChainVtablePath,
@@ -24,6 +26,8 @@ pub use resolver::{
     HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport, SkippedSignature,
     SkippedSignatureReason, resolve_profile,
 };
+#[cfg(feature = "xtask")]
+pub use resolver::{MappedModuleImage, resolve_signature};
 pub use state::{
     HookRuntime, HookState, LutAssignment, LutMetadata, ShaderTexture3D, assignments_from_payload,
     cube_to_texture, has_active_contexts, has_lut_assignments, has_present_context, hook_profile,

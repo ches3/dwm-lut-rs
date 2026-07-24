@@ -277,7 +277,9 @@ pub fn dwmcore_file_version() -> Result<DwmcoreVersion, ProfileSelectError> {
     file_version_from_path(&PathBuf::from(OsString::from_wide(&path)))
 }
 
-fn file_version_from_path(path: &std::path::Path) -> Result<DwmcoreVersion, ProfileSelectError> {
+pub fn file_version_from_path(
+    path: &std::path::Path,
+) -> Result<DwmcoreVersion, ProfileSelectError> {
     let wide = path
         .as_os_str()
         .encode_wide()

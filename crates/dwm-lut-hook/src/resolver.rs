@@ -278,6 +278,32 @@ pub fn resolve_profile(
     resolve_profile_from_clean_image(profile, module, live_image, backing_image.as_slice())
 }
 
+#[cfg(feature = "xtask")]
+pub struct MappedModuleImage {
+    mapped: MappedImage,
+}
+
+#[cfg(feature = "xtask")]
+impl MappedModuleImage {
+    pub fn open(path: &Path) -> Result<Self, HookResolveError> {
+        Ok(Self {
+            mapped: MappedImage::open(path, HOOK_MODULE_NAME)?,
+        })
+    }
+
+    pub fn module(&self) -> LoadedModule {
+        LoadedModule {
+            module_name: HOOK_MODULE_NAME,
+            base_address: self.mapped.view.Value as usize,
+            size: self.mapped.size,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        self.mapped.as_slice()
+    }
+}
+
 fn resolve_profile_from_clean_image(
     profile: &HookProfile,
     module: LoadedModule,
@@ -397,7 +423,7 @@ fn validate_live_prologues(
     Ok(())
 }
 
-fn resolve_signature(
+pub fn resolve_signature(
     module: LoadedModule,
     image: &[u8],
     signature: &HookSignature,

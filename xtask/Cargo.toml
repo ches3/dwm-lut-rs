@@ -6,5 +6,18 @@ license.workspace = true
 publish = false
 
 [dependencies]
+clap = { version = "4.6.4", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
+comfy-table = "7.2.2"
+dwm-lut-hook = { version = "0.1.0", path = "../crates/dwm-lut-hook", features = ["xtask"] }
+flate2 = "1.1.9"
+iced-x86 = "1.21.0"
 ico = "0.5.0"
+pdb = "0.8.0"
+pelite = "0.10.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
 resvg = { version = "0.47.0", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+supports-color = "3.0.2"
+tempfile = "3.27.0"
+uuid = "1.24.0"

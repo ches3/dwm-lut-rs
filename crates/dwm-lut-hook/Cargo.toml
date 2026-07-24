@@ -9,6 +9,9 @@ name = "dwm_lut_hook"
 crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
+[features]
+xtask = []
+
 [dependencies]
 dwm-lut-payload = { path = "../dwm-lut-payload" }
 microseh = "1.2.0"
