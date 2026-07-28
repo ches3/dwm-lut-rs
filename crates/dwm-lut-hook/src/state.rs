@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
@@ -83,7 +82,6 @@ pub struct HookState {
     pub payload: HookPayload,
     pub profile: HookProfile,
     pub assignments: Arc<Vec<LutAssignment>>,
-    pub contexts: BTreeSet<usize>,
     pub runtime: HookRuntime,
 }
 
@@ -158,39 +156,11 @@ pub(crate) fn assignments() -> Option<Arc<Vec<LutAssignment>>> {
     with_state(|state| state.assignments.clone())
 }
 
-pub fn has_present_context(context_address: usize) -> bool {
-    with_state(|state| state.contexts.contains(&context_address)).unwrap_or(false)
-}
-
-pub fn has_active_contexts() -> bool {
-    with_state(|state| !state.contexts.is_empty()).unwrap_or(false)
-}
-
-pub fn has_lut_assignments() -> bool {
-    with_state(|state| !state.assignments.is_empty()).unwrap_or(false)
-}
-
 pub(crate) fn is_runtime_active() -> bool {
     matches!(
         LIFECYCLE.load(Ordering::Acquire),
         LIFECYCLE_RUNNING | LIFECYCLE_REPLACING_ASSIGNMENTS
     )
-}
-
-pub(crate) fn update_present_context(context_address: usize, active: bool) {
-    let _ = with_state_mut(|state| {
-        if active {
-            state.contexts.insert(context_address);
-        } else {
-            state.contexts.remove(&context_address);
-        }
-        let has_active = !state.contexts.is_empty();
-        state.runtime.flip_gate_effects.sync_active(has_active);
-    });
-}
-
-pub(crate) fn deactivate_present_context(context_address: usize) {
-    update_present_context(context_address, false);
 }
 
 pub(crate) fn begin_replace_assignments() -> ReplaceAssignmentsStart {
@@ -306,10 +276,6 @@ pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHo
     with_state(|state| (state.runtime.minhook, state.runtime.hooks.clone()))
 }
 
-pub(crate) fn clear_present_session() {
-    let _ = with_state_mut(clear_present_session_in);
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplaceLutAssignmentsError {
     NotInitialized,
@@ -332,12 +298,6 @@ fn update_lut_assignments(
 ) {
     state.payload = payload;
     state.assignments = Arc::new(assignments);
-    clear_present_session_in(state);
-}
-
-fn clear_present_session_in(state: &mut HookState) {
-    state.contexts.clear();
-    state.runtime.flip_gate_effects.restore();
 }
 
 fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
@@ -346,7 +306,7 @@ fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
     guard.as_ref().map(f)
 }
 
-fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
+pub(crate) fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
     let state = STATE.get()?;
     let mut guard = state.lock().ok()?;
     guard.as_mut().map(f)

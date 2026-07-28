@@ -196,6 +196,5 @@ pub(crate) fn shutdown_renderer_resources() -> usize {
 
 #[cfg(test)]
 pub(crate) use fake_renderer::{
-    fake_render_context_active, fake_render_present_lut_call, reset_fake_render_result,
-    set_fake_render_result,
+    fake_render_present_lut_call, reset_fake_render_result, set_fake_render_result,
 };

@@ -56,7 +56,6 @@ pub(crate) struct ApplyOutcome {
 }
 
 pub(crate) fn apply_lut(
-    this: usize,
     overlay_swap_chain: usize,
     inputs: &PresentInputs,
     rect_vec: usize,
@@ -116,7 +115,6 @@ pub(crate) fn apply_lut(
                 outcome.rect_vec =
                     full_present_rect_vec(rect, present_rect_storage, present_rect_vec_storage);
             }
-            state::update_present_context(this, render_outcome.lut_active);
         }
     }
 
@@ -152,8 +150,8 @@ mod tests {
 
     use super::super::collect::{PresentInputs, read_dirty_rects};
     use super::super::test_support::{
-        activate_context, initialize_test_state, initialize_test_state_from_payload,
-        test_monitor_identity, test_payload,
+        initialize_test_state, initialize_test_state_from_payload, test_monitor_identity,
+        test_payload,
     };
     use super::DirtyRect;
     use super::{ApplyOutcome, apply_lut, empty_rect_vec_storage};
@@ -189,7 +187,7 @@ mod tests {
         }
     }
 
-    fn run_apply(this: usize, overlay_swap_chain: usize, inputs: &PresentInputs) -> ApplyOutcome {
+    fn run_apply(overlay_swap_chain: usize, inputs: &PresentInputs) -> ApplyOutcome {
         let mut present_rect_storage = [DirtyRect {
             left: 0,
             top: 0,
@@ -198,7 +196,6 @@ mod tests {
         }];
         let mut present_rect_vec_storage = empty_rect_vec_storage();
         apply_lut(
-            this,
             overlay_swap_chain,
             inputs,
             0xdead,
@@ -208,12 +205,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_lut_updates_context_when_render_succeeds() {
+    fn apply_lut_forwards_present_inputs_when_render_succeeds() {
         let _guard = HOOK_GLOBAL_TEST_LOCK
             .lock()
             .expect("test mutex should lock");
         initialize_test_state();
-        let this = 0x1111;
         let overlay_swap_chain = 0x2222;
         let dirty_rects = vec![DirtyRect {
             left: 0,
@@ -230,25 +226,22 @@ mod tests {
             None,
         )));
 
-        let _ = run_apply(this, overlay_swap_chain, &inputs);
+        let _ = run_apply(overlay_swap_chain, &inputs);
 
-        assert!(state::has_present_context(this));
         let render_call = crate::d3d11::fake_render_present_lut_call()
             .expect("renderer should receive present inputs");
         assert_eq!(render_call.overlay_swap_chain, overlay_swap_chain);
         assert_eq!(render_call.monitor_identity, Some(test_monitor_identity()));
         assert_eq!(render_call.dirty_rects, dirty_rects);
-        assert_eq!(crate::d3d11::fake_render_context_active(), Some(false));
     }
 
     #[test]
-    fn apply_lut_activates_context_for_hdr_render_plan() {
+    fn apply_lut_renders_hdr_assignment() {
         let _guard = HOOK_GLOBAL_TEST_LOCK
             .lock()
             .expect("test mutex should lock");
         state::reset_state_for_tests();
         initialize_test_state_from_payload(test_payload(&[ColorMode::Sdr, ColorMode::Hdr]));
-        let this = 0x1111;
         let inputs = sample_inputs(
             false,
             vec![DirtyRect {
@@ -266,9 +259,9 @@ mod tests {
             None,
         )));
 
-        let _ = run_apply(this, 0x2222, &inputs);
+        let _ = run_apply(0x2222, &inputs);
 
-        assert!(state::has_present_context(this));
+        assert!(crate::d3d11::fake_render_present_lut_call().is_some());
         crate::d3d11::reset_fake_render_result();
     }
 
@@ -307,7 +300,6 @@ mod tests {
         }];
         let mut present_rect_vec_storage = empty_rect_vec_storage();
         let outcome = apply_lut(
-            0x1111,
             0x2222,
             &inputs,
             0xdead,
@@ -326,13 +318,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_lut_keeps_context_when_draw_fails_but_decision_applies() {
+    fn apply_lut_accepts_skipped_and_failed_draw_outcomes() {
         let _guard = HOOK_GLOBAL_TEST_LOCK
             .lock()
             .expect("test mutex should lock");
         initialize_test_state();
-        let this = 0x1111;
-        activate_context(this);
         let inputs = sample_inputs(
             false,
             vec![DirtyRect {
@@ -342,39 +332,7 @@ mod tests {
                 bottom: 64,
             }],
         );
-        crate::d3d11::set_fake_render_result(Ok(sample_outcome(
-            true,
-            Some(0),
-            Some(DXGI_FORMAT_B8G8R8A8_UNORM),
-            crate::d3d11::PresentDrawStatus::Failed(
-                crate::d3d11::PresentDrawFailReason::DrawFailed,
-            ),
-            None,
-        )));
 
-        let _ = run_apply(this, 0x2222, &inputs);
-
-        assert!(state::has_present_context(this));
-        crate::d3d11::reset_fake_render_result();
-    }
-
-    #[test]
-    fn apply_lut_clears_context_when_decision_is_not_applicable() {
-        let _guard = HOOK_GLOBAL_TEST_LOCK
-            .lock()
-            .expect("test mutex should lock");
-        initialize_test_state();
-        let this = 0x1111;
-        activate_context(this);
-        let inputs = sample_inputs(
-            false,
-            vec![DirtyRect {
-                left: 0,
-                top: 0,
-                right: 64,
-                bottom: 64,
-            }],
-        );
         crate::d3d11::set_fake_render_result(Ok(sample_outcome(
             false,
             None,
@@ -384,36 +342,21 @@ mod tests {
             ),
             None,
         )));
+        let _ = run_apply(0x2222, &inputs);
+        assert!(crate::d3d11::fake_render_present_lut_call().is_some());
 
-        let _ = run_apply(this, 0x2222, &inputs);
-
-        assert!(!state::has_present_context(this));
+        crate::d3d11::set_fake_render_result(Ok(sample_outcome(
+            true,
+            Some(0),
+            Some(DXGI_FORMAT_B8G8R8A8_UNORM),
+            crate::d3d11::PresentDrawStatus::Failed(
+                crate::d3d11::PresentDrawFailReason::DrawFailed,
+            ),
+            None,
+        )));
+        let _ = run_apply(0x2222, &inputs);
+        assert!(crate::d3d11::fake_render_present_lut_call().is_some());
         crate::d3d11::reset_fake_render_result();
-    }
-
-    #[test]
-    fn apply_lut_leaves_context_unchanged_when_acquire_fails() {
-        let _guard = HOOK_GLOBAL_TEST_LOCK
-            .lock()
-            .expect("test mutex should lock");
-        state::reset_state_for_tests();
-        initialize_test_state_from_payload(test_payload(&[ColorMode::Hdr]));
-        let this = 0x1111;
-        state::update_present_context(this, true);
-        crate::d3d11::reset_fake_render_result();
-        let inputs = sample_inputs(
-            false,
-            vec![DirtyRect {
-                left: 0,
-                top: 0,
-                right: 64,
-                bottom: 64,
-            }],
-        );
-
-        let _ = run_apply(this, 0x2222, &inputs);
-
-        assert!(state::has_present_context(this));
     }
 
     #[test]
@@ -432,7 +375,7 @@ mod tests {
 
         assert_eq!(state::begin_shutdown(), state::ShutdownStart::Started);
 
-        let _ = run_apply(0x1111, 0x1234, &sample_inputs(false, Vec::new()));
+        let _ = run_apply(0x1234, &sample_inputs(false, Vec::new()));
 
         assert!(crate::d3d11::fake_render_present_lut_call().is_none());
         state::reset_state_for_tests();

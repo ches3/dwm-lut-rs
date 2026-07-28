@@ -1,5 +1,6 @@
-#[cfg(not(test))]
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicPtr, Ordering};
+
 #[cfg(not(test))]
 use std::mem::size_of;
 
@@ -9,58 +10,83 @@ use windows::Win32::System::Memory::{
     PAGE_GUARD, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayTestModeControl {
-    Unmodified,
-    ForceMode5,
+#[cfg(debug_assertions)]
+use crate::log::SharedLimiter;
+use crate::state;
+
+const OVERLAY_TEST_MODE_FORCE: i32 = 5;
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum FlipGateKind {
+    OverlayContextDirectFlip,
+    DirectFlipInfoEnsureIndependentFlip,
+    IsDirectFlipSupportedOnTarget,
+    LegacySwapChainCheckDirectFlip,
+    IsAdvancedDirectFlipCompatible,
 }
 
-impl OverlayTestModeControl {
-    pub const fn is_unmodified(self) -> bool {
-        matches!(self, Self::Unmodified)
-    }
-
-    pub const fn is_force_mode_5(self) -> bool {
-        matches!(self, Self::ForceMode5)
-    }
-
-    pub const fn apply(self, original_mode: i32) -> i32 {
+#[cfg(debug_assertions)]
+impl FlipGateKind {
+    const fn label(self) -> &'static str {
         match self {
-            Self::Unmodified => original_mode,
-            Self::ForceMode5 => 5,
-        }
-    }
-
-    pub const fn from_active_contexts(has_active_contexts: bool) -> Self {
-        if has_active_contexts {
-            Self::ForceMode5
-        } else {
-            Self::Unmodified
+            Self::OverlayContextDirectFlip => "overlay_context_direct_flip",
+            Self::DirectFlipInfoEnsureIndependentFlip => "direct_flip_info_ensure_independent_flip",
+            Self::IsDirectFlipSupportedOnTarget => "is_direct_flip_supported_on_target",
+            Self::LegacySwapChainCheckDirectFlip => "legacy_swap_chain_check_direct_flip",
+            Self::IsAdvancedDirectFlipCompatible => "is_advanced_direct_flip_compatible",
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OverlayTestModePatch {
-    pub address: usize,
-    pub original_mode: Option<i32>,
-    pub applied: bool,
+#[cfg(debug_assertions)]
+static FLIP_GATE_DENIED_LIMITER: SharedLimiter<FlipGateKind> = SharedLimiter::new(600);
+
+#[cfg(debug_assertions)]
+fn record_flip_gate_denied(kind: FlipGateKind) {
+    let decision = FLIP_GATE_DENIED_LIMITER.sample(kind);
+    if decision.should_log {
+        crate::log::flip_gate_denied(kind.label(), decision.count);
+    }
+}
+
+pub(crate) fn apply_flip_gate<T: Default>(
+    original_slot: &AtomicPtr<c_void>,
+    #[cfg(debug_assertions)] kind: FlipGateKind,
+    call_original: impl FnOnce(*mut c_void) -> T,
+) -> T {
+    if state::is_runtime_active() {
+        #[cfg(debug_assertions)]
+        record_flip_gate_denied(kind);
+        return T::default();
+    }
+    let original = original_slot.load(Ordering::Acquire);
+    if original.is_null() {
+        return T::default();
+    }
+    call_original(original)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DisableIndependentFlipPatch {
-    pub address: usize,
-    pub original_value: Option<i32>,
-    pub applied: bool,
-    pub rejected: bool,
+struct GlobalI32Patch {
+    address: usize,
+    original: Option<i32>,
+    applied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DisableIndependentFlipPatch {
+    address: usize,
+    original: Option<i32>,
+    applied: bool,
+    rejected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlipGateEffects {
-    pub overlay_test_mode_control: OverlayTestModeControl,
-    pub overlay_test_mode_patch: Option<OverlayTestModePatch>,
-    pub disable_independent_flip_patch: Option<DisableIndependentFlipPatch>,
-    pub overlays_enabled_override: Option<bool>,
+    overlay_test_mode: Option<GlobalI32Patch>,
+    disable_independent_flip: Option<DisableIndependentFlipPatch>,
+    overlays_enabled_override: Option<bool>,
 }
 
 impl FlipGateEffects {
@@ -69,19 +95,18 @@ impl FlipGateEffects {
         disable_independent_flip_address: Option<usize>,
     ) -> Self {
         Self {
-            overlay_test_mode_control: OverlayTestModeControl::Unmodified,
-            overlay_test_mode_patch: overlay_test_mode_address
+            overlay_test_mode: overlay_test_mode_address
                 .filter(|address| *address != 0)
-                .map(|address| OverlayTestModePatch {
+                .map(|address| GlobalI32Patch {
                     address,
-                    original_mode: None,
+                    original: None,
                     applied: false,
                 }),
-            disable_independent_flip_patch: disable_independent_flip_address
+            disable_independent_flip: disable_independent_flip_address
                 .filter(|address| *address != 0)
                 .map(|address| DisableIndependentFlipPatch {
                     address,
-                    original_value: None,
+                    original: None,
                     applied: false,
                     rejected: false,
                 }),
@@ -89,77 +114,88 @@ impl FlipGateEffects {
         }
     }
 
-    pub fn sync_active(&mut self, active: bool) {
-        self.set_overlay_test_mode_control(OverlayTestModeControl::from_active_contexts(active));
-        self.set_disable_independent_flip_enabled(active);
-        self.set_overlays_enabled_override(active);
+    pub fn apply(&mut self) {
+        self.apply_overlay_test_mode();
+        self.apply_disable_independent_flip();
+        self.set_overlays_enabled_override(true);
     }
 
     pub fn restore(&mut self) {
-        self.set_overlay_test_mode_control(OverlayTestModeControl::Unmodified);
-        self.set_disable_independent_flip_enabled(false);
+        self.restore_overlay_test_mode();
+        self.restore_disable_independent_flip();
         self.set_overlays_enabled_override(false);
     }
 
-    fn set_overlay_test_mode_control(&mut self, control: OverlayTestModeControl) {
-        self.overlay_test_mode_control = control;
-        let Some(patch) = &mut self.overlay_test_mode_patch else {
+    fn apply_overlay_test_mode(&mut self) {
+        let Some(patch) = &mut self.overlay_test_mode else {
             return;
         };
-
-        match control {
-            OverlayTestModeControl::ForceMode5 if !patch.applied => {
-                let original_mode = unsafe { read_i32(patch.address) };
-                patch.original_mode = Some(original_mode);
-                unsafe { write_i32(patch.address, 5) };
-                patch.applied = true;
-            }
-            OverlayTestModeControl::Unmodified if patch.applied => {
-                unsafe { write_i32(patch.address, patch.original_mode.unwrap_or(0)) };
-                patch.applied = false;
-            }
-            _ => {}
+        if patch.applied {
+            return;
         }
+        let original = unsafe { read_i32(patch.address) };
+        patch.original = Some(original);
+        unsafe { write_i32(patch.address, OVERLAY_TEST_MODE_FORCE) };
+        patch.applied = true;
     }
 
-    fn set_disable_independent_flip_enabled(&mut self, enabled: bool) {
-        let Some(patch) = &mut self.disable_independent_flip_patch else {
+    fn restore_overlay_test_mode(&mut self) {
+        let Some(patch) = &mut self.overlay_test_mode else {
             return;
         };
-        if patch.rejected {
+        if !patch.applied {
+            return;
+        }
+        unsafe { write_i32(patch.address, patch.original.unwrap_or(0)) };
+        patch.applied = false;
+    }
+
+    fn apply_disable_independent_flip(&mut self) {
+        let Some(patch) = &mut self.disable_independent_flip else {
+            return;
+        };
+        if patch.rejected || patch.applied {
             return;
         }
 
-        if enabled && !patch.applied {
-            if !is_writable_i32(patch.address) {
-                patch.rejected = true;
-                crate::log::independent_flip(crate::log::IndependentFlipOutcome::Rejected(
-                    crate::log::IndependentFlipRejectReason::PageNotWritable,
-                ));
-                return;
-            }
-            let original_value = unsafe { read_i32(patch.address) };
-            if original_value != 0 && original_value != 1 {
-                patch.rejected = true;
-                crate::log::independent_flip(crate::log::IndependentFlipOutcome::Rejected(
-                    crate::log::IndependentFlipRejectReason::UnexpectedValue(original_value),
-                ));
-                return;
-            }
-            patch.original_value = Some(original_value);
-            unsafe { write_i32(patch.address, 1) };
-            patch.applied = true;
-            crate::log::independent_flip(crate::log::IndependentFlipOutcome::Applied);
-        } else if !enabled && patch.applied {
-            unsafe { write_i32(patch.address, patch.original_value.unwrap_or(0)) };
-            patch.applied = false;
-            crate::log::independent_flip(crate::log::IndependentFlipOutcome::Restored);
+        if !is_writable_i32(patch.address) {
+            patch.rejected = true;
+            crate::log::independent_flip(crate::log::IndependentFlipOutcome::Rejected(
+                crate::log::IndependentFlipRejectReason::PageNotWritable,
+            ));
+            return;
         }
+
+        let original = unsafe { read_i32(patch.address) };
+        if original != 0 && original != 1 {
+            patch.rejected = true;
+            crate::log::independent_flip(crate::log::IndependentFlipOutcome::Rejected(
+                crate::log::IndependentFlipRejectReason::UnexpectedValue(original),
+            ));
+            return;
+        }
+
+        patch.original = Some(original);
+        unsafe { write_i32(patch.address, 1) };
+        patch.applied = true;
+        crate::log::independent_flip(crate::log::IndependentFlipOutcome::Applied);
+    }
+
+    fn restore_disable_independent_flip(&mut self) {
+        let Some(patch) = &mut self.disable_independent_flip else {
+            return;
+        };
+        if !patch.applied {
+            return;
+        }
+        unsafe { write_i32(patch.address, patch.original.unwrap_or(0)) };
+        patch.applied = false;
+        crate::log::independent_flip(crate::log::IndependentFlipOutcome::Restored);
     }
 
     fn set_overlays_enabled_override(&mut self, enabled: bool) {
         let value = enabled.then(|| {
-            self.disable_independent_flip_patch
+            self.disable_independent_flip
                 .as_ref()
                 .is_some_and(|dif| dif.applied)
         });
@@ -178,29 +214,6 @@ impl Default for FlipGateEffects {
     fn default() -> Self {
         Self::new(None, None)
     }
-}
-
-pub fn direct_flip_compatible(has_present_context: bool, original_compatible: bool) -> bool {
-    !has_present_context && original_compatible
-}
-
-pub fn ensure_independent_flip_state(has_lut_assignments: bool) -> Option<i32> {
-    if has_lut_assignments { Some(0) } else { None }
-}
-
-pub fn direct_flip_support_compatible(
-    has_lut_assignments: bool,
-    original_compatible: bool,
-) -> bool {
-    if has_lut_assignments {
-        false
-    } else {
-        original_compatible
-    }
-}
-
-pub fn overlay_test_mode(has_active_contexts: bool, original_mode: i32) -> i32 {
-    OverlayTestModeControl::from_active_contexts(has_active_contexts).apply(original_mode)
 }
 
 unsafe fn read_i32(address: usize) -> i32 {
@@ -243,171 +256,189 @@ fn is_writable_i32(address: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-    use super::{
-        FlipGateEffects, OverlayTestModeControl, direct_flip_compatible,
-        direct_flip_support_compatible, ensure_independent_flip_state, overlay_test_mode,
-    };
+    #[cfg(debug_assertions)]
+    use super::FlipGateKind;
+    use super::{FlipGateEffects, apply_flip_gate};
+    use crate::state::{self, HOOK_GLOBAL_TEST_LOCK};
 
-    fn activate(contexts: &mut BTreeSet<usize>, effects: &mut FlipGateEffects, context: usize) {
-        contexts.insert(context);
-        effects.sync_active(!contexts.is_empty());
-    }
-
-    fn deactivate(contexts: &mut BTreeSet<usize>, effects: &mut FlipGateEffects, context: usize) {
-        contexts.remove(&context);
-        effects.sync_active(!contexts.is_empty());
+    unsafe extern "system" fn unused_original(_this: usize) -> u8 {
+        1
     }
 
     #[test]
-    fn present_activation_blocks_promotion_for_same_context_only() {
-        let mut contexts = BTreeSet::new();
-        let mut effects = FlipGateEffects::new(None, None);
-        let has_luts = true;
+    fn apply_flip_gate_returns_default_when_runtime_is_active() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        state::reset_state_for_tests();
+        state::finish_reactivation();
 
-        activate(&mut contexts, &mut effects, 0x1234);
-
-        assert_eq!(
-            effects.overlay_test_mode_control,
-            OverlayTestModeControl::ForceMode5
+        let slot = AtomicPtr::new(unused_original as *mut c_void);
+        let called = AtomicBool::new(false);
+        let result = apply_flip_gate(
+            &slot,
+            #[cfg(debug_assertions)]
+            FlipGateKind::IsAdvancedDirectFlipCompatible,
+            |_| {
+                called.store(true, Ordering::Relaxed);
+                7u8
+            },
         );
-        assert!(!direct_flip_compatible(contexts.contains(&0x1234), true));
-        assert!(!direct_flip_support_compatible(has_luts, true));
-        assert_eq!(ensure_independent_flip_state(has_luts), Some(0));
-        assert_eq!(overlay_test_mode(!contexts.is_empty(), 0), 5);
-        assert!(direct_flip_compatible(contexts.contains(&0x4321), true));
-        assert_eq!(
-            effects.overlay_test_mode_control,
-            OverlayTestModeControl::ForceMode5
+
+        assert_eq!(result, 0);
+        assert!(!called.load(Ordering::Relaxed));
+        state::reset_state_for_tests();
+    }
+
+    #[test]
+    fn apply_flip_gate_calls_original_when_inactive() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        state::reset_state_for_tests();
+
+        let expected = unused_original as *mut c_void;
+        let slot = AtomicPtr::new(expected);
+        let seen = AtomicPtr::new(std::ptr::null_mut());
+        let result = apply_flip_gate(
+            &slot,
+            #[cfg(debug_assertions)]
+            FlipGateKind::IsAdvancedDirectFlipCompatible,
+            |original| {
+                seen.store(original, Ordering::Relaxed);
+                7u8
+            },
         );
-        assert!(contexts.contains(&0x1234));
+
+        assert_eq!(result, 7);
+        assert_eq!(seen.load(Ordering::Relaxed), expected);
     }
 
     #[test]
-    fn present_deactivation_clears_promotion_block_for_that_context() {
-        let mut contexts = BTreeSet::new();
-        let mut effects = FlipGateEffects::new(None, None);
-        let has_luts = true;
+    fn apply_flip_gate_returns_default_when_original_is_null() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        state::reset_state_for_tests();
 
-        activate(&mut contexts, &mut effects, 0x1234);
-        deactivate(&mut contexts, &mut effects, 0x1234);
+        let slot = AtomicPtr::new(std::ptr::null_mut());
+        let called = AtomicBool::new(false);
+        let result = apply_flip_gate(
+            &slot,
+            #[cfg(debug_assertions)]
+            FlipGateKind::IsAdvancedDirectFlipCompatible,
+            |_| {
+                called.store(true, Ordering::Relaxed);
+                7u8
+            },
+        );
 
-        assert!(direct_flip_compatible(contexts.contains(&0x1234), true));
-        assert!(!direct_flip_support_compatible(has_luts, true));
-        assert_eq!(ensure_independent_flip_state(has_luts), Some(0));
-        assert_eq!(overlay_test_mode(!contexts.is_empty(), 0), 0);
-        assert!(!contexts.contains(&0x1234));
+        assert_eq!(result, 0);
+        assert!(!called.load(Ordering::Relaxed));
     }
 
     #[test]
-    fn overlay_test_mode_global_is_patched_only_while_context_is_active() {
+    fn overlay_test_mode_is_patched_while_applied() {
         let mut overlay_mode = 0i32;
-        let mut contexts = BTreeSet::new();
         let mut effects =
             FlipGateEffects::new(Some((&mut overlay_mode as *mut i32) as usize), None);
 
-        activate(&mut contexts, &mut effects, 0x1234);
+        effects.apply();
         assert_eq!(overlay_mode, 5);
 
-        deactivate(&mut contexts, &mut effects, 0x1234);
+        effects.restore();
         assert_eq!(overlay_mode, 0);
     }
 
     #[test]
-    fn ensure_independent_flip_state_blocks_only_with_lut_assignments() {
-        assert_eq!(ensure_independent_flip_state(false), None);
-        assert_eq!(ensure_independent_flip_state(true), Some(0));
-    }
-
-    #[test]
-    fn disable_independent_flip_is_patched_only_while_context_is_active() {
+    fn disable_independent_flip_is_patched_while_applied() {
         let mut disable_independent_flip = 0i32;
-        let mut contexts = BTreeSet::new();
         let mut effects = FlipGateEffects::new(
             None,
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
-        assert_eq!(disable_independent_flip, 0);
-
-        activate(&mut contexts, &mut effects, 0x1234);
+        effects.apply();
         assert_eq!(disable_independent_flip, 1);
 
-        deactivate(&mut contexts, &mut effects, 0x1234);
-        assert!(contexts.is_empty());
+        effects.restore();
         assert_eq!(disable_independent_flip, 0);
     }
 
     #[test]
     fn disable_independent_flip_rejects_unexpected_value() {
         let mut disable_independent_flip = 7i32;
-        let mut contexts = BTreeSet::new();
         let mut effects = FlipGateEffects::new(
             None,
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
-        activate(&mut contexts, &mut effects, 0x1234);
+        effects.apply();
 
         assert_eq!(disable_independent_flip, 7);
         assert!(
             effects
-                .disable_independent_flip_patch
+                .disable_independent_flip
                 .as_ref()
                 .is_some_and(|patch| patch.rejected && !patch.applied)
         );
+        assert_eq!(effects.overlays_enabled_override, Some(false));
     }
 
     #[test]
-    fn overlays_enabled_override_returns_true_when_dif_is_applied() {
+    fn overlays_enabled_override_is_true_when_dif_is_applied() {
         let mut disable_independent_flip = 0i32;
-        let mut contexts = BTreeSet::new();
         let mut effects = FlipGateEffects::new(
             None,
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
-        activate(&mut contexts, &mut effects, 0x1234);
+        effects.apply();
 
-        assert_eq!(disable_independent_flip, 1);
         assert_eq!(effects.overlays_enabled_override, Some(true));
     }
 
     #[test]
-    fn overlays_enabled_override_returns_false_when_dif_is_unavailable() {
-        let mut contexts = BTreeSet::new();
+    fn overlays_enabled_override_is_false_when_dif_is_unavailable() {
         let mut effects = FlipGateEffects::new(None, None);
 
-        activate(&mut contexts, &mut effects, 0x1234);
+        effects.apply();
 
         assert_eq!(effects.overlays_enabled_override, Some(false));
     }
 
     #[test]
-    fn restore_clears_active_effects() {
+    fn restore_clears_all_effects() {
         let mut overlay_mode = 0i32;
         let mut disable_independent_flip = 0i32;
-        let mut contexts = BTreeSet::new();
         let mut effects = FlipGateEffects::new(
             Some((&mut overlay_mode as *mut i32) as usize),
             Some((&mut disable_independent_flip as *mut i32) as usize),
         );
 
-        activate(&mut contexts, &mut effects, 0x1234);
-
-        assert!(!contexts.is_empty());
+        effects.apply();
         assert_eq!(overlay_mode, 5);
         assert_eq!(disable_independent_flip, 1);
         assert_eq!(effects.overlays_enabled_override, Some(true));
 
-        contexts.clear();
         effects.restore();
-
-        assert!(contexts.is_empty());
         assert_eq!(overlay_mode, 0);
         assert_eq!(disable_independent_flip, 0);
         assert_eq!(effects.overlays_enabled_override, None);
-        assert_eq!(overlay_test_mode(false, 0), 0);
+    }
+
+    #[test]
+    fn apply_is_idempotent() {
+        let mut overlay_mode = 0i32;
+        let mut effects =
+            FlipGateEffects::new(Some((&mut overlay_mode as *mut i32) as usize), None);
+
+        effects.apply();
+        overlay_mode = 9;
+        effects.apply();
+        assert_eq!(overlay_mode, 9);
     }
 }

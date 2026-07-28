@@ -10,9 +10,7 @@ mod resolver;
 mod state;
 
 pub use bootstrap::HookError;
-pub use flip_gate::{
-    DisableIndependentFlipPatch, FlipGateEffects, OverlayTestModeControl, OverlayTestModePatch,
-};
+pub use flip_gate::FlipGateEffects;
 pub use minhook::{MinHookError, MinHookRuntime, MinHookState, RegisteredHook};
 pub use present::DirtyRect;
 #[cfg(feature = "xtask")]
@@ -30,8 +28,7 @@ pub use resolver::{
 pub use resolver::{MappedModuleImage, resolve_signature};
 pub use state::{
     HookRuntime, HookState, LutAssignment, LutMetadata, ShaderTexture3D, assignments_from_payload,
-    cube_to_texture, has_active_contexts, has_lut_assignments, has_present_context, hook_profile,
-    is_initialized,
+    cube_to_texture, hook_profile, is_initialized,
 };
 
 use std::ffi::c_void;
@@ -64,39 +61,6 @@ pub unsafe extern "system" fn dwm_lut_replace_assignments(
     payload: *const dwm_lut_payload::DwmLutPayloadBuffer,
 ) -> u32 {
     unsafe { bootstrap::ffi_replace_assignments(payload) }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn dwm_lut_direct_flip_compatible(
-    context_address: usize,
-    original_compatible: i32,
-) -> i32 {
-    let original_compatible = original_compatible != 0;
-    let result = flip_gate::direct_flip_compatible(
-        state::has_present_context(context_address),
-        original_compatible,
-    );
-    i32::from(result)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn dwm_lut_ensure_independent_flip_state(original_status: i32) -> i32 {
-    flip_gate::ensure_independent_flip_state(state::has_lut_assignments())
-        .unwrap_or(original_status)
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn dwm_lut_direct_flip_support_compatible(original_compatible: i32) -> i32 {
-    let original_compatible = original_compatible != 0;
-    i32::from(flip_gate::direct_flip_support_compatible(
-        state::has_lut_assignments(),
-        original_compatible,
-    ))
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn dwm_lut_overlay_test_mode(original_mode: i32) -> i32 {
-    flip_gate::overlay_test_mode(state::has_active_contexts(), original_mode)
 }
 
 /// # Safety

@@ -156,7 +156,9 @@ pub(crate) fn ffi_shutdown() -> u32 {
     let cleanup_failures = {
         let _present_guard = lock_present_runtime();
         let _ = crate::d3d11::shutdown_renderer_resources();
-        crate::state::clear_present_session();
+        let _ = crate::state::with_state_mut(|state| {
+            state.runtime.flip_gate_effects.restore();
+        });
         crate::desktop_redraw::request_desktop_redraw();
         disable_registered_hooks(&minhook, &hooks)
     };
@@ -248,6 +250,9 @@ fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
         return Err(HookError::MinHook(error));
     }
     finish_reactivation();
+    let _ = crate::state::with_state_mut(|state| {
+        state.runtime.flip_gate_effects.apply();
+    });
     log::hooks(log::HooksPhase::Reenabled, &hooks);
     Ok(())
 }
@@ -268,6 +273,9 @@ fn install_prepared_state(state: HookState) -> Result<(), HookError> {
         return Err(HookError::MinHook(error));
     }
 
+    let _ = crate::state::with_state_mut(|state| {
+        state.runtime.flip_gate_effects.apply();
+    });
     log::hooks(log::HooksPhase::Enabled, &hooks);
     Ok(())
 }
@@ -297,7 +305,6 @@ where
         payload,
         profile,
         assignments: Arc::new(assignments),
-        contexts: Default::default(),
         runtime: HookRuntime {
             minhook,
             hooks: registered_hooks,
@@ -462,7 +469,6 @@ mod tests {
         let shutdown_calls = crate::minhook::test_minhook_call_counts();
         assert!(!state::is_initialized());
         assert!(state::hook_profile().is_none());
-        assert!(!state::has_active_contexts());
         assert_eq!(shutdown_calls.disable_calls, initialized_calls.create_calls);
         assert_eq!(shutdown_calls.remove_calls, 0);
         assert_eq!(shutdown_calls.uninitialize_calls, 0);

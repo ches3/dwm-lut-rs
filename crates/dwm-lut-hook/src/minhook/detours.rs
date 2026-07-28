@@ -3,57 +3,20 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 use crate::DirtyRect;
-use crate::flip_gate;
 #[cfg(debug_assertions)]
-use crate::log::SharedLimiter;
+use crate::flip_gate::FlipGateKind;
+use crate::flip_gate::apply_flip_gate;
 use crate::profile::HookTarget;
 use crate::state;
 
-#[cfg(debug_assertions)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum FlipGateKind {
-    OverlayContextDirectFlip,
-    DirectFlipInfoEnsureIndependentFlip,
-    IsDirectFlipSupportedOnTarget,
-    LegacySwapChainCheckDirectFlip,
-    IsAdvancedDirectFlipCompatible,
-}
-
-#[cfg(debug_assertions)]
-impl FlipGateKind {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::OverlayContextDirectFlip => "overlay_context_direct_flip",
-            Self::DirectFlipInfoEnsureIndependentFlip => "direct_flip_info_ensure_independent_flip",
-            Self::IsDirectFlipSupportedOnTarget => "is_direct_flip_supported_on_target",
-            Self::LegacySwapChainCheckDirectFlip => "legacy_swap_chain_check_direct_flip",
-            Self::IsAdvancedDirectFlipCompatible => "is_advanced_direct_flip_compatible",
-        }
-    }
-}
-
-#[cfg(debug_assertions)]
-static FLIP_GATE_DENIED_LIMITER: SharedLimiter<FlipGateKind> = SharedLimiter::new(600);
-
-#[cfg(debug_assertions)]
-fn record_flip_gate_denied(kind: FlipGateKind, original: bool, result: bool) {
-    if !original || result {
-        return;
-    }
-    let decision = FLIP_GATE_DENIED_LIMITER.sample(kind);
-    if decision.should_log {
-        crate::log::flip_gate_denied(kind.label(), decision.count);
-    }
-}
-
 type PresentOriginal = unsafe extern "system" fn(usize, usize, u32, usize, i32, usize, u8) -> i64;
-type ForwardBool1 = unsafe extern "system" fn(usize) -> u8;
-type ForwardBoolThis2 = unsafe extern "system" fn(usize, usize, usize) -> u8;
-type ForwardCheckDirectFlipSupport =
-    unsafe extern "system" fn(usize, usize, u32, usize, usize) -> u8;
-type ForwardHresult1 = unsafe extern "system" fn(usize) -> i32;
-type ForwardOverlayDirectFlip =
+type OverlayDirectFlipOriginal =
     unsafe extern "system" fn(usize, usize, usize, usize, u32, u8) -> u8;
+type EnsureIndependentFlipStateOriginal = unsafe extern "system" fn(usize) -> i32;
+type IsDirectFlipSupportedOnTargetOriginal = unsafe extern "system" fn(usize, usize, usize) -> u8;
+type LegacyCheckDirectFlipSupportOriginal =
+    unsafe extern "system" fn(usize, usize, u32, usize, usize) -> u8;
+type IsAdvancedDirectFlipCompatibleOriginal = unsafe extern "system" fn(usize) -> u8;
 
 static PRESENT_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
@@ -175,49 +138,6 @@ unsafe extern "system" fn present_detour(
     unsafe { original(this, overlay_swap_chain, a3, prepared.rect_vec, a5, a6, a7) }
 }
 
-unsafe fn forward_overlay_direct_flip(
-    slot: &AtomicPtr<c_void>,
-    this: usize,
-    a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: u32,
-    a6: u8,
-) -> u8 {
-    let original = slot.load(Ordering::Acquire);
-    if original.is_null() {
-        return 0;
-    }
-
-    let original: ForwardOverlayDirectFlip = unsafe { std::mem::transmute(original) };
-    unsafe { original(this, a2, a3, a4, a5, a6) }
-}
-
-unsafe fn forward_bool1(slot: &AtomicPtr<c_void>, this: usize) -> u8 {
-    let original = slot.load(Ordering::Acquire);
-    if original.is_null() {
-        return 0;
-    }
-
-    let original: ForwardBool1 = unsafe { std::mem::transmute(original) };
-    unsafe { original(this) }
-}
-
-fn evaluate_bool_detour(
-    #[cfg(debug_assertions)] kind: FlipGateKind,
-    original: u8,
-    evaluate: impl FnOnce(bool) -> bool,
-) -> u8 {
-    if !state::is_runtime_active() {
-        return original;
-    }
-    let original_bool = original != 0;
-    let result_bool = evaluate(original_bool);
-    #[cfg(debug_assertions)]
-    record_flip_gate_denied(kind, original_bool, result_bool);
-    bool_to_u8(result_bool)
-}
-
 unsafe extern "system" fn direct_flip_detour(
     this: usize,
     a2: usize,
@@ -226,37 +146,28 @@ unsafe extern "system" fn direct_flip_detour(
     a5: u32,
     a6: u8,
 ) -> u8 {
-    let original =
-        unsafe { forward_overlay_direct_flip(&DIRECT_FLIP_ORIGINAL, this, a2, a3, a4, a5, a6) };
-    evaluate_bool_detour(
+    apply_flip_gate(
+        &DIRECT_FLIP_ORIGINAL,
         #[cfg(debug_assertions)]
         FlipGateKind::OverlayContextDirectFlip,
-        original,
-        |original| flip_gate::direct_flip_compatible(state::has_present_context(this), original),
+        |original| {
+            let original: OverlayDirectFlipOriginal = unsafe { std::mem::transmute(original) };
+            unsafe { original(this, a2, a3, a4, a5, a6) }
+        },
     )
 }
 
 unsafe extern "system" fn ensure_independent_flip_state_detour(this: usize) -> i32 {
-    if state::is_runtime_active()
-        && let Some(blocked_status) =
-            flip_gate::ensure_independent_flip_state(state::has_lut_assignments())
-    {
+    apply_flip_gate(
+        &ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL,
         #[cfg(debug_assertions)]
-        record_flip_gate_denied(
-            FlipGateKind::DirectFlipInfoEnsureIndependentFlip,
-            true,
-            false,
-        );
-        return blocked_status;
-    }
-
-    let original = ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL.load(Ordering::Acquire);
-    if original.is_null() {
-        return 0;
-    }
-
-    let original_fn: ForwardHresult1 = unsafe { std::mem::transmute(original) };
-    unsafe { original_fn(this) }
+        FlipGateKind::DirectFlipInfoEnsureIndependentFlip,
+        |original| {
+            let original: EnsureIndependentFlipStateOriginal =
+                unsafe { std::mem::transmute(original) };
+            unsafe { original(this) }
+        },
+    )
 }
 
 unsafe extern "system" fn is_direct_flip_supported_on_target_detour(
@@ -264,18 +175,14 @@ unsafe extern "system" fn is_direct_flip_supported_on_target_detour(
     a2: usize,
     a3: usize,
 ) -> u8 {
-    let original = IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL.load(Ordering::Acquire);
-    if original.is_null() {
-        return 0;
-    }
-    let original_fn: ForwardBoolThis2 = unsafe { std::mem::transmute(original) };
-    let original = unsafe { original_fn(this, a2, a3) };
-    evaluate_bool_detour(
+    apply_flip_gate(
+        &IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL,
         #[cfg(debug_assertions)]
         FlipGateKind::IsDirectFlipSupportedOnTarget,
-        original,
         |original| {
-            flip_gate::direct_flip_support_compatible(state::has_lut_assignments(), original)
+            let original: IsDirectFlipSupportedOnTargetOriginal =
+                unsafe { std::mem::transmute(original) };
+            unsafe { original(this, a2, a3) }
         },
     )
 }
@@ -287,30 +194,27 @@ unsafe extern "system" fn legacy_check_direct_flip_support_detour(
     a4: usize,
     a5: usize,
 ) -> u8 {
-    let original = LEGACY_CHECK_DIRECT_FLIP_ORIGINAL.load(Ordering::Acquire);
-    if original.is_null() {
-        return 0;
-    }
-    let original_fn: ForwardCheckDirectFlipSupport = unsafe { std::mem::transmute(original) };
-    let original = unsafe { original_fn(this, a2, a3, a4, a5) };
-    evaluate_bool_detour(
+    apply_flip_gate(
+        &LEGACY_CHECK_DIRECT_FLIP_ORIGINAL,
         #[cfg(debug_assertions)]
         FlipGateKind::LegacySwapChainCheckDirectFlip,
-        original,
         |original| {
-            flip_gate::direct_flip_support_compatible(state::has_lut_assignments(), original)
+            let original: LegacyCheckDirectFlipSupportOriginal =
+                unsafe { std::mem::transmute(original) };
+            unsafe { original(this, a2, a3, a4, a5) }
         },
     )
 }
 
 unsafe extern "system" fn is_advanced_direct_flip_compatible_detour(this: usize) -> u8 {
-    let original = unsafe { forward_bool1(&IS_ADVANCED_DIRECT_FLIP_ORIGINAL, this) };
-    evaluate_bool_detour(
+    apply_flip_gate(
+        &IS_ADVANCED_DIRECT_FLIP_ORIGINAL,
         #[cfg(debug_assertions)]
         FlipGateKind::IsAdvancedDirectFlipCompatible,
-        original,
         |original| {
-            flip_gate::direct_flip_support_compatible(state::has_lut_assignments(), original)
+            let original: IsAdvancedDirectFlipCompatibleOriginal =
+                unsafe { std::mem::transmute(original) };
+            unsafe { original(this) }
         },
     )
 }
@@ -334,28 +238,13 @@ unsafe extern "system" fn overlays_enabled_detour(_this: usize) -> u8 {
     );
 }
 
-const fn bool_to_u8(value: bool) -> u8 {
-    value as u8
-}
-
 #[cfg(test)]
 mod tests {
     use std::ffi::c_void;
     use std::ptr;
     use std::sync::atomic::Ordering;
 
-    use dwm_lut_payload::{
-        AdapterLuid, ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadAssignment,
-        PayloadLut,
-    };
-
-    use crate::HookProfile;
-    use crate::resolver::SignatureResolutionReport;
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK};
-
-    fn test_profile() -> HookProfile {
-        crate::profile::latest_registered_profile()
-    }
 
     unsafe extern "system" fn returns_true_overlay_direct_flip(
         _a0: usize,
@@ -496,86 +385,14 @@ mod tests {
         super::OVERLAYS_ENABLED_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
     }
 
-    fn test_monitor_identity() -> MonitorIdentity {
-        MonitorIdentity {
-            adapter_luid: AdapterLuid {
-                high_part: 0,
-                low_part: 0x14e02,
-            },
-            target_id: 4357,
-        }
-    }
-
-    fn identity_lut() -> PayloadLut {
-        PayloadLut {
-            size: 2,
-            domain_min: [0.0, 0.0, 0.0],
-            domain_max: [1.0, 1.0, 1.0],
-            values: vec![
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [1.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [1.0, 0.0, 1.0],
-                [0.0, 1.0, 1.0],
-                [1.0, 1.0, 1.0],
-            ],
-        }
-    }
-
-    fn test_payload(color_modes: &[ColorMode]) -> HookPayload {
-        HookPayload {
-            assignments: color_modes
-                .iter()
-                .map(|color_mode| PayloadAssignment {
-                    target: MonitorTarget {
-                        identity: test_monitor_identity(),
-                        color_mode: *color_mode,
-                    },
-                    lut: identity_lut(),
-                })
-                .collect(),
-        }
-    }
-
-    fn initialize_test_state() {
-        state::reset_state_for_tests();
-        let profile = test_profile();
-        let resolution = SignatureResolutionReport::synthetic_for_tests(&profile);
-        crate::bootstrap::initialize_with_resolution(
-            profile,
-            test_payload(&[ColorMode::Sdr]),
-            resolution,
-        )
-        .expect("initialization should succeed with synthetic resolution");
-    }
-
-    fn activate_context(context_address: usize) {
-        state::update_present_context(context_address, true);
-    }
-
     #[test]
-    fn context_detours_override_original_return_value_when_context_is_active() {
+    fn flip_gate_detours_wire_original_signatures() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        initialize_test_state();
-        activate_context(0x1234);
+        state::reset_state_for_tests();
         super::DIRECT_FLIP_ORIGINAL.store(
             returns_true_overlay_direct_flip as *mut c_void,
             Ordering::Release,
         );
-
-        assert_eq!(
-            unsafe { super::direct_flip_detour(0x1234, 0, 0, 0, 0, 0) },
-            0
-        );
-        assert!(state::has_present_context(0x1234));
-    }
-
-    #[test]
-    fn global_promotion_detours_forward_original_return_value() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        state::reset_state_for_tests();
         super::ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL
             .store(returns_hresult_fail as *mut c_void, Ordering::Release);
         super::IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL
@@ -587,6 +404,10 @@ mod tests {
         super::IS_ADVANCED_DIRECT_FLIP_ORIGINAL
             .store(returns_true_1 as *mut c_void, Ordering::Release);
 
+        assert_eq!(
+            unsafe { super::direct_flip_detour(0x1234, 0, 0, 0, 0, 0) },
+            1
+        );
         assert_eq!(
             unsafe { super::ensure_independent_flip_state_detour(0) },
             -1
@@ -602,36 +423,6 @@ mod tests {
         assert_eq!(
             unsafe { super::is_advanced_direct_flip_compatible_detour(0) },
             1
-        );
-    }
-
-    #[test]
-    fn global_promotion_detours_block_when_lut_assignments_exist() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        initialize_test_state();
-        super::ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL
-            .store(returns_hresult_fail as *mut c_void, Ordering::Release);
-        super::IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL
-            .store(returns_true_this2 as *mut c_void, Ordering::Release);
-        super::LEGACY_CHECK_DIRECT_FLIP_ORIGINAL.store(
-            returns_true_check_direct_flip as *mut c_void,
-            Ordering::Release,
-        );
-        super::IS_ADVANCED_DIRECT_FLIP_ORIGINAL
-            .store(returns_true_1 as *mut c_void, Ordering::Release);
-
-        assert_eq!(unsafe { super::ensure_independent_flip_state_detour(0) }, 0);
-        assert_eq!(
-            unsafe { super::is_direct_flip_supported_on_target_detour(0, 0, 0) },
-            0
-        );
-        assert_eq!(
-            unsafe { super::legacy_check_direct_flip_support_detour(0, 0, 0, 0, 0) },
-            0
-        );
-        assert_eq!(
-            unsafe { super::is_advanced_direct_flip_compatible_detour(0) },
-            0
         );
     }
 

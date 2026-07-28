@@ -14,7 +14,6 @@ pub(crate) struct FakeRenderPresentLutCall {
 static FAKE_RENDER_RESULT: OnceLock<Mutex<Result<PresentLutOutcome, RenderAcquireError>>> =
     OnceLock::new();
 static FAKE_RENDER_CALL: OnceLock<Mutex<Option<FakeRenderPresentLutCall>>> = OnceLock::new();
-static FAKE_RENDER_CONTEXT_ACTIVE: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
 
 fn result_slot() -> &'static Mutex<Result<PresentLutOutcome, RenderAcquireError>> {
     FAKE_RENDER_RESULT.get_or_init(|| Mutex::new(Err(RenderAcquireError::BackBuffer)))
@@ -22,10 +21,6 @@ fn result_slot() -> &'static Mutex<Result<PresentLutOutcome, RenderAcquireError>
 
 fn call_slot() -> &'static Mutex<Option<FakeRenderPresentLutCall>> {
     FAKE_RENDER_CALL.get_or_init(|| Mutex::new(None))
-}
-
-fn context_active_slot() -> &'static Mutex<Option<bool>> {
-    FAKE_RENDER_CONTEXT_ACTIVE.get_or_init(|| Mutex::new(None))
 }
 
 pub(crate) fn set_fake_render_result(result: Result<PresentLutOutcome, RenderAcquireError>) {
@@ -39,17 +34,10 @@ pub(crate) fn reset_fake_render_result() {
     if let Ok(mut calls) = call_slot().lock() {
         *calls = None;
     }
-    if let Ok(mut context_active) = context_active_slot().lock() {
-        *context_active = None;
-    }
 }
 
 pub(crate) fn fake_render_present_lut_call() -> Option<FakeRenderPresentLutCall> {
     call_slot().lock().ok().and_then(|call| call.clone())
-}
-
-pub(crate) fn fake_render_context_active() -> Option<bool> {
-    context_active_slot().lock().ok().and_then(|active| *active)
 }
 
 pub(crate) unsafe fn render_present_lut(
@@ -66,9 +54,6 @@ pub(crate) unsafe fn render_present_lut(
             monitor_identity,
             dirty_rects: dirty_rects.to_vec(),
         });
-    }
-    if let Ok(mut context_active) = context_active_slot().lock() {
-        *context_active = Some(crate::state::has_active_contexts());
     }
     result_slot()
         .lock()
