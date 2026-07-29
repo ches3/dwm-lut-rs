@@ -5,21 +5,48 @@ use bincode::{Decode, Encode};
 mod status;
 
 pub use status::{
-    HookTargetId, InitializeStatus, ReplaceAssignmentsStatus, ResolveFailureKind, ShutdownStatus,
+    HookStatus, HookStatusSnapshot, HookTargetId, InitializeStatus, ReplaceAssignmentsStatus,
+    ResolveFailureKind, ShutdownStatus,
 };
 
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("dwm-lut-rs supports only 64-bit Windows targets");
 
-pub const PAYLOAD_VERSION: u32 = 1;
+pub const PAYLOAD_VERSION: u32 = 2;
 pub const PAYLOAD_HEADER_LEN: u32 = 12;
 pub const MAX_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
+pub const HOOK_STATUS_ABI_VERSION: u32 = 1;
+pub const MAX_PROFILE_NAME_BYTES: usize = 256;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DwmLutPayloadBuffer {
     pub data: *const u8,
     pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DwmLutStatusSnapshot {
+    pub sequence: u32,
+    pub abi_version: u32,
+    pub struct_size: u32,
+    pub hook_status: u32,
+    pub profile_name_len: u32,
+    pub profile_name: [u8; MAX_PROFILE_NAME_BYTES],
+}
+
+impl DwmLutStatusSnapshot {
+    pub const fn inactive() -> Self {
+        Self {
+            sequence: 0,
+            abi_version: HOOK_STATUS_ABI_VERSION,
+            struct_size: std::mem::size_of::<Self>() as u32,
+            hook_status: HookStatus::Inactive as u32,
+            profile_name_len: 0,
+            profile_name: [0; MAX_PROFILE_NAME_BYTES],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
@@ -68,6 +95,7 @@ pub struct PayloadAssignment {
 
 #[derive(Debug, Clone, PartialEq, Default, Encode, Decode)]
 pub struct HookPayload {
+    pub profile_name: String,
     pub assignments: Vec<PayloadAssignment>,
 }
 
@@ -97,6 +125,12 @@ pub enum PayloadError {
     TrailingBytes {
         consumed: usize,
         body_len: usize,
+    },
+    EmptyProfileName,
+    ProfileNameNotTrimmed,
+    ProfileNameTooLong {
+        len: usize,
+        max: usize,
     },
     NoAssignments,
     LutTooSmall {
@@ -133,6 +167,9 @@ impl PayloadError {
             | Self::Encode(_)
             | Self::Decode(_)
             | Self::TrailingBytes { .. }
+            | Self::EmptyProfileName
+            | Self::ProfileNameNotTrimmed
+            | Self::ProfileNameTooLong { .. }
             | Self::LutTooSmall { .. }
             | Self::LutEntryCountOverflow { .. }
             | Self::LutEntryCountMismatch { .. }
@@ -170,6 +207,19 @@ impl fmt::Display for PayloadError {
                 f,
                 "payload body has trailing bytes: consumed={consumed}, body_len={body_len}"
             ),
+            Self::EmptyProfileName => write!(f, "payload profile name must not be empty"),
+            Self::ProfileNameNotTrimmed => {
+                write!(
+                    f,
+                    "payload profile name must not have surrounding whitespace"
+                )
+            }
+            Self::ProfileNameTooLong { len, max } => {
+                write!(
+                    f,
+                    "payload profile name is too long: {len} UTF-8 bytes exceeds {max} bytes"
+                )
+            }
             Self::NoAssignments => write!(f, "payload does not contain any LUT assignments"),
             Self::LutTooSmall { size } => write!(f, "LUT size must be at least 2, got {size}"),
             Self::LutEntryCountOverflow { size } => write!(f, "LUT size is too large: {size}"),
@@ -258,6 +308,19 @@ pub unsafe fn deserialize_payload_buffer(
 }
 
 pub fn validate_payload(payload: &HookPayload) -> Result<(), PayloadError> {
+    let profile_name = payload.profile_name.trim();
+    if profile_name.is_empty() {
+        return Err(PayloadError::EmptyProfileName);
+    }
+    if profile_name != payload.profile_name {
+        return Err(PayloadError::ProfileNameNotTrimmed);
+    }
+    if profile_name.len() > MAX_PROFILE_NAME_BYTES {
+        return Err(PayloadError::ProfileNameTooLong {
+            len: profile_name.len(),
+            max: MAX_PROFILE_NAME_BYTES,
+        });
+    }
     if payload.assignments.is_empty() {
         return Err(PayloadError::NoAssignments);
     }
@@ -358,6 +421,7 @@ mod tests {
 
     fn payload() -> HookPayload {
         HookPayload {
+            profile_name: "default".to_string(),
             assignments: vec![PayloadAssignment {
                 target: MonitorTarget {
                     identity: MonitorIdentity {
@@ -416,9 +480,58 @@ mod tests {
 
     #[test]
     fn payload_rejects_empty_assignments() {
-        let error = serialize_payload(&HookPayload::default()).expect_err("empty payload fails");
+        let error = serialize_payload(&HookPayload {
+            profile_name: "default".to_string(),
+            assignments: Vec::new(),
+        })
+        .expect_err("empty payload fails");
 
         assert!(matches!(error, PayloadError::NoAssignments));
+    }
+
+    #[test]
+    fn payload_rejects_empty_profile_name() {
+        let mut payload = payload();
+        payload.profile_name = " \t ".to_string();
+
+        let error = serialize_payload(&payload).expect_err("empty profile name fails");
+
+        assert!(matches!(error, PayloadError::EmptyProfileName));
+    }
+
+    #[test]
+    fn payload_rejects_untrimmed_profile_name() {
+        let mut payload = payload();
+        payload.profile_name = " default ".to_string();
+
+        assert!(matches!(
+            validate_payload(&payload),
+            Err(PayloadError::ProfileNameNotTrimmed)
+        ));
+    }
+
+    #[test]
+    fn payload_profile_name_limit_is_measured_in_utf8_bytes() {
+        let mut payload = payload();
+        payload.profile_name = "a".repeat(MAX_PROFILE_NAME_BYTES);
+        validate_payload(&payload).expect("256 ASCII bytes should be accepted");
+
+        payload.profile_name.push('a');
+        assert!(matches!(
+            validate_payload(&payload),
+            Err(PayloadError::ProfileNameTooLong {
+                len: 257,
+                max: MAX_PROFILE_NAME_BYTES
+            })
+        ));
+
+        payload.profile_name = "é".repeat(MAX_PROFILE_NAME_BYTES / 2);
+        validate_payload(&payload).expect("256 multibyte UTF-8 bytes should be accepted");
+        payload.profile_name.push('a');
+        assert!(matches!(
+            validate_payload(&payload),
+            Err(PayloadError::ProfileNameTooLong { len: 257, .. })
+        ));
     }
 
     #[test]
@@ -472,5 +585,23 @@ mod tests {
         assert_eq!(size_of::<DwmLutPayloadBuffer>(), 16);
         assert_eq!(offset_of!(DwmLutPayloadBuffer, data), 0);
         assert_eq!(offset_of!(DwmLutPayloadBuffer, len), 8);
+    }
+
+    #[test]
+    fn status_snapshot_layout_matches_c_contract() {
+        assert_eq!(size_of::<DwmLutStatusSnapshot>(), 276);
+        assert_eq!(offset_of!(DwmLutStatusSnapshot, sequence), 0);
+        assert_eq!(offset_of!(DwmLutStatusSnapshot, abi_version), 4);
+        assert_eq!(offset_of!(DwmLutStatusSnapshot, struct_size), 8);
+        assert_eq!(offset_of!(DwmLutStatusSnapshot, hook_status), 12);
+        assert_eq!(offset_of!(DwmLutStatusSnapshot, profile_name_len), 16);
+        assert_eq!(offset_of!(DwmLutStatusSnapshot, profile_name), 20);
+
+        let snapshot = DwmLutStatusSnapshot::inactive();
+        assert_eq!(snapshot.sequence, 0);
+        assert_eq!(snapshot.abi_version, HOOK_STATUS_ABI_VERSION);
+        assert_eq!(snapshot.struct_size, 276);
+        assert_eq!(snapshot.hook_status, HookStatus::Inactive as u32);
+        assert_eq!(snapshot.profile_name_len, 0);
     }
 }

@@ -6,8 +6,8 @@ use crate::DirtyRect;
 #[cfg(debug_assertions)]
 use crate::flip_gate::FlipGateKind;
 use crate::flip_gate::apply_flip_gate;
+use crate::lifecycle;
 use crate::profile::HookTarget;
-use crate::state;
 
 type PresentOriginal = unsafe extern "system" fn(usize, usize, u32, usize, i32, usize, u8) -> i64;
 type OverlayDirectFlipOriginal =
@@ -117,7 +117,7 @@ unsafe extern "system" fn present_detour(
     }
     let original: PresentOriginal = unsafe { std::mem::transmute(original) };
 
-    if !state::is_runtime_active() {
+    if !lifecycle::is_runtime_active() {
         return unsafe { original(this, overlay_swap_chain, a3, rect_vec, a5, a6, a7) };
     }
 

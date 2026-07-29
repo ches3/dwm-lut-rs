@@ -10,9 +10,9 @@ use windows::Win32::System::Memory::{
     PAGE_GUARD, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
 };
 
+use crate::lifecycle;
 #[cfg(debug_assertions)]
 use crate::log::SharedLimiter;
-use crate::state;
 
 const OVERLAY_TEST_MODE_FORCE: i32 = 5;
 
@@ -55,7 +55,7 @@ pub(crate) fn apply_flip_gate<T: Default>(
     #[cfg(debug_assertions)] kind: FlipGateKind,
     call_original: impl FnOnce(*mut c_void) -> T,
 ) -> T {
-    if state::is_runtime_active() {
+    if lifecycle::is_runtime_active() {
         #[cfg(debug_assertions)]
         record_flip_gate_denied(kind);
         return T::default();
@@ -262,6 +262,7 @@ mod tests {
     #[cfg(debug_assertions)]
     use super::FlipGateKind;
     use super::{FlipGateEffects, apply_flip_gate};
+    use crate::lifecycle;
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK};
 
     unsafe extern "system" fn unused_original(_this: usize) -> u8 {
@@ -274,7 +275,9 @@ mod tests {
             .lock()
             .expect("test mutex should lock");
         state::reset_state_for_tests();
-        state::finish_reactivation();
+        lifecycle::begin_initialization()
+            .expect("initialization transition should start")
+            .commit_active("test");
 
         let slot = AtomicPtr::new(unused_original as *mut c_void);
         let called = AtomicBool::new(false);

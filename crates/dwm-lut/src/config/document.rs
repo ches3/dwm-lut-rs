@@ -4,6 +4,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use dwm_lut_payload::MAX_PROFILE_NAME_BYTES;
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -12,9 +13,15 @@ use windows_sys::Win32::Storage::FileSystem::{
 use super::{ColorMode, ConfigError};
 
 fn reject_invalid_profile_name(name: &str, context: &str) -> Result<(), ConfigError> {
-    if name.trim().is_empty() {
+    let name = name.trim();
+    if name.is_empty() {
         return Err(ConfigError::parse_message(format!(
             "{context} must not be empty"
+        )));
+    }
+    if name.len() > MAX_PROFILE_NAME_BYTES {
+        return Err(ConfigError::parse_message(format!(
+            "{context} must not exceed {MAX_PROFILE_NAME_BYTES} UTF-8 bytes"
         )));
     }
     Ok(())
@@ -207,10 +214,8 @@ impl ConfigDocument {
 }
 
 fn normalized_profile_name(name: &str) -> Result<String, ConfigError> {
+    reject_invalid_profile_name(name, "profile name")?;
     let name = name.trim();
-    if name.is_empty() {
-        return Err(ConfigError::parse_message("profile name must not be empty"));
-    }
     Ok(name.to_string())
 }
 
@@ -354,6 +359,23 @@ mod document_tests {
         assert_eq!(desktop, "desktop");
         assert_eq!(document.default_profile, "desktop");
         assert!(document.delete_profile("desktop").is_err());
+    }
+
+    #[test]
+    fn profile_name_limit_is_measured_after_trim_in_utf8_bytes() {
+        let ascii = format!(" {} ", "a".repeat(MAX_PROFILE_NAME_BYTES));
+        assert_eq!(
+            normalized_profile_name(&ascii).unwrap().len(),
+            MAX_PROFILE_NAME_BYTES
+        );
+        assert!(normalized_profile_name(&"a".repeat(MAX_PROFILE_NAME_BYTES + 1)).is_err());
+
+        let multibyte = "é".repeat(MAX_PROFILE_NAME_BYTES / 2);
+        assert_eq!(
+            normalized_profile_name(&multibyte).unwrap().len(),
+            MAX_PROFILE_NAME_BYTES
+        );
+        assert!(normalized_profile_name(&format!("{multibyte}a")).is_err());
     }
 
     #[test]

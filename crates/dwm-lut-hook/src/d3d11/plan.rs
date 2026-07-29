@@ -1111,6 +1111,7 @@ mod tests {
         assignments: impl IntoIterator<Item = (MonitorIdentity, ColorMode, PayloadLut)>,
     ) -> HookPayload {
         HookPayload {
+            profile_name: "test".to_string(),
             assignments: assignments
                 .into_iter()
                 .map(|(identity, color_mode, lut)| PayloadAssignment {

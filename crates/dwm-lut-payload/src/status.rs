@@ -2,6 +2,32 @@ use std::fmt;
 
 const RESOLVE_CODE_BASE: u32 = 0x0001_0000;
 
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookStatus {
+    Inactive = 0,
+    Active = 1,
+    Transitioning = 2,
+}
+
+impl HookStatus {
+    pub const fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Inactive),
+            1 => Some(Self::Active),
+            2 => Some(Self::Transitioning),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookStatusSnapshot {
+    Inactive,
+    Active { profile_name: String },
+    Transitioning,
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveFailureKind {
@@ -238,7 +264,10 @@ impl fmt::Display for ReplaceAssignmentsStatus {
             Self::NullPayload => write!(f, "payload buffer pointer was null"),
             Self::InvalidPayload => write!(f, "payload buffer was invalid"),
             Self::NotInitialized => write!(f, "hook DLL is loaded but not initialized"),
-            Self::AlreadyInProgress => write!(f, "hook initialization or shutdown is in progress"),
+            Self::AlreadyInProgress => write!(
+                f,
+                "hook initialization, assignment replacement, or shutdown is in progress"
+            ),
             Self::PayloadDecodeFailed => write!(f, "payload could not be decoded"),
             Self::PayloadHasNoAssignments => {
                 write!(f, "payload does not contain any LUT assignments")
@@ -307,7 +336,10 @@ impl fmt::Display for ShutdownStatus {
         match self {
             Self::Success => write!(f, "success"),
             Self::NotInitialized => write!(f, "hook DLL is loaded but not initialized"),
-            Self::AlreadyInProgress => write!(f, "hook shutdown is already in progress"),
+            Self::AlreadyInProgress => write!(
+                f,
+                "hook initialization, assignment replacement, or shutdown is in progress"
+            ),
             Self::AlreadyShutDown => write!(f, "hook DLL is already shut down"),
             Self::MinHookCleanupFailed => write!(f, "MinHook cleanup failed"),
         }
@@ -316,7 +348,22 @@ impl fmt::Display for ShutdownStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{HookTargetId, InitializeStatus, RESOLVE_CODE_BASE, ResolveFailureKind};
+    use super::{
+        HookStatus, HookTargetId, InitializeStatus, RESOLVE_CODE_BASE, ResolveFailureKind,
+    };
+
+    #[test]
+    fn hook_status_codes_round_trip() {
+        for status in [
+            HookStatus::Inactive,
+            HookStatus::Active,
+            HookStatus::Transitioning,
+        ] {
+            assert_eq!(HookStatus::from_code(status as u32), Some(status));
+        }
+        assert_eq!(HookStatus::from_code(3), None);
+        assert_eq!(HookStatus::from_code(u32::MAX), None);
+    }
 
     #[test]
     fn success_code_is_zero() {

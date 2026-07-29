@@ -330,11 +330,11 @@ fn shutdown_for_reinject(pid: u32) -> Result<(), InjectorError> {
     }
 }
 
-fn is_staged_hook_module(module: &NamedRemoteModule) -> bool {
+pub(super) fn is_staged_hook_module(module: &NamedRemoteModule) -> bool {
     is_staged_hook_module_name(module_basename(&module.path, &module.name))
 }
 
-fn module_export_path<'a>(module_path: &'a str, module_name: &'a str) -> &'a str {
+pub(super) fn module_export_path<'a>(module_path: &'a str, module_name: &'a str) -> &'a str {
     if module_path.is_empty() {
         module_name
     } else {
@@ -495,8 +495,11 @@ fn load_remote_module(
         });
     }
 
-    let result =
-        remote_context.read_copy::<RemoteDllLoadContext>(InjectionStep::ReadDllLoadResult)?;
+    // SAFETY: RemoteDllLoadContext has a C layout containing only usize fields,
+    // so every fully initialized byte sequence is a valid representation.
+    let result = unsafe {
+        remote_context.read_copy::<RemoteDllLoadContext>(InjectionStep::ReadDllLoadResult)?
+    };
     if result.module_handle == 0 {
         return Err(InjectorError::RemoteModuleNotFound {
             module: dll_path.display().to_string(),

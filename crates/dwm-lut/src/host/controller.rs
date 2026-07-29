@@ -9,6 +9,9 @@ use crate::error::{InjectorError, ShutdownStatus};
 use crate::gui::{UiCommand, UiHandle};
 use crate::inject::{self, ApplyReport, ApplyRequest, DisableOutcome, DisableReport};
 
+use super::hook_status::{HookRuntimeStatus, HookStatusStore};
+use super::status_poller::{StatusPoller, StatusPollerHandle};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostState {
     Idle,
@@ -151,6 +154,7 @@ impl Drop for MutationExecutor {
 struct MutationStateGuard {
     state: Arc<Mutex<HostState>>,
     ui: Arc<UiHandle>,
+    status_poller: StatusPollerHandle,
     armed: bool,
 }
 
@@ -164,6 +168,7 @@ impl MutationStateGuard {
         self.armed = false;
         let _ = sender.send(result);
         notify_state_changed(&self.ui);
+        self.status_poller.request_refresh();
     }
 }
 
@@ -172,6 +177,7 @@ impl Drop for MutationStateGuard {
         if self.armed {
             *lock_state(&self.state) = HostState::Idle;
             notify_state_changed(&self.ui);
+            self.status_poller.request_refresh();
         }
     }
 }
@@ -179,6 +185,8 @@ impl Drop for MutationStateGuard {
 pub(crate) struct HostController {
     host_dll_path: Option<PathBuf>,
     state: Arc<Mutex<HostState>>,
+    hook_status: HookStatusStore,
+    status_poller: StatusPoller,
     executor: MutationExecutor,
     shutdown: Arc<ServerShutdown>,
     ui: Arc<UiHandle>,
@@ -190,10 +198,17 @@ impl HostController {
         shutdown: Arc<ServerShutdown>,
         ui: Arc<UiHandle>,
     ) -> Result<Self, InjectorError> {
+        let state = Arc::new(Mutex::new(HostState::Idle));
+        let hook_status = HookStatusStore::default();
+        let executor = MutationExecutor::new()?;
+        let status_poller =
+            StatusPoller::new(Arc::clone(&state), hook_status.clone(), Arc::clone(&ui))?;
         Ok(Self {
             host_dll_path,
-            state: Arc::new(Mutex::new(HostState::Idle)),
-            executor: MutationExecutor::new()?,
+            state,
+            hook_status,
+            status_poller,
+            executor,
             shutdown,
             ui,
         })
@@ -205,34 +220,40 @@ impl HostController {
         profile: Option<String>,
     ) -> Result<MutationCompletion<ApplyReport>, HostCommandError> {
         let dll_path = self.host_dll_path.clone();
+        let hook_status = self.hook_status.clone();
         self.submit_mutation(move || {
-            Ok(inject::apply(ApplyRequest {
+            let report = inject::apply(ApplyRequest {
                 dll_path,
                 config_path,
                 profile,
-            })?)
+            })?;
+            hook_status.record_apply(report.profile_name.clone());
+            Ok(report)
         })
     }
 
     pub(crate) fn submit_disable(
         &self,
     ) -> Result<MutationCompletion<DisableReport>, HostCommandError> {
+        let hook_status = self.hook_status.clone();
         self.submit_mutation(move || {
             let report = inject::disable()?;
-            match report.outcome {
-                DisableOutcome::NotInjected
-                | DisableOutcome::ShutDown(ShutdownStatus::Success)
-                | DisableOutcome::ShutDown(ShutdownStatus::NotInitialized)
-                | DisableOutcome::ShutDown(ShutdownStatus::AlreadyShutDown) => Ok(report),
-                DisableOutcome::ShutDown(status) => Err(HostCommandError::Injector(
-                    InjectorError::HookShutdownFailed(status),
-                )),
-            }
+            validate_disable_outcome(report.outcome)?;
+            hook_status.record_disable();
+            Ok(report)
         })
     }
 
     pub(crate) fn state(&self) -> HostState {
         *lock_state(&self.state)
+    }
+
+    pub(crate) fn hook_status(&self) -> HookRuntimeStatus {
+        self.hook_status.status()
+    }
+
+    pub(crate) fn should_report_hook_loss(&self, revision: u64) -> bool {
+        self.hook_status.should_report_loss(revision)
     }
 
     pub(crate) fn show_gui(&self) -> Result<(), HostCommandError> {
@@ -276,7 +297,10 @@ impl HostController {
         {
             let mut state = lock_state(&self.state);
             match *state {
-                HostState::Idle => *state = HostState::Mutating,
+                HostState::Idle => {
+                    self.hook_status.begin_mutation();
+                    *state = HostState::Mutating;
+                }
                 HostState::Mutating => return Err(HostCommandError::Busy),
                 HostState::Stopping => return Err(HostCommandError::Stopping),
             }
@@ -286,6 +310,7 @@ impl HostController {
         let guard = MutationStateGuard {
             state: Arc::clone(&self.state),
             ui: Arc::clone(&self.ui),
+            status_poller: self.status_poller.handle(),
             armed: true,
         };
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -309,10 +334,22 @@ impl HostController {
     }
 }
 
-fn lock_state(state: &Mutex<HostState>) -> MutexGuard<'_, HostState> {
+pub(super) fn lock_state(state: &Mutex<HostState>) -> MutexGuard<'_, HostState> {
     match state.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn validate_disable_outcome(outcome: DisableOutcome) -> Result<(), HostCommandError> {
+    match outcome {
+        DisableOutcome::NotInjected
+        | DisableOutcome::ShutDown(ShutdownStatus::Success)
+        | DisableOutcome::ShutDown(ShutdownStatus::NotInitialized)
+        | DisableOutcome::ShutDown(ShutdownStatus::AlreadyShutDown) => Ok(()),
+        DisableOutcome::ShutDown(status) => Err(HostCommandError::Injector(
+            InjectorError::HookShutdownFailed(status),
+        )),
     }
 }
 
@@ -346,6 +383,7 @@ impl Drop for PreparedStop {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::Receiver;
     use std::time::Duration;
 
@@ -354,8 +392,17 @@ mod tests {
     fn test_controller() -> (Arc<HostController>, Receiver<UiCommand>) {
         let shutdown = Arc::new(ServerShutdown::new());
         let (ui, commands) = UiHandle::new();
+        let state = Arc::new(Mutex::new(HostState::Idle));
         (
-            Arc::new(HostController::new(None, shutdown, ui).unwrap()),
+            Arc::new(HostController {
+                host_dll_path: None,
+                state,
+                hook_status: HookStatusStore::default(),
+                status_poller: StatusPoller::stopped(),
+                executor: MutationExecutor::new().unwrap(),
+                shutdown,
+                ui,
+            }),
             commands,
         )
     }
@@ -366,6 +413,30 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn disable_outcome_validation_accepts_benign_statuses() {
+        for outcome in [
+            DisableOutcome::NotInjected,
+            DisableOutcome::ShutDown(ShutdownStatus::Success),
+            DisableOutcome::ShutDown(ShutdownStatus::NotInitialized),
+            DisableOutcome::ShutDown(ShutdownStatus::AlreadyShutDown),
+        ] {
+            validate_disable_outcome(outcome).unwrap();
+        }
+    }
+
+    #[test]
+    fn disable_outcome_validation_rejects_cleanup_failure() {
+        assert!(matches!(
+            validate_disable_outcome(DisableOutcome::ShutDown(
+                ShutdownStatus::MinHookCleanupFailed
+            )),
+            Err(HostCommandError::Injector(
+                InjectorError::HookShutdownFailed(ShutdownStatus::MinHookCleanupFailed)
+            ))
+        ));
     }
 
     #[test]
@@ -386,6 +457,55 @@ mod tests {
         wait_until_idle(&controller);
         assert_eq!(controller.state(), HostState::Idle);
         assert_eq!(completion.wait().unwrap(), 42);
+    }
+
+    #[test]
+    fn blocked_status_query_does_not_block_mutation_executor() {
+        let shutdown = Arc::new(ServerShutdown::new());
+        let (ui, _commands) = UiHandle::new();
+        let state = Arc::new(Mutex::new(HostState::Idle));
+        let hook_status = HookStatusStore::default();
+        let (query_started_sender, query_started_receiver) = mpsc::channel();
+        let (release_query_sender, release_query_receiver) = mpsc::channel();
+        let release_query_receiver = Arc::new(Mutex::new(release_query_receiver));
+        let query_release = Arc::clone(&release_query_receiver);
+        let query_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&query_calls);
+        let status_poller = StatusPoller::new_with_query(
+            Arc::clone(&state),
+            hook_status.clone(),
+            Arc::clone(&ui),
+            Arc::new(move || {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    query_started_sender.send(()).unwrap();
+                    query_release.lock().unwrap().recv().unwrap();
+                }
+                Ok(crate::inject::HookStatusSnapshot::Inactive)
+            }),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let controller = HostController {
+            host_dll_path: None,
+            state,
+            hook_status,
+            status_poller,
+            executor: MutationExecutor::new().unwrap(),
+            shutdown,
+            ui,
+        };
+
+        query_started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        let completion = controller.submit_test_mutation(|| Ok(42)).unwrap();
+        assert_eq!(completion.wait().unwrap(), 42);
+        release_query_sender.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while query_calls.load(Ordering::SeqCst) < 2 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
     }
 
     #[test]
@@ -477,6 +597,8 @@ mod tests {
         let controller = HostController {
             host_dll_path: None,
             state: Arc::new(Mutex::new(HostState::Idle)),
+            hook_status: HookStatusStore::default(),
+            status_poller: StatusPoller::stopped(),
             executor: MutationExecutor::stopped(),
             shutdown,
             ui,

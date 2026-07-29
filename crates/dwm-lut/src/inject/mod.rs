@@ -1,5 +1,6 @@
 mod injector;
 mod staging;
+mod status;
 mod win32;
 
 use std::path::PathBuf;
@@ -7,6 +8,7 @@ use std::path::PathBuf;
 use crate::config;
 use crate::error::{InjectionStep, InjectorError};
 
+pub(crate) use dwm_lut_payload::HookStatusSnapshot;
 pub(crate) use injector::{ApplyOutcome, DisableOutcome};
 
 pub(crate) struct ApplyRequest {
@@ -72,4 +74,11 @@ pub(crate) fn disable() -> Result<DisableReport, InjectorError> {
     let outcome = injector::disable_injected_hook(pid)?;
 
     Ok(DisableReport { outcome, pid })
+}
+
+pub(crate) fn query_status() -> Result<HookStatusSnapshot, InjectorError> {
+    let pid = win32::find_process_id_by_name("dwm.exe")?;
+
+    win32::enable_debug_privilege()?;
+    status::query_hook_status(pid)
 }

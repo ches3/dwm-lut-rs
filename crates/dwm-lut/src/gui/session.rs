@@ -22,8 +22,8 @@ use super::app::{
     self, ConfigState, DisplayMonitor, ErrorPresentation, GuiMutationState, LutBrowseRequest,
     LutBrowseState, ModalState, MonitorChangeListener, MonitorChangeSignal,
     MouseFocusDismissListener, MouseFocusDismissSignal, ProfileDialog, assignment_path,
-    display_monitors, edit_and_save_config, exit_is_available, poll_lut_browse, profile_menu_label,
-    start_lut_browse,
+    display_monitors, edit_and_save_config, escape_menu_ampersands, exit_is_available,
+    hook_status_label, poll_lut_browse, profile_menu_label, start_lut_browse,
 };
 use super::error::GuiError;
 use super::{
@@ -195,6 +195,7 @@ pub(super) fn run(
     wire_tray(&shared);
 
     shared.inner.borrow_mut().sync_tray_items();
+    shared.drain();
 
     let ready_failed = Rc::new(Cell::new(false));
     let ready_failed_from_event_loop = Rc::clone(&ready_failed);
@@ -322,6 +323,17 @@ impl HostSession {
                     self.sync_tray_items();
                     self.refresh_window();
                 }
+                Ok(UiCommand::HookStatusChanged { loss_revision }) => {
+                    self.sync_tray_items();
+                    self.refresh_window();
+                    if loss_revision
+                        .is_some_and(|revision| self.controller.should_report_hook_loss(revision))
+                    {
+                        platform::show_error(
+                            "The DWM LUT hook is no longer active. The DWM process may have restarted, or the hook DLL was unloaded.",
+                        );
+                    }
+                }
                 Ok(UiCommand::Exit) => self.close_app(),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -362,7 +374,12 @@ impl HostSession {
         self.tray
             .set_apply_profiles(ModelRc::new(VecModel::from(profiles)));
         self.tray.set_apply_enabled(apply_enabled);
-        self.tray.set_disable_enabled(host_idle);
+        let hook_status = self.controller.hook_status();
+        self.tray
+            .set_hook_status(SharedString::from(escape_menu_ampersands(
+                &hook_status_label(&hook_status),
+            )));
+        self.tray.set_disable_available(hook_status.can_disable());
         self.tray.set_exit_enabled(host_idle);
     }
 
@@ -793,14 +810,15 @@ impl HostSession {
         if !self.mutation_state.is_awaiting_result() {
             return;
         }
-        let Some((result, presentation)) = self.mutation_state.try_take_result() else {
+        let Some(result) = self.mutation_state.try_take_result() else {
             return;
         };
         self.mutation_state = GuiMutationState::Idle;
-        self.sync_tray_items();
+        let (result, presentation) = result;
         if let Err(error) = result {
             self.report_mutation_error(error.to_string(), presentation);
         }
+        self.sync_tray_items();
         self.refresh_window();
     }
 
@@ -898,9 +916,10 @@ impl HostSession {
 
         ui.set_controls_disabled(controls_disabled);
         ui.set_can_exit(self.can_exit());
-        ui.set_mutation_status(SharedString::from(
-            self.mutation_state.status_label().unwrap_or(""),
-        ));
+        ui.set_mutation_busy(self.mutation_state.is_awaiting_result());
+        let hook_status = self.controller.hook_status();
+        ui.set_hook_status(SharedString::from(hook_status_label(&hook_status)));
+        ui.set_disable_available(hook_status.can_disable());
         ui.set_monitor_error(SharedString::from(
             self.monitor_error.clone().unwrap_or_default(),
         ));

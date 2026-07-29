@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::config::{ConfigAssignmentDocument, ConfigColorMode, ConfigDocument};
-use crate::host::{HostCommandError, HostState, MutationCompletion};
+use crate::host::{HookRuntimeStatus, HostCommandError, HostState, MutationCompletion};
 use crate::inject::{ApplyReport, DisableReport};
 use crate::monitor::MonitorListing;
 
@@ -36,14 +36,6 @@ impl GuiMutationState {
         !matches!(self, Self::Idle)
     }
 
-    pub(super) fn status_label(&self) -> Option<&'static str> {
-        match self {
-            Self::Idle => None,
-            Self::AwaitingApplyResult(_, _) => Some("Applying LUT configuration..."),
-            Self::AwaitingDisableResult(_, _) => Some("Disabling LUT..."),
-        }
-    }
-
     pub(super) fn try_take_result(
         &mut self,
     ) -> Option<(Result<(), HostCommandError>, ErrorPresentation)> {
@@ -59,12 +51,25 @@ impl GuiMutationState {
     }
 }
 
+pub(super) fn hook_status_label(status: &HookRuntimeStatus) -> String {
+    match status {
+        HookRuntimeStatus::Checking => "Checking...".to_string(),
+        HookRuntimeStatus::Active { profile_name } => format!("Active - {profile_name}"),
+        HookRuntimeStatus::Inactive => "Inactive".to_string(),
+        HookRuntimeStatus::Unknown => "Unknown".to_string(),
+    }
+}
+
 pub(super) fn exit_is_available(awaiting_mutation_result: bool, state: HostState) -> bool {
     !awaiting_mutation_result && state == HostState::Idle
 }
 
+pub(super) fn escape_menu_ampersands(text: &str) -> String {
+    text.replace('&', "&&")
+}
+
 pub(super) fn profile_menu_label(name: &str, is_default: bool) -> String {
-    let name = name.replace('&', "&&");
+    let name = escape_menu_ampersands(name);
     if is_default {
         format!("{name} (default)")
     } else {
@@ -352,6 +357,21 @@ mod tests {
                 ErrorPresentation::Gui
             ))
         ));
+    }
+
+    #[test]
+    fn hook_status_label_includes_confirmed_profile_name() {
+        let active = hook_status_label(&HookRuntimeStatus::Active {
+            profile_name: "SDR & HDR".to_string(),
+        });
+        assert_eq!(active, "Active - SDR & HDR");
+        assert_eq!(escape_menu_ampersands(&active), "Active - SDR && HDR");
+        assert_eq!(hook_status_label(&HookRuntimeStatus::Inactive), "Inactive");
+        assert_eq!(
+            hook_status_label(&HookRuntimeStatus::Checking),
+            "Checking..."
+        );
+        assert_eq!(hook_status_label(&HookRuntimeStatus::Unknown), "Unknown");
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::ptr;
 use super::DirtyRect;
 #[cfg(debug_assertions)]
 use crate::d3d11::{BackBufferId, PresentDrawStatus};
+use crate::lifecycle;
 #[cfg(debug_assertions)]
 use crate::log::SharedLimiter;
 use crate::log::{self, PresentLutAcquireFailReason};
@@ -69,7 +70,7 @@ pub(crate) fn apply_lut(
         return outcome;
     };
 
-    if !state::is_runtime_active() {
+    if !lifecycle::is_runtime_active() {
         return outcome;
     }
 
@@ -156,6 +157,7 @@ mod tests {
     use super::DirtyRect;
     use super::{ApplyOutcome, apply_lut, empty_rect_vec_storage};
     use crate::d3d11::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT};
+    use crate::lifecycle;
     use crate::state;
     use crate::state::HOOK_GLOBAL_TEST_LOCK;
 
@@ -373,11 +375,15 @@ mod tests {
             None,
         )));
 
-        assert_eq!(state::begin_shutdown(), state::ShutdownStart::Started);
+        let shutdown = match lifecycle::begin_shutdown() {
+            lifecycle::ShutdownStart::Started(transition) => transition,
+            other => panic!("unexpected shutdown start: {other:?}"),
+        };
 
         let _ = run_apply(0x1234, &sample_inputs(false, Vec::new()));
 
         assert!(crate::d3d11::fake_render_present_lut_call().is_none());
+        shutdown.finish_shut_down();
         state::reset_state_for_tests();
     }
 }

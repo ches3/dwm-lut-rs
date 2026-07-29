@@ -86,35 +86,26 @@ impl RemoteAllocation {
         Ok(allocation)
     }
 
-    pub(crate) fn read_copy<T: Copy>(&self, step: InjectionStep) -> Result<T, InjectorError> {
+    /// # Safety
+    ///
+    /// The bytes stored in this allocation must be a valid representation of `T`.
+    pub(crate) unsafe fn read_copy<T: Copy>(
+        &self,
+        step: InjectionStep,
+    ) -> Result<T, InjectorError> {
+        let bytes = read_process_memory_raw(
+            self.process,
+            self.address as usize,
+            std::mem::size_of::<T>(),
+            step,
+        )?;
         let mut value = std::mem::MaybeUninit::<T>::uninit();
-        let mut read = 0usize;
-        let ok = unsafe {
-            ReadProcessMemory(
-                self.process,
-                self.address,
-                value.as_mut_ptr().cast(),
-                std::mem::size_of::<T>(),
-                &mut read,
-            )
-        };
-        if ok == FALSE {
-            return Err(InjectorError::StepFailed {
-                step,
-                source: last_os_error(),
-            });
+        // SAFETY: read_process_memory_raw returned exactly size_of::<T>()
+        // initialized bytes, and the caller guarantees they represent a valid T.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), value.as_mut_ptr().cast(), bytes.len());
+            Ok(value.assume_init())
         }
-        if read != std::mem::size_of::<T>() {
-            return Err(InjectorError::StepFailed {
-                step,
-                source: io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "remote read returned fewer bytes than requested",
-                ),
-            });
-        }
-
-        Ok(unsafe { value.assume_init() })
     }
 
     fn allocate(
@@ -174,6 +165,53 @@ impl RemoteAllocation {
     pub(crate) fn address(&self) -> *mut c_void {
         self.address
     }
+}
+
+pub(crate) fn read_process_memory(
+    process: &OwnedHandle,
+    address: usize,
+    len: usize,
+    step: InjectionStep,
+) -> Result<Vec<u8>, InjectorError> {
+    read_process_memory_raw(process.raw(), address, len, step)
+}
+
+fn read_process_memory_raw(
+    process: HANDLE,
+    address: usize,
+    len: usize,
+    step: InjectionStep,
+) -> Result<Vec<u8>, InjectorError> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let mut value = vec![0_u8; len];
+    let mut read = 0usize;
+    let ok = unsafe {
+        ReadProcessMemory(
+            process,
+            address as *const c_void,
+            value.as_mut_ptr().cast(),
+            value.len(),
+            &mut read,
+        )
+    };
+    if ok == FALSE {
+        return Err(InjectorError::StepFailed {
+            step,
+            source: last_os_error(),
+        });
+    }
+    if read != value.len() {
+        return Err(InjectorError::StepFailed {
+            step,
+            source: io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "remote read returned fewer bytes than requested",
+            ),
+        });
+    }
+    Ok(value)
 }
 
 impl Drop for RemoteAllocation {

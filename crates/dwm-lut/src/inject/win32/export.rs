@@ -3,14 +3,12 @@ use std::io;
 use std::mem::size_of;
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::FALSE;
-use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 
 use crate::error::{InjectionStep, InjectorError};
 
 use super::last_os_error;
-use super::remote::{OwnedHandle, wide_null};
+use super::remote::{OwnedHandle, read_process_memory, wide_null};
 
 trait MemoryReader {
     fn read(
@@ -32,34 +30,7 @@ impl MemoryReader for ProcessMemoryReader<'_> {
         size: usize,
         step: InjectionStep,
     ) -> Result<Vec<u8>, InjectorError> {
-        let mut buffer = vec![0u8; size];
-        let mut read = 0usize;
-        let ok = unsafe {
-            ReadProcessMemory(
-                self.process.raw(),
-                address as *const _,
-                buffer.as_mut_ptr().cast(),
-                size,
-                &mut read,
-            )
-        };
-        if ok == FALSE {
-            return Err(InjectorError::StepFailed {
-                step,
-                source: last_os_error(),
-            });
-        }
-        if read != size {
-            return Err(InjectorError::StepFailed {
-                step,
-                source: io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "remote module read returned fewer bytes than requested",
-                ),
-            });
-        }
-
-        Ok(buffer)
+        read_process_memory(self.process, address, size, step)
     }
 }
 

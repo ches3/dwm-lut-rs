@@ -2,7 +2,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-pub use dwm_lut_payload::{InitializeStatus, ReplaceAssignmentsStatus, ShutdownStatus};
+pub use dwm_lut_payload::{HookStatus, InitializeStatus, ReplaceAssignmentsStatus, ShutdownStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitializeContext {
@@ -55,11 +55,13 @@ pub enum InjectionStep {
     SecureStagedHookDll,
     ResolveInitializeExport,
     ResolveShutdownExport,
+    ResolveStatusExport,
     ResolveConfigPath,
     AllocatePayloadBytes,
     WritePayloadBytes,
     AllocatePayloadBuffer,
     WritePayloadBuffer,
+    ReadStatusSnapshot,
     StartInitialize,
     WaitInitialize,
     StartShutdown,
@@ -99,11 +101,13 @@ impl fmt::Display for InjectionStep {
             Self::SecureStagedHookDll => write!(f, "staged hook DLL ACL update"),
             Self::ResolveInitializeExport => write!(f, "dwm_lut_initialize export resolution"),
             Self::ResolveShutdownExport => write!(f, "dwm_lut_shutdown export resolution"),
+            Self::ResolveStatusExport => write!(f, "dwm_lut_status export resolution"),
             Self::ResolveConfigPath => write!(f, "local config path validation"),
             Self::AllocatePayloadBytes => write!(f, "remote payload bytes allocation"),
             Self::WritePayloadBytes => write!(f, "remote payload bytes write"),
             Self::AllocatePayloadBuffer => write!(f, "remote payload buffer allocation"),
             Self::WritePayloadBuffer => write!(f, "remote payload buffer write"),
+            Self::ReadStatusSnapshot => write!(f, "remote hook status snapshot read"),
             Self::StartInitialize => write!(f, "remote initialize launch"),
             Self::WaitInitialize => write!(f, "remote initialize wait"),
             Self::StartShutdown => write!(f, "remote shutdown launch"),
@@ -192,6 +196,14 @@ pub enum InjectorError {
         failures: Vec<(PathBuf, InjectorError)>,
     },
     UnknownShutdownStatus(u32),
+    HookStatusModulesFailed {
+        failures: Vec<(PathBuf, InjectorError)>,
+    },
+    InvalidHookStatusSnapshot(String),
+    HookStatusProfileMismatch {
+        first: String,
+        second: String,
+    },
     MonitorEnumeration(String),
 }
 
@@ -321,6 +333,24 @@ impl fmt::Display for InjectorError {
             Self::UnknownShutdownStatus(code) => {
                 write!(f, "hook shutdown returned unknown status {code:#x}")
             }
+            Self::HookStatusModulesFailed { failures } => {
+                write!(
+                    f,
+                    "hook status query failed for {} staged module(s)",
+                    failures.len()
+                )?;
+                for (module_path, error) in failures {
+                    write!(f, "; {}: {error}", module_path.display())?;
+                }
+                Ok(())
+            }
+            Self::InvalidHookStatusSnapshot(message) => {
+                write!(f, "hook status query returned invalid data: {message}")
+            }
+            Self::HookStatusProfileMismatch { first, second } => write!(
+                f,
+                "active hook modules reported different profiles: {first:?} and {second:?}"
+            ),
             Self::MonitorEnumeration(message) => write!(f, "monitor enumeration failed: {message}"),
         }
     }

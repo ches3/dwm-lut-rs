@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
 use dwm_lut_payload::{ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadLut};
@@ -94,29 +93,6 @@ static PRESENT_RUNTIME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[cfg(test)]
 pub(crate) static HOOK_GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-static LIFECYCLE: AtomicU8 = AtomicU8::new(LIFECYCLE_IDLE);
-
-const LIFECYCLE_IDLE: u8 = 0;
-const LIFECYCLE_RUNNING: u8 = 1;
-const LIFECYCLE_SHUTTING_DOWN: u8 = 2;
-const LIFECYCLE_SHUT_DOWN: u8 = 3;
-const LIFECYCLE_REPLACING_ASSIGNMENTS: u8 = 4;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ShutdownStart {
-    Started,
-    NotInitialized,
-    AlreadyInProgress,
-    AlreadyShutDown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReplaceAssignmentsStart {
-    Started,
-    NotInitialized,
-    AlreadyInProgress,
-}
-
 pub(crate) fn install_state(state: HookState) -> Result<(), Box<HookState>> {
     let slot = STATE.get_or_init(|| Mutex::new(None));
     let Ok(mut slot) = slot.lock() else {
@@ -126,19 +102,7 @@ pub(crate) fn install_state(state: HookState) -> Result<(), Box<HookState>> {
         return Err(Box::new(state));
     }
     *slot = Some(state);
-    LIFECYCLE.store(LIFECYCLE_RUNNING, Ordering::Release);
     Ok(())
-}
-
-pub fn is_initialized() -> bool {
-    is_runtime_active()
-}
-
-pub(crate) fn can_initialize() -> bool {
-    matches!(
-        LIFECYCLE.load(Ordering::Acquire),
-        LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN
-    )
 }
 
 pub(crate) fn has_retained_state() -> bool {
@@ -152,40 +116,12 @@ pub fn hook_profile() -> Option<HookProfile> {
     with_state(|state| state.profile)
 }
 
+pub(crate) fn active_profile_name() -> Option<String> {
+    with_state(|state| state.payload.profile_name.clone())
+}
+
 pub(crate) fn assignments() -> Option<Arc<Vec<LutAssignment>>> {
     with_state(|state| state.assignments.clone())
-}
-
-pub(crate) fn is_runtime_active() -> bool {
-    matches!(
-        LIFECYCLE.load(Ordering::Acquire),
-        LIFECYCLE_RUNNING | LIFECYCLE_REPLACING_ASSIGNMENTS
-    )
-}
-
-pub(crate) fn begin_replace_assignments() -> ReplaceAssignmentsStart {
-    match LIFECYCLE.compare_exchange(
-        LIFECYCLE_RUNNING,
-        LIFECYCLE_REPLACING_ASSIGNMENTS,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    ) {
-        Ok(_) => ReplaceAssignmentsStart::Started,
-        Err(LIFECYCLE_IDLE) | Err(LIFECYCLE_SHUT_DOWN) => ReplaceAssignmentsStart::NotInitialized,
-        Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_REPLACING_ASSIGNMENTS) => {
-            ReplaceAssignmentsStart::AlreadyInProgress
-        }
-        Err(_) => ReplaceAssignmentsStart::NotInitialized,
-    }
-}
-
-pub(crate) fn finish_replace_assignments() {
-    let _ = LIFECYCLE.compare_exchange(
-        LIFECYCLE_REPLACING_ASSIGNMENTS,
-        LIFECYCLE_RUNNING,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    );
 }
 
 fn present_runtime_lock() -> &'static Mutex<()> {
@@ -206,23 +142,6 @@ pub(crate) fn try_lock_present_runtime() -> Option<MutexGuard<'static, ()>> {
     }
 }
 
-pub(crate) fn begin_shutdown() -> ShutdownStart {
-    match LIFECYCLE.compare_exchange(
-        LIFECYCLE_RUNNING,
-        LIFECYCLE_SHUTTING_DOWN,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    ) {
-        Ok(_) => ShutdownStart::Started,
-        Err(LIFECYCLE_IDLE) => ShutdownStart::NotInitialized,
-        Err(LIFECYCLE_SHUTTING_DOWN) | Err(LIFECYCLE_REPLACING_ASSIGNMENTS) => {
-            ShutdownStart::AlreadyInProgress
-        }
-        Err(LIFECYCLE_SHUT_DOWN) => ShutdownStart::AlreadyShutDown,
-        Err(_) => ShutdownStart::NotInitialized,
-    }
-}
-
 pub(crate) fn clear_state_after_shutdown() {
     if let Some(state) = STATE.get()
         && let Ok(mut guard) = state.lock()
@@ -234,7 +153,6 @@ pub(crate) fn clear_state_after_shutdown() {
     {
         *guard = None;
     }
-    LIFECYCLE.store(LIFECYCLE_IDLE, Ordering::Release);
 }
 
 pub(crate) fn retain_state_after_shutdown() {
@@ -243,14 +161,6 @@ pub(crate) fn retain_state_after_shutdown() {
     if let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock()) {
         *retained = active.take();
     }
-}
-
-pub(crate) fn finish_shutdown() {
-    LIFECYCLE.store(LIFECYCLE_SHUT_DOWN, Ordering::Release);
-}
-
-pub(crate) fn finish_reactivation() {
-    LIFECYCLE.store(LIFECYCLE_RUNNING, Ordering::Release);
 }
 
 pub(crate) fn reactivate_retained_state(
@@ -326,8 +236,7 @@ pub(crate) fn reset_state_for_tests() {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *guard = None;
     }
-    LIFECYCLE.store(LIFECYCLE_IDLE, Ordering::Release);
-    crate::bootstrap::reset_initialization_guard_for_tests();
+    crate::lifecycle::reset_for_tests();
     crate::d3d11::reset_fake_render_result();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
     crate::minhook::reset_test_original_slots();
@@ -364,6 +273,7 @@ mod tests {
         assignments: impl IntoIterator<Item = (MonitorIdentity, ColorMode, PayloadLut)>,
     ) -> HookPayload {
         HookPayload {
+            profile_name: "test".to_string(),
             assignments: assignments
                 .into_iter()
                 .map(|(identity, color_mode, lut)| PayloadAssignment {

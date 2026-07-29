@@ -112,14 +112,17 @@ pub fn load_config(path: &Path, profile: Option<&str>) -> Result<LoadedConfig, C
 
 pub fn load_payload(path: &Path, profile: Option<&str>) -> Result<LoadedPayload, ConfigError> {
     let loaded = load_config(path, profile)?;
-    let payload = config_to_payload(&loaded.config)?;
+    let payload = config_to_payload(&loaded.profile_name, &loaded.config)?;
     Ok(LoadedPayload {
         profile_name: loaded.profile_name,
         payload,
     })
 }
 
-pub fn config_to_payload(config: &LutConfig) -> Result<HookPayload, ConfigError> {
+pub fn config_to_payload(
+    profile_name: &str,
+    config: &LutConfig,
+) -> Result<HookPayload, ConfigError> {
     let mut assignments = Vec::with_capacity(config.assignments.len());
     for assignment in &config.assignments {
         assignments.push(PayloadAssignment {
@@ -128,7 +131,10 @@ pub fn config_to_payload(config: &LutConfig) -> Result<HookPayload, ConfigError>
         });
     }
 
-    let payload = HookPayload { assignments };
+    let payload = HookPayload {
+        profile_name: profile_name.to_string(),
+        assignments,
+    };
     validate_payload(&payload).map_err(ConfigError::InvalidPayload)?;
     Ok(payload)
 }
@@ -215,8 +221,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        ColorMode, ConfigError, FileConfig, MonitorIdentity, load_config, parse_config_str,
-        resolve_file_config,
+        ColorMode, ConfigError, FileConfig, LutAssignment, LutConfig, MonitorIdentity,
+        MonitorTarget, config_to_payload, load_config, parse_config_str, resolve_file_config,
     };
     use dwm_lut_payload::AdapterLuid;
 
@@ -1013,6 +1019,50 @@ mod tests {
         let loaded = load_config(&path, Some("gaming")).expect("named profile should load");
         assert_eq!(loaded.profile_name, "gaming");
         assert!(loaded.config.assignments.is_empty());
+
+        fs::remove_dir_all(&dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn config_to_payload_preserves_resolved_profile_name() {
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!(
+            "dwm-lut-test-{}-payload-profile",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        let lut_path = dir.join("identity.cube");
+        fs::write(
+            &lut_path,
+            "LUT_3D_SIZE 2\n\
+             0 0 0\n\
+             1 0 0\n\
+             0 1 0\n\
+             1 1 0\n\
+             0 0 1\n\
+             1 0 1\n\
+             0 1 1\n\
+             1 1 1\n",
+        )
+        .expect("test LUT should be written");
+        let target = MonitorTarget {
+            identity: test_monitor_identity(),
+            color_mode: ColorMode::Sdr,
+        };
+        let config = LutConfig {
+            assignments: vec![LutAssignment {
+                target,
+                lut_path: lut_path.clone(),
+            }],
+        };
+
+        let payload =
+            config_to_payload("gaming", &config).expect("config should produce a payload");
+
+        assert_eq!(payload.profile_name, "gaming");
+        assert_eq!(payload.assignments.len(), 1);
+        assert_eq!(payload.assignments[0].target, target);
 
         fs::remove_dir_all(&dir).expect("temp dir should be removed");
     }

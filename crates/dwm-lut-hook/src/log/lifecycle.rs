@@ -10,6 +10,7 @@ use crate::resolver::SignatureResolutionReport;
 pub(crate) enum ShutdownFinished {
     NotInitialized,
     InitializationInProgress,
+    AssignmentReplacementInProgress,
     ShutdownInProgress,
     AlreadyShutDown,
     StateMissing,
@@ -23,6 +24,7 @@ impl ShutdownFinished {
         match self {
             Self::NotInitialized => "not_initialized",
             Self::InitializationInProgress => "initialization_in_progress",
+            Self::AssignmentReplacementInProgress => "assignment_replacement_in_progress",
             Self::ShutdownInProgress => "shutdown_in_progress",
             Self::AlreadyShutDown => "already_shutdown",
             Self::StateMissing => "state_missing",
@@ -35,9 +37,9 @@ impl ShutdownFinished {
     const fn status(self) -> ShutdownStatus {
         match self {
             Self::NotInitialized => ShutdownStatus::NotInitialized,
-            Self::InitializationInProgress | Self::ShutdownInProgress => {
-                ShutdownStatus::AlreadyInProgress
-            }
+            Self::InitializationInProgress
+            | Self::AssignmentReplacementInProgress
+            | Self::ShutdownInProgress => ShutdownStatus::AlreadyInProgress,
             Self::AlreadyShutDown => ShutdownStatus::AlreadyShutDown,
             Self::StateMissing | Self::Success => ShutdownStatus::Success,
             Self::MinHookCleanupFailed => ShutdownStatus::MinHookCleanupFailed,

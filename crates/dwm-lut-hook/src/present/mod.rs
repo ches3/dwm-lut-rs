@@ -137,6 +137,7 @@ pub(crate) mod test_support {
 
     pub(crate) fn test_payload(color_modes: &[ColorMode]) -> HookPayload {
         HookPayload {
+            profile_name: "test".to_string(),
             assignments: color_modes
                 .iter()
                 .map(|color_mode| PayloadAssignment {

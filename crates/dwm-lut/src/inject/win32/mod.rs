@@ -14,8 +14,12 @@ pub(crate) use export::{resolve_remote_export_address, resolve_remote_module_exp
 pub(crate) use module::{
     NamedRemoteModule, RemoteModule, find_remote_module, find_remote_modules_by_name,
 };
-pub(crate) use process::{enable_debug_privilege, find_process_id_by_name, open_target_process};
-pub(crate) use remote::{OwnedHandle, RemoteAllocation, run_remote_thread, wide_null};
+pub(crate) use process::{
+    enable_debug_privilege, find_process_id_by_name, open_status_process, open_target_process,
+};
+pub(crate) use remote::{
+    OwnedHandle, RemoteAllocation, read_process_memory, run_remote_thread, wide_null,
+};
 
 fn create_toolhelp_snapshot(
     flags: u32,

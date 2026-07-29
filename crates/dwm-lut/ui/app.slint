@@ -75,8 +75,9 @@ export component HostTray inherits SystemTrayIcon {
     in-out property <bool> tray-visible <=> root.visible;
     in property <[TrayProfile]> apply-profiles;
     in property <bool> apply-enabled: false;
-    in property <bool> disable-enabled: false;
+    in property <bool> disable-available: true;
     in property <bool> exit-enabled: true;
+    in property <string> hook-status: "Checking...";
 
     callback open-window();
     callback apply-profile(string);
@@ -91,6 +92,11 @@ export component HostTray inherits SystemTrayIcon {
     }
 
     Menu {
+        MenuItem {
+            title: "Status: \{root.hook-status}";
+            enabled: false;
+        }
+        MenuSeparator {}
         MenuItem {
             title: "Open";
             activated => {
@@ -110,7 +116,7 @@ export component HostTray inherits SystemTrayIcon {
         }
         MenuItem {
             title: "Disable";
-            enabled: root.disable-enabled;
+            enabled: root.exit-enabled && root.disable-available;
             activated => {
                 root.disable();
             }
@@ -141,8 +147,10 @@ export component MainWindow inherits Window {
     in property <bool> load-failed: false;
     in property <string> load-error: "";
     in property <bool> controls-disabled: false;
+    in property <bool> disable-available: true;
     in property <bool> can-exit: true;
-    in property <string> mutation-status: "";
+    in property <bool> mutation-busy: false;
+    in property <string> hook-status: "Checking...";
     in property <string> monitor-error: "";
     in property <[string]> profile-names;
     in-out property <int> selected-profile-index: 0;
@@ -225,19 +233,6 @@ export component MainWindow inherits Window {
                         enabled: root.can-exit;
                         clicked => {
                             root.exit();
-                        }
-                    }
-                    if root.mutation-status != "": HorizontalLayout {
-                        spacing: 8px;
-                        VerticalLayout {
-                            alignment: center;
-                            BusyIndicator {}
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            Text {
-                                text: root.mutation-status;
-                            }
                         }
                     }
                 }
@@ -405,11 +400,22 @@ export component MainWindow inherits Window {
                 }
 
                 HorizontalBox {
-                    alignment: start;
+                    alignment: space-between;
+                    cross-axis-alignment: end;
                     padding-top: 16px;
                     spacing: 12px;
-                    VerticalLayout {
-                        alignment: center;
+                    Text {
+                        text: "Status: \{root.hook-status}";
+                        horizontal-stretch: 1;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        if root.mutation-busy: VerticalLayout {
+                            alignment: center;
+                            BusyIndicator {}
+                        }
                         HorizontalLayout {
                             spacing: 8px;
                             Button {
@@ -421,23 +427,10 @@ export component MainWindow inherits Window {
                             }
                             Button {
                                 text: "Disable";
-                                enabled: !root.controls-disabled;
+                                enabled: !root.controls-disabled && root.disable-available;
                                 clicked => {
                                     root.disable();
                                 }
-                            }
-                        }
-                    }
-                    if root.mutation-status != "": HorizontalLayout {
-                        spacing: 6px;
-                        VerticalLayout {
-                            alignment: center;
-                            BusyIndicator {}
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            Text {
-                                text: root.mutation-status;
                             }
                         }
                     }

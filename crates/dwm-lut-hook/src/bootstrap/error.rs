@@ -68,7 +68,10 @@ impl fmt::Display for ReplaceAssignmentsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotInitialized => write!(f, "hook is not initialized"),
-            Self::AlreadyInProgress => write!(f, "hook initialization or shutdown is in progress"),
+            Self::AlreadyInProgress => write!(
+                f,
+                "hook initialization, assignment replacement, or shutdown is in progress"
+            ),
             Self::Payload(error) => write!(f, "{error}"),
             Self::State(ReplaceLutAssignmentsError::NotInitialized) => {
                 write!(f, "hook is not initialized")

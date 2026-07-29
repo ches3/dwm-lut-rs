@@ -2,6 +2,7 @@ mod bootstrap;
 mod d3d11;
 mod desktop_redraw;
 mod flip_gate;
+mod lifecycle;
 mod log;
 mod minhook;
 mod present;
@@ -28,13 +29,18 @@ pub use resolver::{
 pub use resolver::{MappedModuleImage, resolve_signature};
 pub use state::{
     HookRuntime, HookState, LutAssignment, LutMetadata, ShaderTexture3D, assignments_from_payload,
-    cube_to_texture, hook_profile, is_initialized,
+    cube_to_texture, hook_profile,
 };
 
 use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::{HINSTANCE, TRUE};
 use windows_sys::Win32::System::LibraryLoader::DisableThreadLibraryCalls;
+
+// SAFETY: No other symbol in this cdylib uses `dwm_lut_status`.
+#[unsafe(export_name = "dwm_lut_status")]
+pub(crate) static DWM_LUT_STATUS: lifecycle::ExportedStatusSnapshot =
+    lifecycle::ExportedStatusSnapshot::inactive();
 
 /// # Safety
 ///

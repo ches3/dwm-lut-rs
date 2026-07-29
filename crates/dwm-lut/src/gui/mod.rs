@@ -19,6 +19,7 @@ thread_local! {
 pub(crate) enum UiCommand {
     Show,
     HostStateChanged,
+    HookStatusChanged { loss_revision: Option<u64> },
     Exit,
 }
 

@@ -40,6 +40,15 @@ pub(crate) fn open_target_process(pid: u32) -> Result<OwnedHandle, InjectorError
     OwnedHandle::new(handle, InjectionStep::OpenTargetProcess)
 }
 
+pub(crate) fn open_status_process(pid: u32) -> Result<OwnedHandle, InjectorError> {
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid) };
+    if handle.is_null() {
+        return Err(classify_open_target_process_error(pid, last_os_error()));
+    }
+
+    OwnedHandle::new(handle, InjectionStep::OpenTargetProcess)
+}
+
 pub(crate) fn enable_debug_privilege() -> Result<(), InjectorError> {
     let mut token = null_mut();
     let ok = unsafe {
