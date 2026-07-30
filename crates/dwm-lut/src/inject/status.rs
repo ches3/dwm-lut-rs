@@ -10,11 +10,11 @@ use super::win32::{
     OwnedHandle, find_remote_modules_by_name, open_status_process, read_process_memory,
     resolve_remote_module_export_address,
 };
-use crate::error::{HookStatus, InjectionStep, InjectorError};
+use crate::inject::{HookStatus, InjectError, InjectionStep};
 
 const MAX_STATUS_QUERY_ATTEMPTS: usize = 5;
 
-pub(crate) fn query_hook_status(pid: u32) -> Result<HookStatusSnapshot, InjectorError> {
+pub(crate) fn query_hook_status(pid: u32) -> Result<HookStatusSnapshot, InjectError> {
     let remote_hook_modules = find_remote_modules_by_name(
         pid,
         InjectionStep::ResolveStatusExport,
@@ -61,7 +61,7 @@ pub(crate) fn query_hook_status(pid: u32) -> Result<HookStatusSnapshot, Injector
 }
 
 trait StatusMemoryReader {
-    fn read(&self, address: usize, len: usize) -> Result<Vec<u8>, InjectorError>;
+    fn read(&self, address: usize, len: usize) -> Result<Vec<u8>, InjectError>;
 }
 
 struct ProcessStatusReader<'a> {
@@ -69,7 +69,7 @@ struct ProcessStatusReader<'a> {
 }
 
 impl StatusMemoryReader for ProcessStatusReader<'_> {
-    fn read(&self, address: usize, len: usize) -> Result<Vec<u8>, InjectorError> {
+    fn read(&self, address: usize, len: usize) -> Result<Vec<u8>, InjectError> {
         read_process_memory(
             self.process,
             address,
@@ -82,7 +82,7 @@ impl StatusMemoryReader for ProcessStatusReader<'_> {
 fn query_remote_hook_status<R: StatusMemoryReader>(
     reader: &R,
     remote_status_address: usize,
-) -> Result<HookStatusSnapshot, InjectorError> {
+) -> Result<HookStatusSnapshot, InjectError> {
     const SEQUENCE_SIZE: usize = size_of::<u32>();
     const BODY_SIZE: usize = size_of::<DwmLutStatusSnapshot>() - SEQUENCE_SIZE;
 
@@ -101,48 +101,46 @@ fn query_remote_hook_status<R: StatusMemoryReader>(
         return parse_status_snapshot_body(&body);
     }
 
-    Err(InjectorError::InvalidHookStatusSnapshot(format!(
+    Err(InjectError::InvalidHookStatusSnapshot(format!(
         "status snapshot remained unstable after {MAX_STATUS_QUERY_ATTEMPTS} attempts"
     )))
 }
 
-fn parse_status_snapshot_body(body: &[u8]) -> Result<HookStatusSnapshot, InjectorError> {
+fn parse_status_snapshot_body(body: &[u8]) -> Result<HookStatusSnapshot, InjectError> {
     const PROFILE_OFFSET: usize = 16;
 
     let abi_version = read_status_u32(body)?;
     if abi_version != HOOK_STATUS_ABI_VERSION {
-        return Err(InjectorError::InvalidHookStatusSnapshot(format!(
+        return Err(InjectError::InvalidHookStatusSnapshot(format!(
             "unsupported ABI version {abi_version}"
         )));
     }
     let struct_size = read_status_u32(&body[4..])?;
     if struct_size as usize != size_of::<DwmLutStatusSnapshot>() {
-        return Err(InjectorError::InvalidHookStatusSnapshot(format!(
+        return Err(InjectError::InvalidHookStatusSnapshot(format!(
             "unexpected struct size {struct_size}"
         )));
     }
     let status_code = read_status_u32(&body[8..])?;
     let Some(status) = HookStatus::from_code(status_code) else {
-        return Err(InjectorError::InvalidHookStatusSnapshot(format!(
+        return Err(InjectError::InvalidHookStatusSnapshot(format!(
             "unknown hook status {status_code:#x}"
         )));
     };
     let profile_name_len = read_status_u32(&body[12..])? as usize;
     if profile_name_len > MAX_PROFILE_NAME_BYTES {
-        return Err(InjectorError::InvalidHookStatusSnapshot(format!(
+        return Err(InjectError::InvalidHookStatusSnapshot(format!(
             "profile name length {profile_name_len} exceeds {MAX_PROFILE_NAME_BYTES}"
         )));
     }
     let profile_storage = body
         .get(PROFILE_OFFSET..PROFILE_OFFSET + MAX_PROFILE_NAME_BYTES)
         .ok_or_else(|| {
-            InjectorError::InvalidHookStatusSnapshot(
-                "status snapshot body was truncated".to_string(),
-            )
+            InjectError::InvalidHookStatusSnapshot("status snapshot body was truncated".to_string())
         })?;
     let profile_name = std::str::from_utf8(&profile_storage[..profile_name_len])
         .map_err(|error| {
-            InjectorError::InvalidHookStatusSnapshot(format!(
+            InjectError::InvalidHookStatusSnapshot(format!(
                 "profile name is not valid UTF-8: {error}"
             ))
         })?
@@ -150,7 +148,7 @@ fn parse_status_snapshot_body(body: &[u8]) -> Result<HookStatusSnapshot, Injecto
 
     match status {
         HookStatus::Active if profile_name.is_empty() => {
-            Err(InjectorError::InvalidHookStatusSnapshot(
+            Err(InjectError::InvalidHookStatusSnapshot(
                 "active hook did not report a profile name".to_string(),
             ))
         }
@@ -160,16 +158,16 @@ fn parse_status_snapshot_body(body: &[u8]) -> Result<HookStatusSnapshot, Injecto
             Ok(HookStatusSnapshot::Transitioning)
         }
         HookStatus::Inactive | HookStatus::Transitioning => {
-            Err(InjectorError::InvalidHookStatusSnapshot(format!(
+            Err(InjectError::InvalidHookStatusSnapshot(format!(
                 "{status:?} hook reported a profile name"
             )))
         }
     }
 }
 
-fn read_status_u32(bytes: &[u8]) -> Result<u32, InjectorError> {
+fn read_status_u32(bytes: &[u8]) -> Result<u32, InjectError> {
     let bytes = bytes.get(..size_of::<u32>()).ok_or_else(|| {
-        InjectorError::InvalidHookStatusSnapshot("status field was truncated".to_string())
+        InjectError::InvalidHookStatusSnapshot("status field was truncated".to_string())
     })?;
     Ok(u32::from_le_bytes(
         bytes
@@ -183,7 +181,7 @@ struct HookStatusAggregation {
     active_profile_name: Option<String>,
     profile_mismatch: Option<(String, String)>,
     transitioning: bool,
-    failures: Vec<(PathBuf, InjectorError)>,
+    failures: Vec<(PathBuf, InjectError)>,
 }
 
 impl HookStatusAggregation {
@@ -203,19 +201,19 @@ impl HookStatusAggregation {
         }
     }
 
-    fn record_failure(&mut self, module_path: PathBuf, error: InjectorError) {
+    fn record_failure(&mut self, module_path: PathBuf, error: InjectError) {
         self.failures.push((module_path, error));
     }
 
-    fn finish(self) -> Result<HookStatusSnapshot, InjectorError> {
+    fn finish(self) -> Result<HookStatusSnapshot, InjectError> {
         if let Some((first, second)) = self.profile_mismatch {
-            return Err(InjectorError::HookStatusProfileMismatch { first, second });
+            return Err(InjectError::HookStatusProfileMismatch { first, second });
         }
         if let Some(profile_name) = self.active_profile_name {
             return Ok(HookStatusSnapshot::Active { profile_name });
         }
         if !self.failures.is_empty() {
-            return Err(InjectorError::HookStatusModulesFailed {
+            return Err(InjectError::HookStatusModulesFailed {
                 failures: self.failures,
             });
         }
@@ -237,8 +235,8 @@ mod tests {
         DwmLutStatusSnapshot, HOOK_STATUS_ABI_VERSION, HookStatusSnapshot, MAX_PROFILE_NAME_BYTES,
     };
 
-    use crate::error::HookStatus;
-    use crate::error::InjectorError;
+    use crate::inject::HookStatus;
+    use crate::inject::InjectError;
 
     use super::{
         HookStatusAggregation, MAX_STATUS_QUERY_ATTEMPTS, StatusMemoryReader,
@@ -260,7 +258,7 @@ mod tests {
     }
 
     impl StatusMemoryReader for FakeStatusReader {
-        fn read(&self, _address: usize, _len: usize) -> Result<Vec<u8>, InjectorError> {
+        fn read(&self, _address: usize, _len: usize) -> Result<Vec<u8>, InjectError> {
             Ok(self
                 .reads
                 .lock()
@@ -285,7 +283,7 @@ mod tests {
         body
     }
 
-    fn stable_query(body: Vec<u8>) -> Result<HookStatusSnapshot, InjectorError> {
+    fn stable_query(body: Vec<u8>) -> Result<HookStatusSnapshot, InjectError> {
         query_remote_hook_status(
             &FakeStatusReader::new([sequence(2), body, sequence(2)]),
             STATUS_ADDRESS,
@@ -339,7 +337,7 @@ mod tests {
 
         assert!(matches!(
             query_remote_hook_status(&reader, STATUS_ADDRESS),
-            Err(InjectorError::InvalidHookStatusSnapshot(_))
+            Err(InjectError::InvalidHookStatusSnapshot(_))
         ));
     }
 
@@ -369,7 +367,7 @@ mod tests {
             assert!(
                 matches!(
                     stable_query(body),
-                    Err(InjectorError::InvalidHookStatusSnapshot(_))
+                    Err(InjectError::InvalidHookStatusSnapshot(_))
                 ),
                 "case should be rejected: {case}"
             );
@@ -381,13 +379,13 @@ mod tests {
         let reader = FakeStatusReader::new([vec![0; 3]]);
         assert!(matches!(
             query_remote_hook_status(&reader, STATUS_ADDRESS),
-            Err(InjectorError::InvalidHookStatusSnapshot(_))
+            Err(InjectError::InvalidHookStatusSnapshot(_))
         ));
 
         let reader = FakeStatusReader::new([sequence(2), vec![0; 20], sequence(2)]);
         assert!(matches!(
             query_remote_hook_status(&reader, STATUS_ADDRESS),
-            Err(InjectorError::InvalidHookStatusSnapshot(_))
+            Err(InjectError::InvalidHookStatusSnapshot(_))
         ));
     }
 
@@ -396,7 +394,7 @@ mod tests {
         let mut aggregation = HookStatusAggregation::default();
         aggregation.record_failure(
             PathBuf::from("old.dll"),
-            InjectorError::ExportNotFound {
+            InjectError::ExportNotFound {
                 export: "dwm_lut_status".to_string(),
                 dll_path: PathBuf::from("old.dll"),
             },
@@ -415,12 +413,12 @@ mod tests {
         aggregation.record_snapshot(status_snapshot(HookStatus::Inactive, None));
         aggregation.record_failure(
             PathBuf::from("unknown.dll"),
-            InjectorError::InvalidHookStatusSnapshot("unknown hook status 0x63".to_string()),
+            InjectError::InvalidHookStatusSnapshot("unknown hook status 0x63".to_string()),
         );
 
         assert!(matches!(
             aggregation.finish(),
-            Err(InjectorError::HookStatusModulesFailed { .. })
+            Err(InjectError::HookStatusModulesFailed { .. })
         ));
     }
 
@@ -444,7 +442,7 @@ mod tests {
 
         assert!(matches!(
             aggregation.finish(),
-            Err(InjectorError::HookStatusProfileMismatch { .. })
+            Err(InjectError::HookStatusProfileMismatch { .. })
         ));
     }
 }

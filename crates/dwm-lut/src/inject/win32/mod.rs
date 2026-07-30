@@ -8,7 +8,7 @@ use std::io;
 use windows_sys::Win32::Foundation::{ERROR_BAD_LENGTH, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;
 
-use crate::error::{InjectionStep, InjectorError};
+use crate::inject::{InjectError, InjectionStep};
 
 pub(crate) use export::{resolve_remote_export_address, resolve_remote_module_export_address};
 pub(crate) use module::{
@@ -26,7 +26,7 @@ fn create_toolhelp_snapshot(
     pid: u32,
     step: InjectionStep,
     retry_bad_length: bool,
-) -> Result<OwnedHandle, InjectorError> {
+) -> Result<OwnedHandle, InjectError> {
     const MAX_SNAPSHOT_RETRIES: usize = 8;
 
     for attempt in 0..MAX_SNAPSHOT_RETRIES {
@@ -43,13 +43,13 @@ fn create_toolhelp_snapshot(
             continue;
         }
 
-        return Err(InjectorError::StepFailed {
+        return Err(InjectError::StepFailed {
             step,
             source: error,
         });
     }
 
-    Err(InjectorError::StepFailed {
+    Err(InjectError::StepFailed {
         step,
         source: io::Error::from_raw_os_error(ERROR_BAD_LENGTH as i32),
     })

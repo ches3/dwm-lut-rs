@@ -9,9 +9,9 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 
-use crate::control::current_pipe_name;
-use crate::error::InjectorError;
+use crate::host::{HostProcessError, HostRunError};
 use crate::platform::security::{SecurityDescriptor, UserSid};
+use crate::platform::session;
 
 pub(crate) enum HostInstanceClaim {
     Acquired(HostInstanceGuard),
@@ -23,17 +23,21 @@ pub(crate) struct HostInstanceGuard(OwnedHandle);
 pub(crate) struct HostInstanceWaiter(Option<OwnedHandle>);
 
 impl HostInstanceGuard {
-    pub(crate) fn claim() -> Result<HostInstanceClaim, InjectorError> {
+    pub(crate) fn claim() -> Result<HostInstanceClaim, HostRunError> {
         claim_host_instance(&host_mutex_name_for_current_session()?)
     }
 }
 
-fn host_mutex_name_for_current_session() -> Result<String, InjectorError> {
-    let pipe_name = current_pipe_name()?;
-    Ok(pipe_name.replace(r"\\.\pipe\", r"Local\"))
+fn host_mutex_name_for_current_session() -> Result<String, HostProcessError> {
+    let session_id =
+        session::current_session_id().map_err(|source| HostProcessError::Instance {
+            operation: "resolve current session",
+            source,
+        })?;
+    Ok(format!(r"Local\dwm-lut-rs-{session_id}"))
 }
 
-fn claim_host_instance(mutex_name: &str) -> Result<HostInstanceClaim, InjectorError> {
+fn claim_host_instance(mutex_name: &str) -> Result<HostInstanceClaim, HostRunError> {
     let mutex_name = wide_null(mutex_name);
     let user_sid = UserSid::current_process()?;
     let security_descriptor = SecurityDescriptor::full_access_for_user(&user_sid)?;
@@ -43,10 +47,11 @@ fn claim_host_instance(mutex_name: &str) -> Result<HostInstanceClaim, InjectorEr
     }
     let handle = unsafe { CreateMutexW(&security_attributes, 1, mutex_name.as_ptr()) };
     if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        return Err(InjectorError::ControlPipe {
+        return Err(HostProcessError::Instance {
             operation: "create host instance mutex",
             source: last_os_error(),
-        });
+        }
+        .into());
     }
 
     let error = last_os_error();
@@ -64,7 +69,7 @@ impl HostInstanceWaiter {
     pub(crate) fn wait(
         &mut self,
         timeout_ms: u32,
-    ) -> Result<Option<HostInstanceGuard>, InjectorError> {
+    ) -> Result<Option<HostInstanceGuard>, HostProcessError> {
         let handle = self
             .0
             .as_ref()
@@ -78,7 +83,7 @@ impl HostInstanceWaiter {
                 Ok(Some(HostInstanceGuard(handle)))
             }
             WAIT_TIMEOUT => Ok(None),
-            _ => Err(InjectorError::ControlPipe {
+            _ => Err(HostProcessError::Instance {
                 operation: "wait for host instance mutex",
                 source: last_os_error(),
             }),

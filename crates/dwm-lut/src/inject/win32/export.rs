@@ -5,7 +5,7 @@ use std::path::Path;
 
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 
-use crate::error::{InjectionStep, InjectorError};
+use crate::inject::{InjectError, InjectionStep};
 
 use super::last_os_error;
 use super::remote::{OwnedHandle, read_process_memory, wide_null};
@@ -16,7 +16,7 @@ trait MemoryReader {
         address: usize,
         size: usize,
         step: InjectionStep,
-    ) -> Result<Vec<u8>, InjectorError>;
+    ) -> Result<Vec<u8>, InjectError>;
 }
 
 struct ProcessMemoryReader<'a> {
@@ -29,7 +29,7 @@ impl MemoryReader for ProcessMemoryReader<'_> {
         address: usize,
         size: usize,
         step: InjectionStep,
-    ) -> Result<Vec<u8>, InjectorError> {
+    ) -> Result<Vec<u8>, InjectError> {
         read_process_memory(self.process, address, size, step)
     }
 }
@@ -40,11 +40,11 @@ pub(crate) fn resolve_remote_export_address(
     export_name: &str,
     module_step: InjectionStep,
     export_step: InjectionStep,
-) -> Result<usize, InjectorError> {
+) -> Result<usize, InjectError> {
     let module_name_wide = wide_null(OsStr::new(module_name));
     let local_module = unsafe { GetModuleHandleW(module_name_wide.as_ptr()) };
     if local_module.is_null() {
-        return Err(InjectorError::StepFailed {
+        return Err(InjectError::StepFailed {
             step: module_step,
             source: last_os_error(),
         });
@@ -52,7 +52,7 @@ pub(crate) fn resolve_remote_export_address(
 
     let export_name = CString::new(export_name).expect("export names do not contain nul");
     let local_proc = unsafe { GetProcAddress(local_module, export_name.as_ptr().cast()) }
-        .ok_or_else(|| InjectorError::StepFailed {
+        .ok_or_else(|| InjectError::StepFailed {
             step: export_step,
             source: last_os_error(),
         })?;
@@ -66,7 +66,7 @@ pub(crate) fn resolve_remote_module_export_address(
     export_name: &str,
     step: InjectionStep,
     dll_path: &Path,
-) -> Result<usize, InjectorError> {
+) -> Result<usize, InjectError> {
     let reader = ProcessMemoryReader { process };
     resolve_module_export_address(&reader, remote_module_base, export_name, step, dll_path)
 }
@@ -77,7 +77,7 @@ fn resolve_module_export_address<R: MemoryReader>(
     export_name: &str,
     step: InjectionStep,
     dll_path: &Path,
-) -> Result<usize, InjectorError> {
+) -> Result<usize, InjectError> {
     let dos_header = reader.read(remote_module_base, 64, step)?;
     if read_u16(&dos_header, 0, step)? != 0x5a4d {
         return invalid_remote_image(step, "missing MZ header");
@@ -103,7 +103,7 @@ fn resolve_module_export_address<R: MemoryReader>(
     let export_rva = read_u32(&nt_headers, export_directory_offset, step)? as usize;
     let export_size = read_u32(&nt_headers, export_directory_offset + 4, step)? as usize;
     if export_rva == 0 || export_size < 40 {
-        return Err(InjectorError::ExportNotFound {
+        return Err(InjectError::ExportNotFound {
             export: export_name.to_string(),
             dll_path: dll_path.to_path_buf(),
         });
@@ -117,7 +117,7 @@ fn resolve_module_export_address<R: MemoryReader>(
     let ordinals_rva = read_u32(&export_directory, 36, step)? as usize;
 
     if number_of_functions == 0 || number_of_names == 0 {
-        return Err(InjectorError::ExportNotFound {
+        return Err(InjectError::ExportNotFound {
             export: export_name.to_string(),
             dll_path: dll_path.to_path_buf(),
         });
@@ -159,7 +159,7 @@ fn resolve_module_export_address<R: MemoryReader>(
         return Ok(remote_module_base + function_rva);
     }
 
-    Err(InjectorError::ExportNotFound {
+    Err(InjectError::ExportNotFound {
         export: export_name.to_string(),
         dll_path: dll_path.to_path_buf(),
     })
@@ -173,13 +173,13 @@ fn read_remote_c_string<R: MemoryReader>(
     reader: &R,
     address: usize,
     step: InjectionStep,
-) -> Result<String, InjectorError> {
+) -> Result<String, InjectError> {
     let mut bytes = Vec::new();
     let mut offset = 0usize;
     loop {
         let byte = reader.read(address + offset, 1, step)?[0];
         if byte == 0 {
-            return String::from_utf8(bytes).map_err(|_| InjectorError::StepFailed {
+            return String::from_utf8(bytes).map_err(|_| InjectError::StepFailed {
                 step,
                 source: io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -192,32 +192,32 @@ fn read_remote_c_string<R: MemoryReader>(
     }
 }
 
-fn read_u16(buffer: &[u8], offset: usize, step: InjectionStep) -> Result<u16, InjectorError> {
+fn read_u16(buffer: &[u8], offset: usize, step: InjectionStep) -> Result<u16, InjectError> {
     let bytes = buffer
         .get(offset..offset + size_of::<u16>())
-        .ok_or_else(|| InjectorError::StepFailed {
+        .ok_or_else(|| InjectError::StepFailed {
             step,
             source: io::Error::new(io::ErrorKind::InvalidData, "truncated PE field"),
         })?;
     Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
-fn read_u32(buffer: &[u8], offset: usize, step: InjectionStep) -> Result<u32, InjectorError> {
+fn read_u32(buffer: &[u8], offset: usize, step: InjectionStep) -> Result<u32, InjectError> {
     let bytes = buffer
         .get(offset..offset + size_of::<u32>())
-        .ok_or_else(|| InjectorError::StepFailed {
+        .ok_or_else(|| InjectError::StepFailed {
             step,
             source: io::Error::new(io::ErrorKind::InvalidData, "truncated PE field"),
         })?;
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-fn read_i32(buffer: &[u8], offset: usize, step: InjectionStep) -> Result<i32, InjectorError> {
+fn read_i32(buffer: &[u8], offset: usize, step: InjectionStep) -> Result<i32, InjectError> {
     Ok(read_u32(buffer, offset, step)? as i32)
 }
 
-fn invalid_remote_image<T>(step: InjectionStep, message: &str) -> Result<T, InjectorError> {
-    Err(InjectorError::StepFailed {
+fn invalid_remote_image<T>(step: InjectionStep, message: &str) -> Result<T, InjectError> {
+    Err(InjectError::StepFailed {
         step,
         source: io::Error::new(io::ErrorKind::InvalidData, message),
     })
@@ -228,7 +228,7 @@ mod tests {
     use std::io;
     use std::path::Path;
 
-    use crate::error::{InjectionStep, InjectorError};
+    use crate::inject::{InjectError, InjectionStep};
 
     use super::{MemoryReader, resolve_module_export_address};
 
@@ -284,7 +284,7 @@ mod tests {
         .expect_err("missing export directory must be rejected");
 
         match error {
-            InjectorError::ExportNotFound { export, dll_path } => {
+            InjectError::ExportNotFound { export, dll_path } => {
                 assert_eq!(export, "dwm_lut_initialize");
                 assert_eq!(dll_path, Path::new(r"C:\work\hook.dll"));
             }
@@ -310,7 +310,7 @@ mod tests {
             .expect_err("invalid export entry must be rejected");
 
             match error {
-                InjectorError::StepFailed { step, source } => {
+                InjectError::StepFailed { step, source } => {
                     assert_eq!(step, TEST_STEP);
                     assert_eq!(source.kind(), io::ErrorKind::InvalidData);
                     assert!(source.to_string().contains(message));
@@ -336,20 +336,19 @@ mod tests {
             address: usize,
             size: usize,
             step: InjectionStep,
-        ) -> Result<Vec<u8>, InjectorError> {
-            let offset =
-                address
-                    .checked_sub(TEST_BASE)
-                    .ok_or_else(|| InjectorError::StepFailed {
-                        step,
-                        source: io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "address before module base",
-                        ),
-                    })?;
+        ) -> Result<Vec<u8>, InjectError> {
+            let offset = address
+                .checked_sub(TEST_BASE)
+                .ok_or_else(|| InjectError::StepFailed {
+                    step,
+                    source: io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "address before module base",
+                    ),
+                })?;
             let end = offset
                 .checked_add(size)
-                .ok_or_else(|| InjectorError::StepFailed {
+                .ok_or_else(|| InjectError::StepFailed {
                     step,
                     source: io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -359,7 +358,7 @@ mod tests {
             let bytes = self
                 .image
                 .get(offset..end)
-                .ok_or_else(|| InjectorError::StepFailed {
+                .ok_or_else(|| InjectError::StepFailed {
                     step,
                     source: io::Error::new(
                         io::ErrorKind::UnexpectedEof,

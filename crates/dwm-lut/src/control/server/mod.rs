@@ -4,13 +4,13 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
+use crate::control::ControlError;
 use crate::control::protocol::{
     CONTROL_PROTOCOL_VERSION, ControlCommand, ControlResponse, decode_request,
     decode_request_protocol_version, encode_response,
 };
 use crate::control::{build_runtime, current_pipe_name, read_message, write_message};
-use crate::error::InjectorError;
-use crate::platform::security::{SecurityDescriptor, UserSid};
+use crate::platform::security::SecurityDescriptor;
 
 mod pipe;
 
@@ -22,23 +22,29 @@ const MAX_PIPE_INSTANCES: usize = MAX_WORKER_THREADS + 1;
 const REQUEST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const RESPONSE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-pub(crate) fn run_server(
+pub(crate) fn run_server<E>(
     handler: Arc<dyn ControlHandler>,
     shutdown: Arc<ServerShutdown>,
-    on_ready: impl FnOnce() -> Result<(), InjectorError>,
-) -> Result<(), InjectorError> {
+    pipe_security: SecurityDescriptor,
+    on_ready: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E>
+where
+    E: From<ControlError>,
+{
     let runtime = build_runtime("create control server runtime")?;
-    runtime.block_on(run_server_async(handler, shutdown, on_ready))
+    runtime.block_on(run_server_async(handler, shutdown, pipe_security, on_ready))
 }
 
-async fn run_server_async(
+async fn run_server_async<E>(
     handler: Arc<dyn ControlHandler>,
     shutdown: Arc<ServerShutdown>,
-    on_ready: impl FnOnce() -> Result<(), InjectorError>,
-) -> Result<(), InjectorError> {
+    pipe_security: SecurityDescriptor,
+    on_ready: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E>
+where
+    E: From<ControlError>,
+{
     let pipe_name = current_pipe_name()?;
-    let host_user_sid = UserSid::current_process()?;
-    let pipe_security = SecurityDescriptor::read_write_for_user(&host_user_sid)?;
     let worker_slots = Arc::new(Semaphore::new(MAX_WORKER_THREADS));
     let mut workers = JoinSet::new();
     let pipe = create_pipe(&pipe_name, true, &pipe_security, MAX_PIPE_INSTANCES)?;
@@ -62,7 +68,7 @@ async fn run_server_async(
             eprintln!("control worker task failed: {error}");
         }
     }
-    result
+    result.map_err(E::from)
 }
 
 async fn run_accept_loop(
@@ -73,7 +79,7 @@ async fn run_accept_loop(
     mut pipe: NamedPipeServer,
     pipe_name: &str,
     pipe_security: &SecurityDescriptor,
-) -> Result<(), InjectorError> {
+) -> Result<(), ControlError> {
     loop {
         while let Some(result) = workers.try_join_next() {
             if let Err(error) = result {
@@ -117,12 +123,12 @@ async fn run_accept_loop(
 async fn handle_connected_client(
     mut pipe: NamedPipeServer,
     handler: Arc<dyn ControlHandler>,
-) -> Result<(), InjectorError> {
+) -> Result<(), ControlError> {
     let bytes = match read_message(&mut pipe, REQUEST_READ_TIMEOUT, "read control request").await {
         Ok(bytes) => bytes,
-        Err(error @ InjectorError::ControlTimeout { .. }) => return Err(error),
+        Err(error @ ControlError::Timeout { .. }) => return Err(error),
         Err(error) => {
-            let response = response_from_injector_error(error);
+            let response = response_from_control_error(error);
             let response = encode_response(&response)?;
             return write_message(
                 &mut pipe,
@@ -137,11 +143,11 @@ async fn handle_connected_client(
         tokio::task::spawn_blocking(move || handle_control_request_bytes(&bytes, handler.as_ref()))
             .await
             .map_err(|source| {
-                InjectorError::ControlProtocol(format!("control handler task failed: {source}"))
+                ControlError::Protocol(format!("control handler task failed: {source}"))
             })?;
     let dispatch = match dispatch {
         Ok(dispatch) => dispatch,
-        Err(error) => ControlDispatch::immediate(response_from_injector_error(error)),
+        Err(error) => ControlDispatch::immediate(response_from_control_error(error)),
     };
     let response = encode_response(&dispatch.response)?;
     write_message(
@@ -151,7 +157,7 @@ async fn handle_connected_client(
         "write control response",
     )
     .await?;
-    dispatch.complete()?;
+    dispatch.complete();
     Ok(())
 }
 
@@ -159,7 +165,7 @@ pub(crate) trait ControlHandler: Send + Sync {
     fn dispatch(&self, command: ControlCommand) -> ControlDispatch;
 }
 
-fn response_from_injector_error(error: InjectorError) -> ControlResponse {
+fn response_from_control_error(error: ControlError) -> ControlResponse {
     ControlResponse::error(
         error.to_string(),
         crate::control::protocol::ControlStatus::Error,
@@ -168,7 +174,7 @@ fn response_from_injector_error(error: InjectorError) -> ControlResponse {
 
 pub(crate) struct ControlDispatch {
     response: ControlResponse,
-    completion: Option<Box<dyn FnOnce() -> Result<(), InjectorError> + Send>>,
+    completion: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl ControlDispatch {
@@ -181,7 +187,7 @@ impl ControlDispatch {
 
     pub(crate) fn after_response(
         response: ControlResponse,
-        completion: impl FnOnce() -> Result<(), InjectorError> + Send + 'static,
+        completion: impl FnOnce() + Send + 'static,
     ) -> Self {
         Self {
             response,
@@ -194,10 +200,9 @@ impl ControlDispatch {
         &self.response
     }
 
-    pub(crate) fn complete(self) -> Result<(), InjectorError> {
-        match self.completion {
-            Some(completion) => completion(),
-            None => Ok(()),
+    pub(crate) fn complete(self) {
+        if let Some(completion) = self.completion {
+            completion();
         }
     }
 }
@@ -205,7 +210,7 @@ impl ControlDispatch {
 fn handle_control_request_bytes(
     bytes: &[u8],
     handler: &dyn ControlHandler,
-) -> Result<ControlDispatch, InjectorError> {
+) -> Result<ControlDispatch, ControlError> {
     let peer_version = decode_request_protocol_version(bytes)?;
     if peer_version != CONTROL_PROTOCOL_VERSION {
         return Ok(ControlDispatch::immediate(

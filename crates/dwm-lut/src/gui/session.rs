@@ -13,7 +13,7 @@ use slint::{
 };
 
 use crate::config::ConfigColorMode;
-use crate::error::InjectorError;
+use crate::host::HostProcessError;
 use crate::host::{HostController, HostState};
 use crate::monitor::{MonitorListing, list_monitor_listings};
 use crate::platform;
@@ -151,9 +151,9 @@ pub(super) fn run(
     controller: Arc<HostController>,
     ui_commands: Receiver<UiCommand>,
     ready: Sender<()>,
-) -> Result<(), InjectorError> {
+) -> Result<(), HostProcessError> {
     let tray = HostTray::new().map_err(|error| {
-        InjectorError::HostStartupFailed(format!("tray initialization failed: {error}"))
+        HostProcessError::StartupFailed(format!("tray initialization failed: {error}"))
     })?;
     tray.set_tray_tooltip(SharedString::from("dwm-lut"));
     tray.set_tray_visible(true);
@@ -207,9 +207,9 @@ pub(super) fn run(
     });
 
     let event_loop_result = slint::run_event_loop_until_quit()
-        .map_err(|error| InjectorError::HostStartupFailed(format!("host UI failed: {error}")));
+        .map_err(|error| HostProcessError::StartupFailed(format!("UI event loop failed: {error}")));
     if ready_failed.get() {
-        Err(InjectorError::HostStartupFailed(
+        Err(HostProcessError::StartupFailed(
             "control server stopped before the host UI became ready".to_string(),
         ))
     } else {

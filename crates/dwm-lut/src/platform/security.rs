@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::fmt;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -14,9 +15,27 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-use crate::error::InjectorError;
-
 const SDDL_REVISION_1: u32 = 1;
+
+#[derive(Debug)]
+pub enum SecurityError {
+    OperationFailed {
+        operation: &'static str,
+        source: io::Error,
+    },
+}
+
+impl fmt::Display for SecurityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OperationFailed { operation, source } => {
+                write!(f, "Windows security {operation} failed: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SecurityError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UserSid {
@@ -24,7 +43,7 @@ pub(crate) struct UserSid {
 }
 
 impl UserSid {
-    pub(crate) fn current_process() -> Result<Self, InjectorError> {
+    pub(crate) fn current_process() -> Result<Self, SecurityError> {
         let mut token = null_mut();
         let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
         if ok == 0 {
@@ -126,21 +145,21 @@ pub(crate) struct SecurityDescriptor {
 }
 
 impl SecurityDescriptor {
-    pub(crate) fn read_write_for_user(user_sid: &UserSid) -> Result<Self, InjectorError> {
+    pub(crate) fn read_write_for_user(user_sid: &UserSid) -> Result<Self, SecurityError> {
         Self::from_sddl(
             read_write_security_descriptor_for_user(&user_sid.sddl),
             "build read-write security descriptor",
         )
     }
 
-    pub(crate) fn full_access_for_user(user_sid: &UserSid) -> Result<Self, InjectorError> {
+    pub(crate) fn full_access_for_user(user_sid: &UserSid) -> Result<Self, SecurityError> {
         Self::from_sddl(
             full_access_security_descriptor_for_user(&user_sid.sddl),
             "build full-access security descriptor",
         )
     }
 
-    fn from_sddl(sddl: String, operation: &'static str) -> Result<Self, InjectorError> {
+    fn from_sddl(sddl: String, operation: &'static str) -> Result<Self, SecurityError> {
         let sddl = wide_null(&sddl);
         let mut ptr = null_mut();
         let ok = unsafe {
@@ -188,8 +207,8 @@ fn last_os_error() -> io::Error {
     io::Error::from_raw_os_error(unsafe { GetLastError() } as i32)
 }
 
-fn security_error(operation: &'static str, source: io::Error) -> InjectorError {
-    InjectorError::SecurityOperationFailed { operation, source }
+fn security_error(operation: &'static str, source: io::Error) -> SecurityError {
+    SecurityError::OperationFailed { operation, source }
 }
 
 #[cfg(test)]

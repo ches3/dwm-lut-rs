@@ -6,7 +6,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     MODULEENTRY32W, Module32FirstW, Module32NextW, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32,
 };
 
-use crate::error::{InjectionStep, InjectorError};
+use crate::inject::{InjectError, InjectionStep};
 
 use super::remote::OwnedHandle;
 use super::{create_toolhelp_snapshot, is_no_more_files_error, last_os_error, utf16_to_string};
@@ -27,7 +27,7 @@ pub(crate) fn find_remote_module(
     pid: u32,
     module_name: &str,
     step: InjectionStep,
-) -> Result<RemoteModule, InjectorError> {
+) -> Result<RemoteModule, InjectError> {
     Ok(find_remote_module_by_name(pid, step, module_name, |name| {
         name.eq_ignore_ascii_case(module_name)
     })?
@@ -39,12 +39,12 @@ pub(crate) fn find_remote_module_by_name(
     step: InjectionStep,
     missing_module_name: &str,
     mut matches: impl FnMut(&str) -> bool,
-) -> Result<NamedRemoteModule, InjectorError> {
+) -> Result<NamedRemoteModule, InjectError> {
     let mut modules = find_remote_modules_by_name(pid, step, |module| matches(&module.name))?;
     modules
         .drain(..)
         .next()
-        .ok_or_else(|| InjectorError::RemoteModuleNotFound {
+        .ok_or_else(|| InjectError::RemoteModuleNotFound {
             module: missing_module_name.to_string(),
         })
 }
@@ -53,7 +53,7 @@ pub(crate) fn find_remote_modules_by_name(
     pid: u32,
     step: InjectionStep,
     mut matches: impl FnMut(&NamedRemoteModule) -> bool,
-) -> Result<Vec<NamedRemoteModule>, InjectorError> {
+) -> Result<Vec<NamedRemoteModule>, InjectError> {
     let snapshot = create_module_snapshot(pid, step)?;
     let mut entry = empty_module_entry();
     let mut modules = Vec::new();
@@ -94,7 +94,7 @@ pub(crate) fn find_remote_modules_by_name(
     }
 }
 
-fn create_module_snapshot(pid: u32, step: InjectionStep) -> Result<OwnedHandle, InjectorError> {
+fn create_module_snapshot(pid: u32, step: InjectionStep) -> Result<OwnedHandle, InjectError> {
     create_toolhelp_snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid, step, true)
 }
 
@@ -113,8 +113,8 @@ fn empty_module_entry() -> MODULEENTRY32W {
     }
 }
 
-fn module_lookup_error(error: io::Error, step: InjectionStep) -> InjectorError {
-    InjectorError::StepFailed {
+fn module_lookup_error(error: io::Error, step: InjectionStep) -> InjectError {
+    InjectError::StepFailed {
         step,
         source: error,
     }
@@ -126,7 +126,7 @@ mod tests {
 
     use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
 
-    use crate::error::{InjectionStep, InjectorError};
+    use crate::inject::{InjectError, InjectionStep};
 
     use super::module_lookup_error;
 
@@ -139,7 +139,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            InjectorError::StepFailed { step, source }
+            InjectError::StepFailed { step, source }
                 if step == InjectionStep::ResolveKernel32
                     && source.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32)
         ));

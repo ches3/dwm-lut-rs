@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::error::InjectorError;
 use crate::gui::{UiCommand, UiHandle};
-use crate::inject::{self, HookStatusSnapshot};
+use crate::host::HostProcessError;
+use crate::inject::{self, HookStatusSnapshot, InjectError};
 
 use super::controller::{HostState, lock_state};
 use super::hook_status::{HookStatusStore, HookStatusUpdate};
@@ -14,7 +14,7 @@ use super::hook_status::{HookStatusStore, HookStatusUpdate};
 const STATUS_QUERY_INTERVAL: Duration = Duration::from_secs(2);
 const STATUS_POLLER_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
-type StatusQuery = dyn Fn() -> Result<HookStatusSnapshot, InjectorError> + Send + Sync + 'static;
+type StatusQuery = dyn Fn() -> Result<HookStatusSnapshot, InjectError> + Send + Sync + 'static;
 
 #[derive(Clone)]
 pub(super) struct StatusPollerHandle {
@@ -41,7 +41,7 @@ impl StatusPoller {
         state: Arc<Mutex<HostState>>,
         hook_status: HookStatusStore,
         ui: Arc<UiHandle>,
-    ) -> Result<Self, InjectorError> {
+    ) -> Result<Self, HostProcessError> {
         Self::new_with_query(
             state,
             hook_status,
@@ -57,7 +57,7 @@ impl StatusPoller {
         ui: Arc<UiHandle>,
         query: Arc<StatusQuery>,
         interval: Duration,
-    ) -> Result<Self, InjectorError> {
+    ) -> Result<Self, HostProcessError> {
         let (wake, wake_receiver) = mpsc::sync_channel(1);
         let (done_sender, done) = mpsc::sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
@@ -77,8 +77,8 @@ impl StatusPoller {
                 let _ = done_sender.send(());
             })
             .map_err(|error| {
-                InjectorError::HostStartupFailed(format!(
-                    "host status poller startup failed: {error}"
+                HostProcessError::StartupFailed(format!(
+                    "start status poller thread failed: {error}"
                 ))
             })?;
         Ok(Self {

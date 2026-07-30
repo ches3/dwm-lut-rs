@@ -2,15 +2,73 @@ mod monitors;
 mod startup_task;
 
 use std::ffi::OsString;
+use std::fmt;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
 use crate::control;
+use crate::control::ControlError;
 use crate::control::protocol::{ControlCommand, ControlRequest};
-use crate::error::InjectorError;
+use crate::host::HostProcessError;
 use crate::host::launch;
-use crate::paths;
+use crate::monitor::MonitorError;
+use crate::paths::{self, PathError};
+
+use startup_task::StartupTaskError;
+
+#[derive(Debug)]
+pub enum CliError {
+    Control(ControlError),
+    Process(HostProcessError),
+    StartupTask(StartupTaskError),
+    Monitor(MonitorError),
+    Path(PathError),
+}
+
+impl fmt::Display for CliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Control(error) => error.fmt(f),
+            Self::Process(error) => error.fmt(f),
+            Self::StartupTask(error) => error.fmt(f),
+            Self::Monitor(error) => error.fmt(f),
+            Self::Path(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for CliError {}
+
+impl From<ControlError> for CliError {
+    fn from(value: ControlError) -> Self {
+        Self::Control(value)
+    }
+}
+
+impl From<HostProcessError> for CliError {
+    fn from(value: HostProcessError) -> Self {
+        Self::Process(value)
+    }
+}
+
+impl From<StartupTaskError> for CliError {
+    fn from(value: StartupTaskError) -> Self {
+        Self::StartupTask(value)
+    }
+}
+
+impl From<MonitorError> for CliError {
+    fn from(value: MonitorError) -> Self {
+        Self::Monitor(value)
+    }
+}
+
+impl From<PathError> for CliError {
+    fn from(value: PathError) -> Self {
+        Self::Path(value)
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ApplyOptions {
@@ -142,7 +200,7 @@ impl From<CommandArgs> for CliCommand {
     }
 }
 
-pub fn run_cli(command: CliCommand) -> Result<(), InjectorError> {
+pub fn run_cli(command: CliCommand) -> Result<(), CliError> {
     match command {
         CliCommand::Apply(options) => run_control_command(ControlCommand::Apply {
             config_path: paths::resolve_config_path(options.config_path)?,
@@ -162,7 +220,10 @@ pub fn run_cli(command: CliCommand) -> Result<(), InjectorError> {
             println!("installed dwm-lut startup task");
             Ok(())
         }
-        CliCommand::Monitors => monitors::run_monitors(),
+        CliCommand::Monitors => {
+            monitors::run_monitors()?;
+            Ok(())
+        }
         CliCommand::Status => run_control_command(ControlCommand::Status),
         CliCommand::Uninstall => {
             startup_task::uninstall()?;
@@ -172,15 +233,17 @@ pub fn run_cli(command: CliCommand) -> Result<(), InjectorError> {
     }
 }
 
-pub fn report_cli_error(error: &InjectorError) -> i32 {
+pub fn report_cli_error(error: &CliError) -> i32 {
     eprintln!("{error}");
     match error {
-        InjectorError::StartupTaskOperationFailed { exit_code, .. } => *exit_code as i32,
+        CliError::StartupTask(StartupTaskError::OperationFailed { exit_code, .. }) => {
+            *exit_code as i32
+        }
         _ => 1,
     }
 }
 
-fn run_control_command(command: ControlCommand) -> Result<(), InjectorError> {
+fn run_control_command(command: ControlCommand) -> Result<(), CliError> {
     let request = ControlRequest::new(command);
     let response = control::client::send_request(&request)?;
     if !response.ok {
@@ -191,11 +254,11 @@ fn run_control_command(command: ControlCommand) -> Result<(), InjectorError> {
     Ok(())
 }
 
-fn host_start_message(result: Result<(), InjectorError>) -> Result<&'static str, InjectorError> {
+fn host_start_message(result: Result<(), HostProcessError>) -> Result<&'static str, CliError> {
     match result {
         Ok(()) => Ok("started dwm-lut host instance"),
-        Err(InjectorError::HostAlreadyRunning) => Ok("dwm-lut host instance is already running"),
-        Err(error) => Err(error),
+        Err(HostProcessError::AlreadyRunning) => Ok("dwm-lut host instance is already running"),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -283,7 +346,7 @@ mod tests {
     #[test]
     fn host_start_message_treats_already_running_as_success() {
         assert_eq!(
-            host_start_message(Err(InjectorError::HostAlreadyRunning)).unwrap(),
+            host_start_message(Err(HostProcessError::AlreadyRunning)).unwrap(),
             "dwm-lut host instance is already running"
         );
     }

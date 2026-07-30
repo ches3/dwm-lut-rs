@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use windows_sys::Win32::Foundation::{FALSE, HANDLE};
 use windows_sys::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
 
-use crate::error::InjectorError;
+use crate::host::HostProcessError;
 
 pub const PANIC_EXIT_CODE: i32 = 101;
 const STATE_STANDALONE: u8 = 0;
@@ -27,11 +27,11 @@ struct StartupEvents {
 struct EventHandle(OwnedHandle);
 
 impl EventHandle {
-    fn open(name: &str, access: u32, operation: &'static str) -> Result<Self, InjectorError> {
+    fn open(name: &str, access: u32, operation: &'static str) -> Result<Self, HostProcessError> {
         let name = wide_null(name);
         let handle = unsafe { OpenEventW(access, FALSE, name.as_ptr()) };
         if handle.is_null() {
-            return Err(InjectorError::HostLaunchFailed {
+            return Err(HostProcessError::LaunchFailed {
                 operation,
                 source: std::io::Error::last_os_error(),
             });
@@ -63,7 +63,7 @@ enum StartupChannelFailureAction {
     Ignore,
 }
 
-pub fn configure(panic_event_name: Option<&str>) -> Result<(), InjectorError> {
+pub fn configure(panic_event_name: Option<&str>) -> Result<(), HostProcessError> {
     let Some(panic_event_name) = panic_event_name else {
         return Ok(());
     };
@@ -73,7 +73,7 @@ pub fn configure(panic_event_name: Option<&str>) -> Result<(), InjectorError> {
         "open startup panic event",
     )?;
     STARTUP_EVENTS.set(StartupEvents { panic }).map_err(|_| {
-        InjectorError::HostStartupFailed("startup reporting was already configured".to_string())
+        HostProcessError::StartupFailed("startup reporting was already configured".to_string())
     })?;
     REPORT_STATE.store(STATE_STARTING, Ordering::Release);
     Ok(())
@@ -165,7 +165,7 @@ pub(crate) fn claim_startup_failure() -> bool {
     }
 }
 
-pub(crate) fn complete_startup() -> Result<(), InjectorError> {
+pub(crate) fn complete_startup() -> Result<(), HostProcessError> {
     match REPORT_STATE.compare_exchange(
         STATE_STARTING,
         STATE_RUNNING,
@@ -174,8 +174,8 @@ pub(crate) fn complete_startup() -> Result<(), InjectorError> {
     ) {
         Ok(_) => Ok(()),
         Err(STATE_STANDALONE) | Err(STATE_RUNNING) => Ok(()),
-        Err(STATE_BACKGROUND_REPORTING_PANIC) => Err(InjectorError::HostPanicAlreadyReported),
-        Err(_) => Err(InjectorError::HostStartupFailed(
+        Err(STATE_BACKGROUND_REPORTING_PANIC) => Err(HostProcessError::PanicAlreadyReported),
+        Err(_) => Err(HostProcessError::StartupFailed(
             "startup reporting ownership was already committed".to_string(),
         )),
     }

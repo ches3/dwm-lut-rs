@@ -1,7 +1,21 @@
 use std::ffi::OsString;
+use std::fmt;
 use std::path::PathBuf;
 
-use crate::error::InjectorError;
+#[derive(Debug)]
+pub enum ArgsError {
+    Usage(String),
+}
+
+impl fmt::Display for ArgsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Usage(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for ArgsError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMode {
@@ -16,13 +30,13 @@ pub struct BackgroundOptions {
     pub panic_report_event: Option<String>,
 }
 
-pub fn parse_app_args() -> Result<AppMode, InjectorError> {
+pub fn parse_app_args() -> Result<AppMode, ArgsError> {
     parse_app_args_from(std::env::args_os())
 }
 
 pub fn parse_app_args_from(
     args: impl IntoIterator<Item = impl Into<OsString>>,
-) -> Result<AppMode, InjectorError> {
+) -> Result<AppMode, ArgsError> {
     let mut background = false;
     let mut dll_path = None;
     let mut startup_result_pipe = None;
@@ -34,45 +48,45 @@ pub fn parse_app_args_from(
         match arg.to_string_lossy().as_ref() {
             "--background" if !background => background = true,
             "--background" => {
-                return Err(InjectorError::Usage(
+                return Err(ArgsError::Usage(
                     "--background may only be specified once".to_string(),
                 ));
             }
             "--dll" if dll_path.is_none() => {
                 let value = args
                     .next()
-                    .ok_or_else(|| InjectorError::Usage("--dll requires a value".to_string()))?;
+                    .ok_or_else(|| ArgsError::Usage("--dll requires a value".to_string()))?;
                 dll_path = Some(PathBuf::from(value));
             }
             "--dll" => {
-                return Err(InjectorError::Usage(
+                return Err(ArgsError::Usage(
                     "--dll may only be specified once".to_string(),
                 ));
             }
             "--startup-result-pipe" if startup_result_pipe.is_none() => {
                 let value = args.next().ok_or_else(|| {
-                    InjectorError::Usage("--startup-result-pipe requires a value".to_string())
+                    ArgsError::Usage("--startup-result-pipe requires a value".to_string())
                 })?;
                 startup_result_pipe = Some(value.to_string_lossy().into_owned());
             }
             "--startup-result-pipe" => {
-                return Err(InjectorError::Usage(
+                return Err(ArgsError::Usage(
                     "--startup-result-pipe may only be specified once".to_string(),
                 ));
             }
             "--panic-report-event" if panic_report_event.is_none() => {
                 let value = args.next().ok_or_else(|| {
-                    InjectorError::Usage("--panic-report-event requires a value".to_string())
+                    ArgsError::Usage("--panic-report-event requires a value".to_string())
                 })?;
                 panic_report_event = Some(value.to_string_lossy().into_owned());
             }
             "--panic-report-event" => {
-                return Err(InjectorError::Usage(
+                return Err(ArgsError::Usage(
                     "--panic-report-event may only be specified once".to_string(),
                 ));
             }
             other => {
-                return Err(InjectorError::Usage(format!(
+                return Err(ArgsError::Usage(format!(
                     "unknown application argument: {other}"
                 )));
             }
@@ -81,7 +95,7 @@ pub fn parse_app_args_from(
 
     if !background {
         if dll_path.is_some() || startup_result_pipe.is_some() || panic_report_event.is_some() {
-            return Err(InjectorError::Usage(
+            return Err(ArgsError::Usage(
                 "internal background options require --background".to_string(),
             ));
         }
@@ -93,7 +107,7 @@ pub fn parse_app_args_from(
         .filter(|present| *present)
         .count();
     if coordination_argument_count != 0 && coordination_argument_count != 2 {
-        return Err(InjectorError::Usage(
+        return Err(ArgsError::Usage(
             "--startup-result-pipe and --panic-report-event must be specified together".to_string(),
         ));
     }

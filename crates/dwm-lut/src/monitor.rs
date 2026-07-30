@@ -13,7 +13,23 @@ use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, LUID};
 use windows_sys::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW};
 
 use crate::config::ConfigError;
-use crate::error::InjectorError;
+
+use std::fmt;
+
+#[derive(Debug)]
+pub enum MonitorError {
+    Enumeration(String),
+}
+
+impl fmt::Display for MonitorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Enumeration(message) => write!(f, "monitor enumeration failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for MonitorError {}
 
 const DISPLAYCONFIG_PATH_ACTIVE: u32 = 0x0000_0001;
 
@@ -61,9 +77,9 @@ struct ActiveMonitor {
     identity: MonitorIdentity,
 }
 
-pub(crate) fn list_monitor_listings() -> Result<Vec<MonitorListing>, InjectorError> {
+pub(crate) fn list_monitor_listings() -> Result<Vec<MonitorListing>, MonitorError> {
     let paths = query_active_paths().map_err(|error| {
-        InjectorError::MonitorEnumeration(format!("failed to query active display paths: {error}"))
+        MonitorError::Enumeration(format!("failed to query active display paths: {error}"))
     })?;
 
     let mut listings = Vec::new();
@@ -73,13 +89,13 @@ pub(crate) fn list_monitor_listings() -> Result<Vec<MonitorListing>, InjectorErr
         }
 
         let target = query_target_name(&path).map_err(|error| {
-            InjectorError::MonitorEnumeration(format!(
+            MonitorError::Enumeration(format!(
                 "failed to query target device name for target_id={}: {error}",
                 path.targetInfo.id
             ))
         })?;
         let source = query_source_name(&path).map_err(|error| {
-            InjectorError::MonitorEnumeration(format!(
+            MonitorError::Enumeration(format!(
                 "failed to query source device name for source_id={}: {error}",
                 path.sourceInfo.id
             ))
@@ -87,12 +103,12 @@ pub(crate) fn list_monitor_listings() -> Result<Vec<MonitorListing>, InjectorErr
 
         let gdi_device_name = wide_to_string(&source.viewGdiDeviceName);
         let number = display_number_from_gdi_name(&gdi_device_name).ok_or_else(|| {
-            InjectorError::MonitorEnumeration(format!(
+            MonitorError::Enumeration(format!(
                 "failed to parse display number from source name: {gdi_device_name}"
             ))
         })?;
         let bounds = query_desktop_bounds(&gdi_device_name).map_err(|error| {
-            InjectorError::MonitorEnumeration(format!(
+            MonitorError::Enumeration(format!(
                 "failed to query desktop bounds for {gdi_device_name}: {error}"
             ))
         })?;

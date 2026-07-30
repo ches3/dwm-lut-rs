@@ -16,12 +16,12 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
 };
 
-use crate::error::{InjectionStep, InjectorError};
+use crate::inject::{InjectError, InjectionStep};
 
 use super::remote::OwnedHandle;
 use super::{create_toolhelp_snapshot, is_no_more_files_error, last_os_error, utf16_to_string};
 
-pub(crate) fn open_target_process(pid: u32) -> Result<OwnedHandle, InjectorError> {
+pub(crate) fn open_target_process(pid: u32) -> Result<OwnedHandle, InjectError> {
     let handle = unsafe {
         OpenProcess(
             PROCESS_CREATE_THREAD
@@ -40,7 +40,7 @@ pub(crate) fn open_target_process(pid: u32) -> Result<OwnedHandle, InjectorError
     OwnedHandle::new(handle, InjectionStep::OpenTargetProcess)
 }
 
-pub(crate) fn open_status_process(pid: u32) -> Result<OwnedHandle, InjectorError> {
+pub(crate) fn open_status_process(pid: u32) -> Result<OwnedHandle, InjectError> {
     let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid) };
     if handle.is_null() {
         return Err(classify_open_target_process_error(pid, last_os_error()));
@@ -49,7 +49,7 @@ pub(crate) fn open_status_process(pid: u32) -> Result<OwnedHandle, InjectorError
     OwnedHandle::new(handle, InjectionStep::OpenTargetProcess)
 }
 
-pub(crate) fn enable_debug_privilege() -> Result<(), InjectorError> {
+pub(crate) fn enable_debug_privilege() -> Result<(), InjectError> {
     let mut token = null_mut();
     let ok = unsafe {
         OpenProcessToken(
@@ -59,7 +59,7 @@ pub(crate) fn enable_debug_privilege() -> Result<(), InjectorError> {
         )
     };
     if ok == FALSE {
-        return Err(InjectorError::StepFailed {
+        return Err(InjectError::StepFailed {
             step: InjectionStep::EnableDebugPrivilege,
             source: last_os_error(),
         });
@@ -72,7 +72,7 @@ pub(crate) fn enable_debug_privilege() -> Result<(), InjectorError> {
     };
     let ok = unsafe { LookupPrivilegeValueW(null(), SE_DEBUG_NAME, &mut luid) };
     if ok == FALSE {
-        return Err(InjectorError::StepFailed {
+        return Err(InjectError::StepFailed {
             step: InjectionStep::EnableDebugPrivilege,
             source: last_os_error(),
         });
@@ -91,7 +91,7 @@ pub(crate) fn enable_debug_privilege() -> Result<(), InjectorError> {
     let ok =
         unsafe { AdjustTokenPrivileges(token.raw(), FALSE, &state, 0, null_mut(), null_mut()) };
     if ok == FALSE {
-        return Err(InjectorError::StepFailed {
+        return Err(InjectError::StepFailed {
             step: InjectionStep::EnableDebugPrivilege,
             source: last_os_error(),
         });
@@ -100,7 +100,7 @@ pub(crate) fn enable_debug_privilege() -> Result<(), InjectorError> {
     finalize_debug_privilege_adjustment(last_os_error())
 }
 
-pub(crate) fn find_process_id_by_name(name: &str) -> Result<u32, InjectorError> {
+pub(crate) fn find_process_id_by_name(name: &str) -> Result<u32, InjectError> {
     let current_session_id = current_session_id()?;
     let snapshot = create_process_snapshot()?;
 
@@ -121,9 +121,9 @@ pub(crate) fn find_process_id_by_name(name: &str) -> Result<u32, InjectorError> 
     if has_entry == FALSE {
         let error = last_os_error();
         if is_no_more_files_error(&error) {
-            return Err(InjectorError::DwmProcessNotFound);
+            return Err(InjectError::DwmProcessNotFound);
         }
-        return Err(InjectorError::StepFailed {
+        return Err(InjectError::StepFailed {
             step: InjectionStep::FindDwmProcess,
             source: error,
         });
@@ -138,7 +138,7 @@ pub(crate) fn find_process_id_by_name(name: &str) -> Result<u32, InjectorError> 
             if is_no_more_files_error(&error) {
                 break;
             }
-            return Err(InjectorError::StepFailed {
+            return Err(InjectError::StepFailed {
                 step: InjectionStep::FindDwmProcess,
                 source: error,
             });
@@ -146,10 +146,10 @@ pub(crate) fn find_process_id_by_name(name: &str) -> Result<u32, InjectorError> 
     }
 
     select_process_id(candidates, name, current_session_id, process_session_id)?
-        .ok_or(InjectorError::DwmProcessNotFound)
+        .ok_or(InjectError::DwmProcessNotFound)
 }
 
-fn create_process_snapshot() -> Result<OwnedHandle, InjectorError> {
+fn create_process_snapshot() -> Result<OwnedHandle, InjectError> {
     create_toolhelp_snapshot(TH32CS_SNAPPROCESS, 0, InjectionStep::FindDwmProcess, false)
 }
 
@@ -158,10 +158,10 @@ fn select_process_id<I, F>(
     target_name: &str,
     current_session_id: u32,
     mut session_for_pid: F,
-) -> Result<Option<u32>, InjectorError>
+) -> Result<Option<u32>, InjectError>
 where
     I: IntoIterator<Item = (u32, String)>,
-    F: FnMut(u32) -> Result<u32, InjectorError>,
+    F: FnMut(u32) -> Result<u32, InjectError>,
 {
     for (pid, process_name) in entries {
         if process_name.eq_ignore_ascii_case(target_name)
@@ -174,39 +174,39 @@ where
     Ok(None)
 }
 
-fn classify_open_target_process_error(pid: u32, error: io::Error) -> InjectorError {
+fn classify_open_target_process_error(pid: u32, error: io::Error) -> InjectError {
     if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
-        InjectorError::TargetAccessDenied { pid }
+        InjectError::TargetAccessDenied { pid }
     } else {
-        InjectorError::StepFailed {
+        InjectError::StepFailed {
             step: InjectionStep::OpenTargetProcess,
             source: error,
         }
     }
 }
 
-fn finalize_debug_privilege_adjustment(error: io::Error) -> Result<(), InjectorError> {
+fn finalize_debug_privilege_adjustment(error: io::Error) -> Result<(), InjectError> {
     if error.raw_os_error() == Some(ERROR_NOT_ALL_ASSIGNED as i32) {
-        return Err(InjectorError::DebugPrivilegeUnavailable);
+        return Err(InjectError::DebugPrivilegeUnavailable);
     }
 
     Ok(())
 }
 
-fn current_session_id() -> Result<u32, InjectorError> {
+fn current_session_id() -> Result<u32, InjectError> {
     let pid = unsafe { GetCurrentProcessId() };
     process_session_id_with_step(pid, InjectionStep::ResolveCurrentSession)
 }
 
-fn process_session_id(pid: u32) -> Result<u32, InjectorError> {
+fn process_session_id(pid: u32) -> Result<u32, InjectError> {
     process_session_id_with_step(pid, InjectionStep::FindDwmProcess)
 }
 
-fn process_session_id_with_step(pid: u32, step: InjectionStep) -> Result<u32, InjectorError> {
+fn process_session_id_with_step(pid: u32, step: InjectionStep) -> Result<u32, InjectError> {
     let mut session_id = 0u32;
     let ok = unsafe { ProcessIdToSessionId(pid, &mut session_id) };
     if ok == FALSE {
-        return Err(InjectorError::StepFailed {
+        return Err(InjectError::StepFailed {
             step,
             source: last_os_error(),
         });
@@ -221,7 +221,7 @@ mod tests {
 
     use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_NOT_ALL_ASSIGNED};
 
-    use crate::error::InjectorError;
+    use crate::inject::InjectError;
 
     use super::{
         classify_open_target_process_error, finalize_debug_privilege_adjustment, select_process_id,
@@ -257,7 +257,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            InjectorError::TargetAccessDenied { pid: 4242 }
+            InjectError::TargetAccessDenied { pid: 4242 }
         ));
     }
 
@@ -268,6 +268,6 @@ mod tests {
         ))
         .expect_err("missing privilege assignment must be rejected");
 
-        assert!(matches!(error, InjectorError::DebugPrivilegeUnavailable));
+        assert!(matches!(error, InjectError::DebugPrivilegeUnavailable));
     }
 }

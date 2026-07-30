@@ -4,8 +4,8 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::sync::watch;
 use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED};
 
+use crate::control::ControlError;
 use crate::control::protocol::MAX_CONTROL_MESSAGE_BYTES;
-use crate::error::InjectorError;
 use crate::platform::security::SecurityDescriptor;
 
 pub(crate) struct ServerShutdown {
@@ -35,7 +35,7 @@ pub(super) fn create_pipe(
     first_instance: bool,
     security_descriptor: &SecurityDescriptor,
     max_instances: usize,
-) -> Result<NamedPipeServer, InjectorError> {
+) -> Result<NamedPipeServer, ControlError> {
     let mut security_attributes = security_descriptor.as_security_attributes();
     let mut options = ServerOptions::new();
     options
@@ -51,7 +51,7 @@ pub(super) fn create_pipe(
             std::ptr::from_mut(&mut security_attributes).cast::<c_void>(),
         )
     };
-    pipe.map_err(|source| InjectorError::ControlPipe {
+    pipe.map_err(|source| ControlError::Io {
         operation: "create server pipe",
         source,
     })
@@ -67,14 +67,14 @@ pub(super) enum ConnectOutcome {
 pub(super) async fn connect(
     pipe: &NamedPipeServer,
     shutdown: &ServerShutdown,
-) -> Result<ConnectOutcome, InjectorError> {
+) -> Result<ConnectOutcome, ControlError> {
     tokio::select! {
         biased;
         () = shutdown.wait() => Ok(ConnectOutcome::Shutdown),
         result = pipe.connect() => match result {
             Ok(()) => Ok(ConnectOutcome::Connected),
             Err(source) if is_disconnected_pipe_error(&source) => Ok(ConnectOutcome::Abandoned),
-            Err(source) => Err(InjectorError::ControlPipe {
+            Err(source) => Err(ControlError::Io {
                 operation: "connect server pipe",
                 source,
             }),

@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::fmt;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -117,6 +118,45 @@ pub(crate) enum RunAsError {
     Cancelled,
     Launch(io::Error),
     MissingProcessHandle,
+}
+
+#[derive(Debug)]
+pub enum ElevationError {
+    Cancelled,
+    RequiresAdministratorUser,
+    LaunchFailed {
+        operation: &'static str,
+        source: io::Error,
+    },
+}
+
+impl fmt::Display for ElevationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => write!(f, "elevation was canceled"),
+            Self::RequiresAdministratorUser => {
+                write!(f, "requires signing in with an administrator account")
+            }
+            Self::LaunchFailed { operation, source } => {
+                write!(f, "elevation {operation} failed: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ElevationError {}
+
+impl ElevationError {
+    pub(crate) fn from_run_as(operation: &'static str, error: RunAsError) -> Self {
+        match error {
+            RunAsError::Cancelled => Self::Cancelled,
+            RunAsError::Launch(source) => Self::LaunchFailed { operation, source },
+            RunAsError::MissingProcessHandle => Self::LaunchFailed {
+                operation,
+                source: io::Error::other("ShellExecuteExW did not return a process handle"),
+            },
+        }
+    }
 }
 
 pub(crate) struct ElevatedProcess(OwnedHandle);

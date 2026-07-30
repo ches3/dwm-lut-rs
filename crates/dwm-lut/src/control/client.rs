@@ -16,16 +16,15 @@ use crate::control::protocol::{
     validate_response_protocol,
 };
 use crate::control::{
-    build_runtime, current_pipe_name, last_os_error, read_message, write_message,
+    ControlError, build_runtime, current_pipe_name, last_os_error, read_message, write_message,
 };
-use crate::error::InjectorError;
 
 const WAIT_PIPE_TIMEOUT: Duration = Duration::from_secs(2);
 const PIPE_OPEN_RETRY_DELAY: Duration = Duration::from_millis(50);
 const RESPONSE_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const HOST_SHUTDOWN_TIMEOUT_MS: u32 = 5_000;
 
-pub(crate) fn send_request(request: &ControlRequest) -> Result<ControlResponse, InjectorError> {
+pub(crate) fn send_request(request: &ControlRequest) -> Result<ControlResponse, ControlError> {
     let pipe_name = current_pipe_name()?;
     let runtime = build_runtime("create control client runtime")?;
     let (response, host_process) = runtime.block_on(send_request_async(&pipe_name, request))?;
@@ -40,7 +39,7 @@ pub(crate) fn send_request(request: &ControlRequest) -> Result<ControlResponse, 
 async fn send_request_async(
     pipe_name: &str,
     request: &ControlRequest,
-) -> Result<(ControlResponse, Option<HostProcessHandle>), InjectorError> {
+) -> Result<(ControlResponse, Option<HostProcessHandle>), ControlError> {
     let mut pipe = open_pipe(pipe_name).await?;
     let host_process = if request.command == ControlCommand::Stop {
         Some(HostProcessHandle::from_pipe(&pipe)?)
@@ -60,7 +59,7 @@ async fn send_request_async(
     Ok((response, host_process))
 }
 
-async fn open_pipe(pipe_name: &str) -> Result<NamedPipeClient, InjectorError> {
+async fn open_pipe(pipe_name: &str) -> Result<NamedPipeClient, ControlError> {
     let deadline = Instant::now() + WAIT_PIPE_TIMEOUT;
     let mut options = ClientOptions::new();
     options.pipe_mode(PipeMode::Message);
@@ -75,16 +74,16 @@ async fn open_pipe(pipe_name: &str) -> Result<NamedPipeClient, InjectorError> {
                 tokio::time::sleep(remaining.min(PIPE_OPEN_RETRY_DELAY)).await;
             }
             Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
-                return Err(InjectorError::HostBusy);
+                return Err(ControlError::EndpointBusy);
             }
             Err(error)
                 if error.kind() == std::io::ErrorKind::NotFound
                     || error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) =>
             {
-                return Err(InjectorError::HostUnavailable);
+                return Err(ControlError::EndpointMissing);
             }
             Err(source) => {
-                return Err(InjectorError::ControlPipe {
+                return Err(ControlError::Io {
                     operation: "open host pipe",
                     source,
                 });
@@ -98,12 +97,12 @@ struct HostProcessHandle {
 }
 
 impl HostProcessHandle {
-    fn from_pipe(pipe: &NamedPipeClient) -> Result<Self, InjectorError> {
+    fn from_pipe(pipe: &NamedPipeClient) -> Result<Self, ControlError> {
         let mut process_id = 0;
         let ok =
             unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle() as HANDLE, &mut process_id) };
         if ok == FALSE {
-            return Err(InjectorError::ControlPipe {
+            return Err(ControlError::Io {
                 operation: "resolve host process",
                 source: last_os_error(),
             });
@@ -112,9 +111,9 @@ impl HostProcessHandle {
         Self::new(handle)
     }
 
-    fn new(handle: HANDLE) -> Result<Self, InjectorError> {
+    fn new(handle: HANDLE) -> Result<Self, ControlError> {
         if handle.is_null() {
-            return Err(InjectorError::ControlPipe {
+            return Err(ControlError::Io {
                 operation: "open host process",
                 source: last_os_error(),
             });
@@ -125,14 +124,14 @@ impl HostProcessHandle {
         })
     }
 
-    fn wait_for_exit(&self) -> Result<(), InjectorError> {
+    fn wait_for_exit(&self) -> Result<(), ControlError> {
         match unsafe { WaitForSingleObject(self.handle.as_raw_handle(), HOST_SHUTDOWN_TIMEOUT_MS) }
         {
             WAIT_OBJECT_0 => Ok(()),
-            WAIT_TIMEOUT => Err(InjectorError::ControlTimeout {
+            WAIT_TIMEOUT => Err(ControlError::Timeout {
                 operation: "wait for host shutdown",
             }),
-            _ => Err(InjectorError::ControlPipe {
+            _ => Err(ControlError::Io {
                 operation: "wait for host shutdown",
                 source: last_os_error(),
             }),

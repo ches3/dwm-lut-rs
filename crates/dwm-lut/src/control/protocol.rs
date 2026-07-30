@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::InjectorError;
+use crate::control::ControlError;
 
 pub(crate) const MAX_CONTROL_MESSAGE_BYTES: usize = 4 * 1024;
 pub(crate) const CONTROL_PROTOCOL_VERSION: u32 = 3;
@@ -98,49 +98,49 @@ impl ControlResponse {
     }
 }
 
-pub(crate) fn encode_request(request: &ControlRequest) -> Result<Vec<u8>, InjectorError> {
+pub(crate) fn encode_request(request: &ControlRequest) -> Result<Vec<u8>, ControlError> {
     encode_json(request)
 }
 
-pub(crate) fn decode_request(bytes: &[u8]) -> Result<ControlRequest, InjectorError> {
+pub(crate) fn decode_request(bytes: &[u8]) -> Result<ControlRequest, ControlError> {
     decode_json(bytes)
 }
 
-pub(crate) fn decode_request_protocol_version(bytes: &[u8]) -> Result<u32, InjectorError> {
+pub(crate) fn decode_request_protocol_version(bytes: &[u8]) -> Result<u32, ControlError> {
     decode_json::<ControlRequestEnvelope>(bytes).map(|request| request.protocol_version)
 }
 
-pub(crate) fn encode_response(response: &ControlResponse) -> Result<Vec<u8>, InjectorError> {
+pub(crate) fn encode_response(response: &ControlResponse) -> Result<Vec<u8>, ControlError> {
     encode_json(response)
 }
 
-pub(crate) fn decode_response(bytes: &[u8]) -> Result<ControlResponse, InjectorError> {
+pub(crate) fn decode_response(bytes: &[u8]) -> Result<ControlResponse, ControlError> {
     decode_json(bytes)
 }
 
-fn encode_json<T: Serialize>(value: &T) -> Result<Vec<u8>, InjectorError> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|error| InjectorError::ControlProtocol(error.to_string()))?;
+fn encode_json<T: Serialize>(value: &T) -> Result<Vec<u8>, ControlError> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|error| ControlError::Protocol(error.to_string()))?;
     validate_message_len(bytes.len())?;
     Ok(bytes)
 }
 
-fn decode_json<T>(bytes: &[u8]) -> Result<T, InjectorError>
+fn decode_json<T>(bytes: &[u8]) -> Result<T, ControlError>
 where
     T: for<'de> Deserialize<'de>,
 {
     if bytes.is_empty() {
-        return Err(InjectorError::ControlProtocol(
+        return Err(ControlError::Protocol(
             "message must not be empty".to_string(),
         ));
     }
     validate_message_len(bytes.len())?;
-    serde_json::from_slice(bytes).map_err(|error| InjectorError::ControlProtocol(error.to_string()))
+    serde_json::from_slice(bytes).map_err(|error| ControlError::Protocol(error.to_string()))
 }
 
-pub(crate) fn validate_message_len(len: usize) -> Result<(), InjectorError> {
+pub(crate) fn validate_message_len(len: usize) -> Result<(), ControlError> {
     if len > MAX_CONTROL_MESSAGE_BYTES {
-        return Err(InjectorError::ControlProtocol(format!(
+        return Err(ControlError::Protocol(format!(
             "message is too large: {len} bytes exceeds {MAX_CONTROL_MESSAGE_BYTES} bytes"
         )));
     }
@@ -150,14 +150,14 @@ pub(crate) fn validate_message_len(len: usize) -> Result<(), InjectorError> {
 
 pub(crate) fn validate_response_protocol(
     response: ControlResponse,
-) -> Result<ControlResponse, InjectorError> {
+) -> Result<ControlResponse, ControlError> {
     if response.protocol_version == CONTROL_PROTOCOL_VERSION
         || response.status == ControlStatus::ProtocolMismatch
     {
         return Ok(response);
     }
 
-    Err(InjectorError::ControlProtocol(format!(
+    Err(ControlError::Protocol(format!(
         "control response protocol version mismatch: peer={}, local={}",
         response.protocol_version, CONTROL_PROTOCOL_VERSION
     )))
@@ -219,7 +219,7 @@ mod tests {
         let error = decode_request(br#"{"protocol_version":1,"command":"reload"}"#)
             .expect_err("unknown command fails");
 
-        assert!(matches!(error, InjectorError::ControlProtocol(_)));
+        assert!(matches!(error, ControlError::Protocol(_)));
     }
 
     #[test]
@@ -227,16 +227,14 @@ mod tests {
         let error = decode_request(br#"{"protocol_version":1,"command":"status""#)
             .expect_err("malformed json fails");
 
-        assert!(matches!(error, InjectorError::ControlProtocol(_)));
+        assert!(matches!(error, ControlError::Protocol(_)));
     }
 
     #[test]
     fn rejects_empty_message() {
         let error = decode_request(b"").expect_err("empty message fails");
 
-        assert!(
-            matches!(error, InjectorError::ControlProtocol(message) if message.contains("empty"))
-        );
+        assert!(matches!(error, ControlError::Protocol(message) if message.contains("empty")));
     }
 
     #[test]
@@ -244,9 +242,7 @@ mod tests {
         let error = validate_message_len(MAX_CONTROL_MESSAGE_BYTES + 1)
             .expect_err("oversized message fails");
 
-        assert!(
-            matches!(error, InjectorError::ControlProtocol(message) if message.contains("too large"))
-        );
+        assert!(matches!(error, ControlError::Protocol(message) if message.contains("too large")));
     }
 
     #[test]
@@ -257,7 +253,7 @@ mod tests {
             .expect_err("normal response from a different protocol version must fail");
 
         assert!(
-            matches!(error, InjectorError::ControlProtocol(message) if message.contains("protocol version mismatch"))
+            matches!(error, ControlError::Protocol(message) if message.contains("protocol version mismatch"))
         );
     }
 

@@ -5,8 +5,8 @@ use super::win32::{
     find_remote_modules_by_name, open_target_process, resolve_remote_export_address,
     resolve_remote_module_export_address, run_remote_thread, wide_null,
 };
-use crate::error::{
-    InitializeContext, InitializeStatus, InjectionStep, InjectorError, ReplaceAssignmentsStatus,
+use crate::inject::{
+    InitializeContext, InitializeStatus, InjectError, InjectionStep, ReplaceAssignmentsStatus,
     ShutdownStatus,
 };
 
@@ -59,7 +59,7 @@ impl RemotePayload {
 fn write_remote_payload(
     process: &OwnedHandle,
     payload_bytes: &[u8],
-) -> Result<RemotePayload, InjectorError> {
+) -> Result<RemotePayload, InjectError> {
     let remote_payload_bytes = RemoteAllocation::write_bytes(
         process,
         payload_bytes,
@@ -88,7 +88,7 @@ fn try_remote_replace_assignments(
     process: &OwnedHandle,
     module: &NamedRemoteModule,
     payload_bytes: &[u8],
-) -> Result<ReplaceAssignmentsOutcome, InjectorError> {
+) -> Result<ReplaceAssignmentsOutcome, InjectError> {
     let module_path = PathBuf::from(module_export_path(&module.path, &module.name));
     let remote_replace_assignments_address = match resolve_remote_module_export_address(
         process,
@@ -98,7 +98,7 @@ fn try_remote_replace_assignments(
         &module_path,
     ) {
         Ok(address) => address,
-        Err(InjectorError::ExportNotFound { .. }) => {
+        Err(InjectError::ExportNotFound { .. }) => {
             return Ok(ReplaceAssignmentsOutcome::Fallback);
         }
         Err(error) => return Err(error),
@@ -117,7 +117,7 @@ fn try_remote_replace_assignments(
         Some(ReplaceAssignmentsStatus::Success) => Ok(ReplaceAssignmentsOutcome::Replaced),
         Some(status) if status.should_fallback() => Ok(ReplaceAssignmentsOutcome::Fallback),
         Some(status) => Ok(ReplaceAssignmentsOutcome::Failed(status)),
-        None => Err(InjectorError::UnknownReplaceAssignmentsStatus(
+        None => Err(InjectError::UnknownReplaceAssignmentsStatus(
             replace_assignments_status,
         )),
     }
@@ -145,7 +145,7 @@ pub(crate) fn apply_config(
     pid: u32,
     staged_dll_path: &Path,
     payload_bytes: &[u8],
-) -> Result<ApplyOutcome, InjectorError> {
+) -> Result<ApplyOutcome, InjectError> {
     let process = open_target_process(pid)?;
     let loaded_hooks = find_remote_modules_by_name(
         pid,
@@ -177,7 +177,7 @@ pub(crate) fn apply_config(
                 return Ok(ApplyOutcome::Reinitialized);
             }
             ReplaceAssignmentsOutcome::Failed(status) => {
-                return Err(InjectorError::HookReplaceAssignmentsFailed(status));
+                return Err(InjectError::HookReplaceAssignmentsFailed(status));
             }
         }
     }
@@ -196,16 +196,16 @@ pub(crate) fn canonicalize_existing_file(
     path: &Path,
     step: InjectionStep,
     kind: &'static str,
-) -> Result<PathBuf, InjectorError> {
+) -> Result<PathBuf, InjectError> {
     if !path.is_file() {
-        return Err(InjectorError::MissingFile {
+        return Err(InjectError::MissingFile {
             kind,
             path: path.to_path_buf(),
         });
     }
 
     path.canonicalize()
-        .map_err(|source| InjectorError::StepFailed { step, source })
+        .map_err(|source| InjectError::StepFailed { step, source })
 }
 
 pub(crate) fn inject_and_initialize(
@@ -213,7 +213,7 @@ pub(crate) fn inject_and_initialize(
     dll_path: &Path,
     payload_bytes: &[u8],
     context: InitializeContext,
-) -> Result<(), InjectorError> {
+) -> Result<(), InjectError> {
     let process = open_target_process(pid)?;
     let remote_kernel32 = find_remote_module(pid, "kernel32.dll", InjectionStep::ResolveKernel32)?;
     let get_module_handle_address = resolve_remote_export_address(
@@ -257,12 +257,12 @@ pub(crate) fn inject_and_initialize(
 
     match InitializeStatus::from_code(initialize_status) {
         Some(InitializeStatus::Success) => Ok(()),
-        Some(status) => Err(InjectorError::HookInitializeFailed { status, context }),
-        None => Err(InjectorError::UnknownInitializeStatus(initialize_status)),
+        Some(status) => Err(InjectError::HookInitializeFailed { status, context }),
+        None => Err(InjectError::UnknownInitializeStatus(initialize_status)),
     }
 }
 
-pub(crate) fn disable_injected_hook(pid: u32) -> Result<DisableOutcome, InjectorError> {
+pub(crate) fn disable_injected_hook(pid: u32) -> Result<DisableOutcome, InjectError> {
     let process = open_target_process(pid)?;
     let remote_hook_modules = find_remote_modules_by_name(
         pid,
@@ -309,7 +309,7 @@ pub(crate) fn disable_injected_hook(pid: u32) -> Result<DisableOutcome, Injector
         let Some(status) = ShutdownStatus::from_code(shutdown_status) else {
             aggregation.record_failure(
                 module_path,
-                InjectorError::UnknownShutdownStatus(shutdown_status),
+                InjectError::UnknownShutdownStatus(shutdown_status),
             );
             continue;
         };
@@ -320,13 +320,13 @@ pub(crate) fn disable_injected_hook(pid: u32) -> Result<DisableOutcome, Injector
     aggregation.finish()
 }
 
-fn shutdown_for_reinject(pid: u32) -> Result<(), InjectorError> {
+fn shutdown_for_reinject(pid: u32) -> Result<(), InjectError> {
     match disable_injected_hook(pid)? {
         DisableOutcome::NotInjected => Ok(()),
         DisableOutcome::ShutDown(ShutdownStatus::Success)
         | DisableOutcome::ShutDown(ShutdownStatus::NotInitialized)
         | DisableOutcome::ShutDown(ShutdownStatus::AlreadyShutDown) => Ok(()),
-        DisableOutcome::ShutDown(status) => Err(InjectorError::HookShutdownFailed(status)),
+        DisableOutcome::ShutDown(status) => Err(InjectError::HookShutdownFailed(status)),
     }
 }
 
@@ -385,11 +385,11 @@ fn evaluate_shutdown_status(status: ShutdownStatus) -> ShutdownDecision {
 struct ShutdownAggregation {
     stopped_module: bool,
     deferred_status: Option<ShutdownStatus>,
-    failures: Vec<(PathBuf, InjectorError)>,
+    failures: Vec<(PathBuf, InjectError)>,
 }
 
 impl ShutdownAggregation {
-    fn record_failure(&mut self, module_path: PathBuf, error: InjectorError) {
+    fn record_failure(&mut self, module_path: PathBuf, error: InjectError) {
         self.failures.push((module_path, error));
     }
 
@@ -397,7 +397,7 @@ impl ShutdownAggregation {
         match evaluate_shutdown_status(status) {
             ShutdownDecision::Stopped => self.stopped_module = true,
             ShutdownDecision::Fail => {
-                self.record_failure(module_path, InjectorError::HookShutdownFailed(status));
+                self.record_failure(module_path, InjectError::HookShutdownFailed(status));
             }
             ShutdownDecision::Inactive => {
                 self.deferred_status =
@@ -406,9 +406,9 @@ impl ShutdownAggregation {
         }
     }
 
-    fn finish(self) -> Result<DisableOutcome, InjectorError> {
+    fn finish(self) -> Result<DisableOutcome, InjectError> {
         if !self.failures.is_empty() {
-            return Err(InjectorError::HookShutdownModulesFailed {
+            return Err(InjectError::HookShutdownModulesFailed {
                 failures: self.failures,
             });
         }
@@ -453,7 +453,7 @@ fn load_remote_module(
     dll_path: &Path,
     get_module_handle_address: usize,
     load_library_address: usize,
-) -> Result<RemoteModule, InjectorError> {
+) -> Result<RemoteModule, InjectError> {
     let dll_path_wide = wide_null(dll_path.as_os_str());
     let remote_dll_path = RemoteAllocation::write_utf16(
         process,
@@ -489,7 +489,7 @@ fn load_remote_module(
         InjectionStep::WaitDllLoad,
     )?;
     if exit_code == 0 {
-        return Err(InjectorError::RemoteCallFailed {
+        return Err(InjectError::RemoteCallFailed {
             step: InjectionStep::WaitDllLoad,
             exit_code,
         });
@@ -501,7 +501,7 @@ fn load_remote_module(
         remote_context.read_copy::<RemoteDllLoadContext>(InjectionStep::ReadDllLoadResult)?
     };
     if result.module_handle == 0 {
-        return Err(InjectorError::RemoteModuleNotFound {
+        return Err(InjectError::RemoteModuleNotFound {
             module: dll_path.display().to_string(),
         });
     }
@@ -515,8 +515,8 @@ fn load_remote_module(
 mod tests {
     use std::path::PathBuf;
 
-    use crate::error::InjectorError;
-    use crate::error::ShutdownStatus;
+    use crate::inject::InjectError;
+    use crate::inject::ShutdownStatus;
 
     use super::super::win32::NamedRemoteModule;
     use super::{
@@ -587,7 +587,7 @@ mod tests {
         let mut aggregation = ShutdownAggregation::default();
         aggregation.record_failure(
             PathBuf::from("old.dll"),
-            InjectorError::ExportNotFound {
+            InjectError::ExportNotFound {
                 export: "dwm_lut_shutdown".to_string(),
                 dll_path: PathBuf::from("old.dll"),
             },
@@ -598,7 +598,7 @@ mod tests {
             .finish()
             .expect_err("one failed module must reject the aggregate result");
         match error {
-            InjectorError::HookShutdownModulesFailed { failures } => {
+            InjectError::HookShutdownModulesFailed { failures } => {
                 assert_eq!(failures.len(), 1);
                 assert_eq!(failures[0].0, PathBuf::from("old.dll"));
             }
@@ -611,7 +611,7 @@ mod tests {
         let mut aggregation = ShutdownAggregation::default();
         aggregation.record_failure(
             PathBuf::from("first.dll"),
-            InjectorError::ExportNotFound {
+            InjectError::ExportNotFound {
                 export: "dwm_lut_shutdown".to_string(),
                 dll_path: PathBuf::from("first.dll"),
             },
@@ -626,13 +626,13 @@ mod tests {
             .expect_err("all module failures should be returned together");
 
         match error {
-            InjectorError::HookShutdownModulesFailed { failures } => {
+            InjectError::HookShutdownModulesFailed { failures } => {
                 assert_eq!(failures.len(), 2);
                 assert_eq!(failures[0].0, PathBuf::from("first.dll"));
                 assert_eq!(failures[1].0, PathBuf::from("second.dll"));
                 assert!(matches!(
                     failures[1].1,
-                    InjectorError::HookShutdownFailed(ShutdownStatus::MinHookCleanupFailed)
+                    InjectError::HookShutdownFailed(ShutdownStatus::MinHookCleanupFailed)
                 ));
             }
             error => panic!("unexpected error: {error}"),

@@ -13,16 +13,16 @@ use windows_sys::Win32::System::Threading::{
     CreateRemoteThread, GetExitCodeThread, INFINITE, LPTHREAD_START_ROUTINE, WaitForSingleObject,
 };
 
-use crate::error::{InjectionStep, InjectorError};
+use crate::inject::{InjectError, InjectionStep};
 
 use super::last_os_error;
 
 pub(crate) struct OwnedHandle(StdOwnedHandle);
 
 impl OwnedHandle {
-    pub(crate) fn new(handle: HANDLE, step: InjectionStep) -> Result<Self, InjectorError> {
+    pub(crate) fn new(handle: HANDLE, step: InjectionStep) -> Result<Self, InjectError> {
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return Err(InjectorError::StepFailed {
+            return Err(InjectError::StepFailed {
                 step,
                 source: last_os_error(),
             });
@@ -48,7 +48,7 @@ impl RemoteAllocation {
         value: &[u16],
         allocate_step: InjectionStep,
         write_step: InjectionStep,
-    ) -> Result<Self, InjectorError> {
+    ) -> Result<Self, InjectError> {
         Self::write_bytes(
             process,
             bytes_from_slice(value),
@@ -64,7 +64,7 @@ impl RemoteAllocation {
         protection: u32,
         allocate_step: InjectionStep,
         write_step: InjectionStep,
-    ) -> Result<Self, InjectorError> {
+    ) -> Result<Self, InjectError> {
         Self::write_bytes(
             process,
             bytes_from_value(value),
@@ -80,7 +80,7 @@ impl RemoteAllocation {
         protection: u32,
         allocate_step: InjectionStep,
         write_step: InjectionStep,
-    ) -> Result<Self, InjectorError> {
+    ) -> Result<Self, InjectError> {
         let allocation = Self::allocate(process, value.len(), protection, allocate_step)?;
         allocation.write_buffer(value.as_ptr().cast(), value.len(), write_step)?;
         Ok(allocation)
@@ -89,10 +89,7 @@ impl RemoteAllocation {
     /// # Safety
     ///
     /// The bytes stored in this allocation must be a valid representation of `T`.
-    pub(crate) unsafe fn read_copy<T: Copy>(
-        &self,
-        step: InjectionStep,
-    ) -> Result<T, InjectorError> {
+    pub(crate) unsafe fn read_copy<T: Copy>(&self, step: InjectionStep) -> Result<T, InjectError> {
         let bytes = read_process_memory_raw(
             self.process,
             self.address as usize,
@@ -113,7 +110,7 @@ impl RemoteAllocation {
         size_in_bytes: usize,
         protection: u32,
         step: InjectionStep,
-    ) -> Result<Self, InjectorError> {
+    ) -> Result<Self, InjectError> {
         let address = unsafe {
             VirtualAllocEx(
                 process.raw(),
@@ -124,7 +121,7 @@ impl RemoteAllocation {
             )
         };
         if address.is_null() {
-            return Err(InjectorError::StepFailed {
+            return Err(InjectError::StepFailed {
                 step,
                 source: last_os_error(),
             });
@@ -141,7 +138,7 @@ impl RemoteAllocation {
         buffer: *const c_void,
         size_in_bytes: usize,
         step: InjectionStep,
-    ) -> Result<(), InjectorError> {
+    ) -> Result<(), InjectError> {
         let mut written = 0usize;
         let ok = unsafe {
             WriteProcessMemory(
@@ -153,7 +150,7 @@ impl RemoteAllocation {
             )
         };
         if ok == FALSE || written != size_in_bytes {
-            return Err(InjectorError::StepFailed {
+            return Err(InjectError::StepFailed {
                 step,
                 source: last_os_error(),
             });
@@ -172,7 +169,7 @@ pub(crate) fn read_process_memory(
     address: usize,
     len: usize,
     step: InjectionStep,
-) -> Result<Vec<u8>, InjectorError> {
+) -> Result<Vec<u8>, InjectError> {
     read_process_memory_raw(process.raw(), address, len, step)
 }
 
@@ -181,7 +178,7 @@ fn read_process_memory_raw(
     address: usize,
     len: usize,
     step: InjectionStep,
-) -> Result<Vec<u8>, InjectorError> {
+) -> Result<Vec<u8>, InjectError> {
     if len == 0 {
         return Ok(Vec::new());
     }
@@ -197,13 +194,13 @@ fn read_process_memory_raw(
         )
     };
     if ok == FALSE {
-        return Err(InjectorError::StepFailed {
+        return Err(InjectError::StepFailed {
             step,
             source: last_os_error(),
         });
     }
     if read != value.len() {
-        return Err(InjectorError::StepFailed {
+        return Err(InjectError::StepFailed {
             step,
             source: io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -230,7 +227,7 @@ pub(crate) fn run_remote_thread(
     parameter: *mut c_void,
     start_step: InjectionStep,
     wait_step: InjectionStep,
-) -> Result<u32, InjectorError> {
+) -> Result<u32, InjectError> {
     let thread = unsafe {
         CreateRemoteThread(
             process.raw(),
@@ -246,7 +243,7 @@ pub(crate) fn run_remote_thread(
 
     let wait_result = unsafe { WaitForSingleObject(thread.raw(), INFINITE) };
     if wait_result != WAIT_OBJECT_0 {
-        return Err(InjectorError::StepFailed {
+        return Err(InjectError::StepFailed {
             step: wait_step,
             source: last_os_error(),
         });
@@ -255,7 +252,7 @@ pub(crate) fn run_remote_thread(
     let mut exit_code = 0u32;
     let ok = unsafe { GetExitCodeThread(thread.raw(), &mut exit_code) };
     if ok == FALSE {
-        return Err(InjectorError::StepFailed {
+        return Err(InjectError::StepFailed {
             step: wait_step,
             source: last_os_error(),
         });

@@ -6,8 +6,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 
-use crate::error::InjectorError;
 use crate::host::HostController;
+use crate::host::HostProcessError;
 
 slint::include_modules!();
 
@@ -33,10 +33,10 @@ impl UiHandle {
         (Arc::new(Self { sender }), receiver)
     }
 
-    pub(crate) fn send(&self, command: UiCommand) -> Result<(), InjectorError> {
+    pub(crate) fn send(&self, command: UiCommand) -> Result<(), HostProcessError> {
         self.sender
             .send(command)
-            .map_err(|_| InjectorError::HostUiUnavailable)?;
+            .map_err(|_| HostProcessError::UiUnavailable)?;
         schedule_ui_wake();
         Ok(())
     }
@@ -70,6 +70,6 @@ pub(crate) fn run_host_ui(
     controller: Arc<HostController>,
     ui_commands: Receiver<UiCommand>,
     ready: mpsc::Sender<()>,
-) -> Result<(), InjectorError> {
+) -> Result<(), HostProcessError> {
     session::run(controller, ui_commands, ready)
 }

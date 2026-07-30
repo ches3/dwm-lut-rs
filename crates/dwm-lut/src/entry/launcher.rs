@@ -1,16 +1,18 @@
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::control::ControlError;
 use crate::control::client;
 use crate::control::protocol::{ControlCommand, ControlRequest, ControlStatus};
-use crate::error::{InjectionStep, InjectorError};
 use crate::host::launch;
-use crate::paths;
+use crate::host::{HostProcessError, HostRunError};
+use crate::paths::{self, PathError};
 
 const HOST_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_WAIT_SLICE: Duration = Duration::from_millis(100);
 
-pub fn run_app_launcher() -> Result<(), InjectorError> {
+pub fn run_app_launcher() -> Result<(), HostRunError> {
     let host_executable = default_host_executable_path()?;
     let mut stopping_deadline = None;
     loop {
@@ -21,18 +23,19 @@ pub fn run_app_launcher() -> Result<(), InjectorError> {
                     .get_or_insert_with(|| Instant::now() + HOST_TRANSITION_TIMEOUT);
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Err(InjectorError::HostStartupFailed(format!(
+                    return Err(HostProcessError::StartupFailed(format!(
                         "existing host instance did not stop within {}ms",
                         HOST_TRANSITION_TIMEOUT.as_millis()
-                    )));
+                    ))
+                    .into());
                 }
                 std::thread::sleep(remaining.min(HOST_WAIT_SLICE));
             }
-            Err(InjectorError::HostUnavailable) => {
+            Err(HostRunError::Control(ControlError::EndpointMissing)) => {
                 stopping_deadline = None;
                 match launch::start_background_host(&host_executable, None) {
-                    Ok(()) | Err(InjectorError::HostAlreadyRunning) => {}
-                    Err(error) => return Err(error),
+                    Ok(()) | Err(HostProcessError::AlreadyRunning) => {}
+                    Err(error) => return Err(error.into()),
                 }
             }
             Err(error) => return Err(error),
@@ -46,39 +49,41 @@ enum ShowGuiOutcome {
     Stopping,
 }
 
-fn show_host_gui() -> Result<ShowGuiOutcome, InjectorError> {
+fn show_host_gui() -> Result<ShowGuiOutcome, HostRunError> {
     let response = client::send_request(&ControlRequest::new(ControlCommand::ShowGui))?;
     if response.ok {
         Ok(ShowGuiOutcome::Shown)
     } else if response.status == ControlStatus::Stopping {
         Ok(ShowGuiOutcome::Stopping)
     } else {
-        Err(InjectorError::ControlProtocol(response.message))
+        Err(ControlError::Protocol(response.message).into())
     }
 }
 
-pub(crate) fn default_host_executable_path() -> Result<PathBuf, InjectorError> {
-    let executable = std::env::current_exe().map_err(|source| InjectorError::HostLaunchFailed {
+pub(crate) fn default_host_executable_path() -> Result<PathBuf, PathError> {
+    let executable = std::env::current_exe().map_err(|source| PathError::Io {
         operation: "resolve application executable",
         source,
     })?;
-    let directory = executable.parent().ok_or_else(|| {
-        InjectorError::HostStartupFailed(
-            "application executable has no parent directory".to_string(),
-        )
+    let directory = executable.parent().ok_or_else(|| PathError::Io {
+        operation: "resolve application executable parent directory",
+        source: io::Error::new(
+            io::ErrorKind::InvalidData,
+            "application executable has no parent directory",
+        ),
     })?;
     Ok(directory.join(host_executable_name()))
 }
 
 pub(crate) fn resolve_host_executable_path(
     host_path: Option<PathBuf>,
-) -> Result<PathBuf, InjectorError> {
+) -> Result<PathBuf, PathError> {
     let host_path = match host_path {
         Some(path) => paths::absolute_path(path)?,
         None => default_host_executable_path()?,
     };
     if !host_path.is_file() {
-        return Err(InjectorError::MissingFile {
+        return Err(PathError::Missing {
             kind: "host executable",
             path: host_path,
         });
@@ -88,14 +93,14 @@ pub(crate) fn resolve_host_executable_path(
 
 pub(crate) fn resolve_host_dll_path(
     dll_path: Option<PathBuf>,
-) -> Result<Option<PathBuf>, InjectorError> {
+) -> Result<Option<PathBuf>, PathError> {
     let Some(dll_path) = dll_path else {
         return Ok(None);
     };
 
     let dll_path = paths::absolute_path(dll_path)?;
     if !dll_path.is_file() {
-        return Err(InjectorError::MissingFile {
+        return Err(PathError::Missing {
             kind: "hook DLL",
             path: dll_path,
         });
@@ -104,8 +109,8 @@ pub(crate) fn resolve_host_dll_path(
     dll_path
         .canonicalize()
         .map(Some)
-        .map_err(|source| InjectorError::StepFailed {
-            step: InjectionStep::ResolveLocalHookDll,
+        .map_err(|source| PathError::Io {
+            operation: "canonicalize hook DLL path",
             source,
         })
 }
@@ -149,7 +154,7 @@ mod tests {
             .expect_err("missing host executable must be rejected");
 
         match error {
-            InjectorError::MissingFile { kind, path: actual } => {
+            PathError::Missing { kind, path: actual } => {
                 assert_eq!(kind, "host executable");
                 assert_eq!(actual, path);
             }
@@ -183,7 +188,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            InjectorError::MissingFile {
+            PathError::Missing {
                 kind: "hook DLL",
                 ..
             }

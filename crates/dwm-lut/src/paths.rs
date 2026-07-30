@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::fmt;
 use std::io;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
@@ -6,15 +7,38 @@ use std::path::PathBuf;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
 
-use crate::error::{InjectionStep, InjectorError};
+#[derive(Debug)]
+pub enum PathError {
+    Io {
+        operation: &'static str,
+        source: io::Error,
+    },
+    Missing {
+        kind: &'static str,
+        path: PathBuf,
+    },
+}
 
-pub(crate) fn local_app_data_directory(step: InjectionStep) -> Result<PathBuf, InjectorError> {
+impl fmt::Display for PathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { operation, source } => write!(f, "{operation} failed: {source}"),
+            Self::Missing { kind, path } => {
+                write!(f, "{kind} was not found: {}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for PathError {}
+
+pub(crate) fn local_app_data_directory() -> Result<PathBuf, PathError> {
     let mut path = std::ptr::null_mut();
     let result =
         unsafe { SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, std::ptr::null_mut(), &mut path) };
     if result < 0 {
-        return Err(InjectorError::StepFailed {
-            step,
+        return Err(PathError::Io {
+            operation: "resolve LocalAppData",
             source: io::Error::from_raw_os_error(result),
         });
     }
@@ -22,25 +46,25 @@ pub(crate) fn local_app_data_directory(step: InjectionStep) -> Result<PathBuf, I
     Ok(KnownFolderPath { ptr: path }.to_path_buf())
 }
 
-pub(crate) fn default_config_path() -> Result<PathBuf, InjectorError> {
-    Ok(local_app_data_directory(InjectionStep::ResolveConfigPath)?
+pub(crate) fn default_config_path() -> Result<PathBuf, PathError> {
+    Ok(local_app_data_directory()?
         .join("dwm-lut-rs")
         .join("config.json"))
 }
 
-pub(crate) fn absolute_path(path: PathBuf) -> Result<PathBuf, InjectorError> {
+pub(crate) fn absolute_path(path: PathBuf) -> Result<PathBuf, PathError> {
     if path.is_absolute() {
         return Ok(path);
     }
 
-    let cwd = std::env::current_dir().map_err(|source| InjectorError::ControlPipe {
+    let cwd = std::env::current_dir().map_err(|source| PathError::Io {
         operation: "resolve current directory",
         source,
     })?;
     Ok(cwd.join(path))
 }
 
-pub(crate) fn resolve_config_path(config_path: Option<PathBuf>) -> Result<PathBuf, InjectorError> {
+pub(crate) fn resolve_config_path(config_path: Option<PathBuf>) -> Result<PathBuf, PathError> {
     match config_path {
         Some(config_path) => absolute_path(config_path),
         None => default_config_path(),

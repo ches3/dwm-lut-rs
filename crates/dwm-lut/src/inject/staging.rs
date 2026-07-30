@@ -12,7 +12,7 @@ use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
 };
 
-use crate::error::{InjectionStep, InjectorError};
+use crate::inject::{InjectError, InjectionStep};
 use crate::paths;
 
 const HOOK_DLL_NAME: &str = "dwm_lut_hook.dll";
@@ -21,12 +21,12 @@ const SDDL_REVISION_1: u32 = 1;
 const DIRECTORY_DACL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)";
 const FILE_DACL: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;BU)";
 
-pub(crate) fn default_hook_dll_path() -> Result<PathBuf, InjectorError> {
-    let exe_path = env::current_exe().map_err(|source| InjectorError::StepFailed {
+pub(crate) fn default_hook_dll_path() -> Result<PathBuf, InjectError> {
+    let exe_path = env::current_exe().map_err(|source| InjectError::StepFailed {
         step: InjectionStep::ResolveDefaultHookDll,
         source,
     })?;
-    let exe_dir = exe_path.parent().ok_or_else(|| InjectorError::StepFailed {
+    let exe_dir = exe_path.parent().ok_or_else(|| InjectError::StepFailed {
         step: InjectionStep::ResolveDefaultHookDll,
         source: io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -37,15 +37,15 @@ pub(crate) fn default_hook_dll_path() -> Result<PathBuf, InjectorError> {
     Ok(exe_dir.join(HOOK_DLL_NAME))
 }
 
-pub(crate) fn stage_hook_dll(input_path: &Path) -> Result<PathBuf, InjectorError> {
-    let dll_bytes = fs::read(input_path).map_err(|source| InjectorError::StepFailed {
+pub(crate) fn stage_hook_dll(input_path: &Path) -> Result<PathBuf, InjectError> {
+    let dll_bytes = fs::read(input_path).map_err(|source| InjectError::StepFailed {
         step: InjectionStep::ReadLocalHookDll,
         source,
     })?;
     let hash = Sha256::digest(&dll_bytes);
     let staged_dir = staging_directory()?;
 
-    fs::create_dir_all(&staged_dir).map_err(|source| InjectorError::StepFailed {
+    fs::create_dir_all(&staged_dir).map_err(|source| InjectError::StepFailed {
         step: InjectionStep::CreateStagingDirectory,
         source,
     })?;
@@ -71,17 +71,24 @@ pub(crate) fn stage_hook_dll(input_path: &Path) -> Result<PathBuf, InjectorError
     Ok(staged_path)
 }
 
-fn staging_directory() -> Result<PathBuf, InjectorError> {
-    Ok(
-        paths::local_app_data_directory(InjectionStep::ResolveStagingDirectory)?
-            .join("dwm-lut-rs")
-            .join("hook"),
-    )
+fn staging_directory() -> Result<PathBuf, InjectError> {
+    Ok(paths::local_app_data_directory()
+        .map_err(|error| match error {
+            crate::paths::PathError::Io { source, .. } => InjectError::StepFailed {
+                step: InjectionStep::ResolveStagingDirectory,
+                source,
+            },
+            crate::paths::PathError::Missing { kind, path } => {
+                InjectError::MissingFile { kind, path }
+            }
+        })?
+        .join("dwm-lut-rs")
+        .join("hook"))
 }
 
-fn write_staged_file(staged_path: &Path, dll_bytes: &[u8]) -> Result<(), InjectorError> {
+fn write_staged_file(staged_path: &Path, dll_bytes: &[u8]) -> Result<(), InjectError> {
     let temp_path = staged_path.with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&temp_path, dll_bytes).map_err(|source| InjectorError::StepFailed {
+    fs::write(&temp_path, dll_bytes).map_err(|source| InjectError::StepFailed {
         step: InjectionStep::WriteStagedHookDll,
         source,
     })?;
@@ -92,7 +99,7 @@ fn write_staged_file(staged_path: &Path, dll_bytes: &[u8]) -> Result<(), Injecto
             let _ = fs::remove_file(&temp_path);
             Ok(())
         }
-        Err(source) => Err(InjectorError::StepFailed {
+        Err(source) => Err(InjectError::StepFailed {
             step: InjectionStep::WriteStagedHookDll,
             source,
         }),
@@ -130,8 +137,8 @@ fn is_staged_hook_dll_path(path: &Path) -> bool {
     hex.len() == HASH_PREFIX_BYTES * 2 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn verify_staged_file(staged_path: &Path, expected_hash: &[u8]) -> Result<(), InjectorError> {
-    let staged_bytes = fs::read(staged_path).map_err(|source| InjectorError::StepFailed {
+fn verify_staged_file(staged_path: &Path, expected_hash: &[u8]) -> Result<(), InjectError> {
+    let staged_bytes = fs::read(staged_path).map_err(|source| InjectError::StepFailed {
         step: InjectionStep::VerifyStagedHookDll,
         source,
     })?;
@@ -140,7 +147,7 @@ fn verify_staged_file(staged_path: &Path, expected_hash: &[u8]) -> Result<(), In
         return Ok(());
     }
 
-    Err(InjectorError::StepFailed {
+    Err(InjectError::StepFailed {
         step: InjectionStep::VerifyStagedHookDll,
         source: io::Error::new(
             io::ErrorKind::InvalidData,
@@ -157,7 +164,7 @@ fn hex_prefix(hash: &[u8], prefix_bytes: usize) -> String {
     output
 }
 
-fn set_path_dacl(path: &Path, sddl: &str, step: InjectionStep) -> Result<(), InjectorError> {
+fn set_path_dacl(path: &Path, sddl: &str, step: InjectionStep) -> Result<(), InjectError> {
     let path_wide = wide_null(path.as_os_str());
     let sddl_wide = wide_null(OsStr::new(sddl));
     let security_descriptor = SecurityDescriptor::from_sddl(&sddl_wide, step)?;
@@ -173,7 +180,7 @@ fn set_path_dacl(path: &Path, sddl: &str, step: InjectionStep) -> Result<(), Inj
         return Ok(());
     }
 
-    Err(InjectorError::StepFailed {
+    Err(InjectError::StepFailed {
         step,
         source: io::Error::from_raw_os_error(unsafe { GetLastError() } as i32),
     })
@@ -188,7 +195,7 @@ struct SecurityDescriptor {
 }
 
 impl SecurityDescriptor {
-    fn from_sddl(sddl: &[u16], step: InjectionStep) -> Result<Self, InjectorError> {
+    fn from_sddl(sddl: &[u16], step: InjectionStep) -> Result<Self, InjectError> {
         let mut ptr = std::ptr::null_mut();
         let ok = unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -202,7 +209,7 @@ impl SecurityDescriptor {
             return Ok(Self { ptr });
         }
 
-        Err(InjectorError::StepFailed {
+        Err(InjectError::StepFailed {
             step,
             source: io::Error::from_raw_os_error(unsafe { GetLastError() } as i32),
         })

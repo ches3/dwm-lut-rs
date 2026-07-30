@@ -1,9 +1,10 @@
-use crate::error::InjectorError;
-use crate::monitor::{DesktopPosition, DesktopResolution, MonitorListing, list_monitor_listings};
+use crate::monitor::{
+    DesktopPosition, DesktopResolution, MonitorError, MonitorListing, list_monitor_listings,
+};
 
 const UNKNOWN_NAME: &str = "(unknown)";
 
-pub(crate) fn run_monitors() -> Result<(), InjectorError> {
+pub(crate) fn run_monitors() -> Result<(), MonitorError> {
     let listings = list_monitor_listings()?;
     println!("{}", format_monitor_list(&listings));
     Ok(())

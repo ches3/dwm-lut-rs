@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::control::protocol::{ControlCommand, ControlResponse, ControlStatus};
 use crate::control::server::{ControlDispatch, ControlHandler};
-use crate::error::{InjectorError, ShutdownStatus};
-use crate::inject::{ApplyOutcome, ApplyReport, DisableOutcome, DisableReport};
+use crate::host::HOST_BUSY_MESSAGE;
+use crate::inject::{ApplyOutcome, ApplyReport, DisableOutcome, DisableReport, ShutdownStatus};
 
 use super::controller::{HostCommandError, HostController, HostState, MutationCompletion};
 
@@ -55,7 +55,11 @@ impl ControlHandler for ControlCommandHandler {
             ControlCommand::Stop => match self.controller.prepare_stop() {
                 Ok(permit) => ControlDispatch::after_response(
                     ControlResponse::ok("stopped dwm-lut host instance", ControlStatus::Stopped),
-                    move || permit.commit(),
+                    move || {
+                        if let Err(error) = permit.commit() {
+                            eprintln!("{error}");
+                        }
+                    },
                 ),
                 Err(error) => ControlDispatch::immediate(response_from_error(error)),
             },
@@ -65,9 +69,7 @@ impl ControlHandler for ControlCommandHandler {
 
 fn response_from_error(error: HostCommandError) -> ControlResponse {
     match error {
-        HostCommandError::Busy => {
-            ControlResponse::error(InjectorError::HostBusy.to_string(), ControlStatus::Busy)
-        }
+        HostCommandError::Busy => ControlResponse::error(HOST_BUSY_MESSAGE, ControlStatus::Busy),
         HostCommandError::Stopping => {
             ControlResponse::error("dwm-lut host instance is stopping", ControlStatus::Stopping)
         }
@@ -75,7 +77,10 @@ fn response_from_error(error: HostCommandError) -> ControlResponse {
             "host mutation executor stopped unexpectedly",
             ControlStatus::Error,
         ),
-        HostCommandError::Injector(error) => {
+        HostCommandError::Inject(error) => {
+            ControlResponse::error(error.to_string(), ControlStatus::Error)
+        }
+        HostCommandError::UiUnavailable => {
             ControlResponse::error(error.to_string(), ControlStatus::Error)
         }
     }
@@ -225,7 +230,7 @@ mod tests {
 
         let dispatch = handler.dispatch(ControlCommand::Stop);
         assert_eq!(dispatch.response().status, ControlStatus::Stopped);
-        dispatch.complete().unwrap();
+        dispatch.complete();
 
         assert_eq!(controller.state(), HostState::Stopping);
         assert_eq!(commands.recv().unwrap(), UiCommand::HostStateChanged);

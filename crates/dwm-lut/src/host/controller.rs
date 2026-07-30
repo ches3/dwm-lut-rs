@@ -5,9 +5,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use crate::control::server::ServerShutdown;
-use crate::error::{InjectorError, ShutdownStatus};
 use crate::gui::{UiCommand, UiHandle};
-use crate::inject::{self, ApplyReport, ApplyRequest, DisableOutcome, DisableReport};
+use crate::host::{HOST_BUSY_MESSAGE, HostProcessError};
+use crate::inject::{
+    self, ApplyReport, ApplyRequest, DisableOutcome, DisableReport, InjectError, ShutdownStatus,
+};
 
 use super::hook_status::{HookRuntimeStatus, HookStatusStore};
 use super::status_poller::{StatusPoller, StatusPollerHandle};
@@ -24,34 +26,29 @@ pub(crate) enum HostCommandError {
     Busy,
     Stopping,
     MutationExecutorStopped,
-    Injector(InjectorError),
+    Inject(InjectError),
+    UiUnavailable,
 }
 
 impl fmt::Display for HostCommandError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Busy => InjectorError::HostBusy.fmt(formatter),
+            Self::Busy => formatter.write_str(HOST_BUSY_MESSAGE),
             Self::Stopping => formatter.write_str("dwm-lut host instance is stopping"),
             Self::MutationExecutorStopped => {
                 formatter.write_str("host mutation executor stopped unexpectedly")
             }
-            Self::Injector(error) => error.fmt(formatter),
+            Self::Inject(error) => error.fmt(formatter),
+            Self::UiUnavailable => HostProcessError::UiUnavailable.fmt(formatter),
         }
     }
 }
 
-impl std::error::Error for HostCommandError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Injector(error) => Some(error),
-            Self::Busy | Self::Stopping | Self::MutationExecutorStopped => None,
-        }
-    }
-}
+impl std::error::Error for HostCommandError {}
 
-impl From<InjectorError> for HostCommandError {
-    fn from(value: InjectorError) -> Self {
-        Self::Injector(value)
+impl From<InjectError> for HostCommandError {
+    fn from(value: InjectError) -> Self {
+        Self::Inject(value)
     }
 }
 
@@ -105,7 +102,7 @@ struct MutationExecutor {
 }
 
 impl MutationExecutor {
-    fn new() -> Result<Self, InjectorError> {
+    fn new() -> Result<Self, HostProcessError> {
         let (sender, receiver) = mpsc::channel::<MutationJob>();
         let thread = std::thread::Builder::new()
             .name("dwm-lut-mutation".to_string())
@@ -115,8 +112,8 @@ impl MutationExecutor {
                 }
             })
             .map_err(|error| {
-                InjectorError::HostStartupFailed(format!(
-                    "host mutation executor startup failed: {error}"
+                HostProcessError::StartupFailed(format!(
+                    "start mutation executor thread failed: {error}"
                 ))
             })?;
         Ok(Self {
@@ -197,7 +194,7 @@ impl HostController {
         host_dll_path: Option<PathBuf>,
         shutdown: Arc<ServerShutdown>,
         ui: Arc<UiHandle>,
-    ) -> Result<Self, InjectorError> {
+    ) -> Result<Self, HostProcessError> {
         let state = Arc::new(Mutex::new(HostState::Idle));
         let hook_status = HookStatusStore::default();
         let executor = MutationExecutor::new()?;
@@ -263,7 +260,7 @@ impl HostController {
         }
         let result = self.ui.send(UiCommand::Show);
         drop(state);
-        result?;
+        result.map_err(|_| HostCommandError::UiUnavailable)?;
         Ok(())
     }
 
@@ -285,7 +282,9 @@ impl HostController {
     }
 
     pub(crate) fn stop(&self) -> Result<(), HostCommandError> {
-        self.prepare_stop()?.commit()?;
+        self.prepare_stop()?
+            .commit()
+            .map_err(|_| HostCommandError::UiUnavailable)?;
         Ok(())
     }
 
@@ -347,8 +346,8 @@ fn validate_disable_outcome(outcome: DisableOutcome) -> Result<(), HostCommandEr
         | DisableOutcome::ShutDown(ShutdownStatus::Success)
         | DisableOutcome::ShutDown(ShutdownStatus::NotInitialized)
         | DisableOutcome::ShutDown(ShutdownStatus::AlreadyShutDown) => Ok(()),
-        DisableOutcome::ShutDown(status) => Err(HostCommandError::Injector(
-            InjectorError::HookShutdownFailed(status),
+        DisableOutcome::ShutDown(status) => Err(HostCommandError::Inject(
+            InjectError::HookShutdownFailed(status),
         )),
     }
 }
@@ -365,7 +364,7 @@ pub(crate) struct PreparedStop {
 }
 
 impl PreparedStop {
-    pub(crate) fn commit(mut self) -> Result<(), InjectorError> {
+    pub(crate) fn commit(mut self) -> Result<(), HostProcessError> {
         self.shutdown.request();
         self.committed = true;
         self.ui.send(UiCommand::Exit)
@@ -433,9 +432,9 @@ mod tests {
             validate_disable_outcome(DisableOutcome::ShutDown(
                 ShutdownStatus::MinHookCleanupFailed
             )),
-            Err(HostCommandError::Injector(
-                InjectorError::HookShutdownFailed(ShutdownStatus::MinHookCleanupFailed)
-            ))
+            Err(HostCommandError::Inject(InjectError::HookShutdownFailed(
+                ShutdownStatus::MinHookCleanupFailed
+            )))
         ));
     }
 

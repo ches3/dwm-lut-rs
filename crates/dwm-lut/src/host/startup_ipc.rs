@@ -25,7 +25,7 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject,
 };
 
-use crate::error::InjectorError;
+use crate::host::{HostProcessError, HostRunError};
 use crate::platform::elevation;
 use crate::platform::security::{SecurityDescriptor, UserSid};
 
@@ -42,11 +42,11 @@ static STARTUP_PIPE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub(crate) struct StartupNotifier {
     pipe: Arc<OwnedHandle>,
     ready_for_ack: Arc<AtomicBool>,
-    acknowledgement: mpsc::Receiver<Result<(), InjectorError>>,
+    acknowledgement: mpsc::Receiver<Result<(), HostProcessError>>,
 }
 
 impl StartupNotifier {
-    pub(crate) fn connect(pipe_name: String) -> Result<Self, InjectorError> {
+    pub(crate) fn connect(pipe_name: String) -> Result<Self, HostProcessError> {
         let pipe_name = OsStr::new(&pipe_name)
             .encode_wide()
             .chain(std::iter::once(0))
@@ -63,7 +63,7 @@ impl StartupNotifier {
             )
         };
         if handle == INVALID_HANDLE_VALUE {
-            return Err(InjectorError::HostLaunchFailed {
+            return Err(HostProcessError::LaunchFailed {
                 operation: "connect startup result pipe",
                 source: last_os_error(),
             });
@@ -80,7 +80,7 @@ impl StartupNotifier {
             .spawn(move || {
                 watch_startup_channel(watcher_pipe, watcher_ready_for_ack, acknowledgement_sender);
             })
-            .map_err(|source| InjectorError::HostLaunchFailed {
+            .map_err(|source| HostProcessError::LaunchFailed {
                 operation: "start startup channel watcher",
                 source,
             })?;
@@ -92,7 +92,7 @@ impl StartupNotifier {
         })
     }
 
-    pub(crate) fn notify_success(self) -> Result<(), InjectorError> {
+    pub(crate) fn notify_success(self) -> Result<(), HostProcessError> {
         self.ready_for_ack.store(true, Ordering::Release);
         write_message_with_timeout(
             self.pipe.as_raw_handle(),
@@ -102,16 +102,16 @@ impl StartupNotifier {
         )?;
         match self.acknowledgement.recv_timeout(STARTUP_RESULT_TIMEOUT) {
             Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(InjectorError::HostStartupFailed(
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(HostProcessError::StartupFailed(
                 "read startup result acknowledgement timed out".to_string(),
             )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(InjectorError::HostStartupFailed(
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(HostProcessError::StartupFailed(
                 "startup channel watcher stopped before acknowledgement".to_string(),
             )),
         }
     }
 
-    pub(crate) fn notify_failure(self, error: &InjectorError) -> Result<(), InjectorError> {
+    pub(crate) fn notify_failure(self, error: &HostRunError) -> Result<(), HostProcessError> {
         let kind = startup_failure_kind(error);
         let message = error.to_string();
         let mut bytes =
@@ -121,7 +121,7 @@ impl StartupNotifier {
         bytes.push(b'\n');
         bytes.extend_from_slice(message.as_bytes());
         if bytes.len() > STARTUP_RESULT_MAX_BYTES {
-            return Err(InjectorError::HostStartupFailed(
+            return Err(HostProcessError::StartupFailed(
                 "startup result exceeded maximum length".to_string(),
             ));
         }
@@ -137,7 +137,7 @@ impl StartupNotifier {
 fn watch_startup_channel(
     pipe: Arc<OwnedHandle>,
     ready_for_ack: Arc<AtomicBool>,
-    acknowledgement: mpsc::SyncSender<Result<(), InjectorError>>,
+    acknowledgement: mpsc::SyncSender<Result<(), HostProcessError>>,
 ) {
     let result = read_message_waiting(
         pipe.as_raw_handle(),
@@ -146,7 +146,7 @@ fn watch_startup_channel(
     )
     .and_then(|message| {
         if !ready_for_ack.load(Ordering::Acquire) {
-            return Err(InjectorError::HostStartupFailed(
+            return Err(HostProcessError::StartupFailed(
                 "startup result acknowledgement arrived before startup result".to_string(),
             ));
         }
@@ -164,7 +164,7 @@ pub(super) struct StartupEvent {
 }
 
 impl StartupEvent {
-    pub(super) fn new(kind: &str, operation: &'static str) -> Result<Self, InjectorError> {
+    pub(super) fn new(kind: &str, operation: &'static str) -> Result<Self, HostProcessError> {
         let name = startup_event_name(kind);
         let name_wide = OsStr::new(&name)
             .encode_wide()
@@ -175,7 +175,7 @@ impl StartupEvent {
         let security_attributes = security_descriptor.as_security_attributes();
         let event = unsafe { CreateEventW(&security_attributes, TRUE, FALSE, name_wide.as_ptr()) };
         if event.is_null() {
-            return Err(InjectorError::HostLaunchFailed {
+            return Err(HostProcessError::LaunchFailed {
                 operation,
                 source: last_os_error(),
             });
@@ -196,9 +196,9 @@ impl StartupEvent {
     }
 
     #[cfg(test)]
-    fn signal(&self, operation: &'static str) -> Result<(), InjectorError> {
+    fn signal(&self, operation: &'static str) -> Result<(), HostProcessError> {
         if unsafe { SetEvent(self.handle()) } == FALSE {
-            return Err(InjectorError::HostLaunchFailed {
+            return Err(HostProcessError::LaunchFailed {
                 operation,
                 source: last_os_error(),
             });
@@ -206,15 +206,15 @@ impl StartupEvent {
         Ok(())
     }
 
-    fn ensure_not_reported(&self) -> Result<(), InjectorError> {
+    fn ensure_not_reported(&self) -> Result<(), HostProcessError> {
         match unsafe { WaitForSingleObject(self.handle(), 0) } {
-            WAIT_OBJECT_0 => Err(InjectorError::HostPanicAlreadyReported),
+            WAIT_OBJECT_0 => Err(HostProcessError::PanicAlreadyReported),
             WAIT_TIMEOUT => Ok(()),
-            WAIT_FAILED => Err(InjectorError::HostLaunchFailed {
+            WAIT_FAILED => Err(HostProcessError::LaunchFailed {
                 operation: "check panic report event",
                 source: last_os_error(),
             }),
-            value => Err(InjectorError::HostStartupFailed(format!(
+            value => Err(HostProcessError::StartupFailed(format!(
                 "unexpected panic report event wait result {value:#x}"
             ))),
         }
@@ -228,7 +228,7 @@ pub(super) struct StartupResultPipe {
 }
 
 impl StartupResultPipe {
-    pub(super) fn new() -> Result<Self, InjectorError> {
+    pub(super) fn new() -> Result<Self, HostProcessError> {
         let name = startup_pipe_name();
         let name_wide = OsStr::new(&name)
             .encode_wide()
@@ -250,7 +250,7 @@ impl StartupResultPipe {
             )
         };
         if pipe == INVALID_HANDLE_VALUE {
-            return Err(InjectorError::HostLaunchFailed {
+            return Err(HostProcessError::LaunchFailed {
                 operation: "create named startup result pipe",
                 source: last_os_error(),
             });
@@ -273,7 +273,7 @@ impl StartupResultPipe {
                     SetEvent(connect.event());
                 },
                 _ => {
-                    return Err(InjectorError::HostLaunchFailed {
+                    return Err(HostProcessError::LaunchFailed {
                         operation: "wait for startup result pipe client",
                         source: error,
                     });
@@ -296,7 +296,7 @@ impl StartupResultPipe {
         mut self,
         process: &elevation::ElevatedProcess,
         panic_event: &StartupEvent,
-    ) -> Result<(), InjectorError> {
+    ) -> Result<(), HostProcessError> {
         let deadline = Instant::now() + STARTUP_RESULT_TIMEOUT;
         let result = self.wait_inner(process, panic_event, deadline);
         match result {
@@ -333,14 +333,14 @@ impl StartupResultPipe {
         let mut actual_pid = 0;
         let ok = unsafe { GetNamedPipeClientProcessId(self.pipe.as_raw_handle(), &mut actual_pid) };
         if ok == FALSE {
-            return Err(InjectorError::HostLaunchFailed {
+            return Err(HostProcessError::LaunchFailed {
                 operation: "identify startup result pipe client",
                 source: last_os_error(),
             }
             .into());
         }
         if expected_pid == 0 || actual_pid != expected_pid {
-            return Err(InjectorError::HostStartupFailed(
+            return Err(HostProcessError::StartupFailed(
                 "startup result pipe client did not match the launched host process".to_string(),
             )
             .into());
@@ -357,13 +357,13 @@ impl StartupResultPipe {
 
 enum StartupWaitFailure {
     Timeout,
-    Error(InjectorError),
+    Error(HostProcessError),
 }
 
 type StartupWaitResult<T> = Result<T, StartupWaitFailure>;
 
-impl From<InjectorError> for StartupWaitFailure {
-    fn from(error: InjectorError) -> Self {
+impl From<HostProcessError> for StartupWaitFailure {
+    fn from(error: HostProcessError) -> Self {
         Self::Error(error)
     }
 }
@@ -388,48 +388,48 @@ fn startup_event_name(kind: &str) -> String {
     format!(r"Local\dwm-lut-rs-{kind}-{pid}-{nonce:032x}-{sequence:016x}")
 }
 
-fn parse_startup_result(message: &str) -> Result<(), InjectorError> {
+fn parse_startup_result(message: &str) -> Result<(), HostProcessError> {
     if message == STARTUP_RESULT_OK {
         return Ok(());
     }
     if let Some(failure) = message.strip_prefix(STARTUP_RESULT_ERROR_PREFIX) {
         let Some((kind, message)) = failure.split_once('\n') else {
-            return Err(InjectorError::HostStartupFailed(
+            return Err(HostProcessError::StartupFailed(
                 "host process reported an invalid startup result".to_string(),
             ));
         };
         return match kind {
-            STARTUP_FAILURE_KIND_HOST_ALREADY_RUNNING => Err(InjectorError::HostAlreadyRunning),
-            STARTUP_FAILURE_KIND_ERROR => {
-                Err(InjectorError::HostStartupFailed(message.to_string()))
-            }
-            _ => Err(InjectorError::HostStartupFailed(
+            STARTUP_FAILURE_KIND_HOST_ALREADY_RUNNING => Err(HostProcessError::AlreadyRunning),
+            STARTUP_FAILURE_KIND_ERROR => Err(HostProcessError::StartupFailed(message.to_string())),
+            _ => Err(HostProcessError::StartupFailed(
                 "host process reported an invalid startup result".to_string(),
             )),
         };
     }
     if message.is_empty() {
-        return Err(InjectorError::HostStartupFailed(
+        return Err(HostProcessError::StartupFailed(
             "host process exited before reporting startup".to_string(),
         ));
     }
-    Err(InjectorError::HostStartupFailed(
+    Err(HostProcessError::StartupFailed(
         "host process reported an invalid startup result".to_string(),
     ))
 }
 
-fn parse_startup_ack(message: &str) -> Result<(), InjectorError> {
+fn parse_startup_ack(message: &str) -> Result<(), HostProcessError> {
     if message == STARTUP_RESULT_ACK {
         return Ok(());
     }
-    Err(InjectorError::HostStartupFailed(
+    Err(HostProcessError::StartupFailed(
         "startup result acknowledgement was invalid".to_string(),
     ))
 }
 
-fn startup_failure_kind(error: &InjectorError) -> &'static str {
+fn startup_failure_kind(error: &HostRunError) -> &'static str {
     match error {
-        InjectorError::HostAlreadyRunning => STARTUP_FAILURE_KIND_HOST_ALREADY_RUNNING,
+        HostRunError::Process(HostProcessError::AlreadyRunning) => {
+            STARTUP_FAILURE_KIND_HOST_ALREADY_RUNNING
+        }
         _ => STARTUP_FAILURE_KIND_ERROR,
     }
 }
@@ -448,16 +448,16 @@ fn wait_for_startup_operation(
     let handles = [panic_event.handle(), operation_event, process.handle()];
     let wait = unsafe { WaitForMultipleObjects(3, handles.as_ptr(), FALSE, timeout) };
     match wait {
-        WAIT_OBJECT_0 => Err(InjectorError::HostPanicAlreadyReported.into()),
+        WAIT_OBJECT_0 => Err(HostProcessError::PanicAlreadyReported.into()),
         value if value == WAIT_OBJECT_0 + 1 => Ok(()),
         value if value == WAIT_OBJECT_0 + 2 => Err(host_exited_before_startup(process).into()),
         WAIT_TIMEOUT => Err(StartupWaitFailure::Timeout),
-        WAIT_FAILED => Err(InjectorError::HostLaunchFailed {
+        WAIT_FAILED => Err(HostProcessError::LaunchFailed {
             operation: "wait for host startup result",
             source: last_os_error(),
         }
         .into()),
-        value => Err(InjectorError::HostStartupFailed(format!(
+        value => Err(HostProcessError::StartupFailed(format!(
             "unexpected host startup wait result {value:#x}"
         ))
         .into()),
@@ -467,37 +467,37 @@ fn wait_for_startup_operation(
 fn wait_after_startup_disconnect(
     process: &elevation::ElevatedProcess,
     panic_event: &StartupEvent,
-) -> Result<(), InjectorError> {
+) -> Result<(), HostProcessError> {
     let timeout = u32::try_from(STARTUP_TERMINATION_TIMEOUT.as_millis()).unwrap_or(u32::MAX);
     let handles = [panic_event.handle(), process.handle()];
     match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), FALSE, timeout) } {
-        WAIT_OBJECT_0 => Err(InjectorError::HostPanicAlreadyReported),
-        value if value == WAIT_OBJECT_0 + 1 => Err(InjectorError::HostStartupFailed(
-            "timed out waiting for host startup result".to_string(),
+        WAIT_OBJECT_0 => Err(HostProcessError::PanicAlreadyReported),
+        value if value == WAIT_OBJECT_0 + 1 => Err(HostProcessError::StartupFailed(
+            "host exited after startup disconnect without a result".to_string(),
         )),
-        WAIT_TIMEOUT => Err(InjectorError::HostStartupFailed(
+        WAIT_TIMEOUT => Err(HostProcessError::StartupFailed(
             "host did not terminate after startup timeout".to_string(),
         )),
-        WAIT_FAILED => Err(InjectorError::HostLaunchFailed {
+        WAIT_FAILED => Err(HostProcessError::LaunchFailed {
             operation: "wait for host termination after startup timeout",
             source: last_os_error(),
         }),
-        value => Err(InjectorError::HostStartupFailed(format!(
+        value => Err(HostProcessError::StartupFailed(format!(
             "unexpected host termination wait result {value:#x}"
         ))),
     }
 }
 
-fn host_exited_before_startup(process: &elevation::ElevatedProcess) -> InjectorError {
+fn host_exited_before_startup(process: &elevation::ElevatedProcess) -> HostProcessError {
     let mut exit_code = 0;
     let ok = unsafe { GetExitCodeProcess(process.handle(), &mut exit_code) };
     if ok == FALSE {
-        return InjectorError::HostLaunchFailed {
+        return HostProcessError::LaunchFailed {
             operation: "read host process exit code",
             source: last_os_error(),
         };
     }
-    InjectorError::HostStartupFailed(format!(
+    HostProcessError::StartupFailed(format!(
         "host process exited before reporting startup with exit code {exit_code}"
     ))
 }
@@ -529,13 +529,13 @@ fn read_startup_result(
                 read = operation.result(pipe.as_raw_handle(), "read startup result")?;
             }
             Some(code) if code == ERROR_MORE_DATA as i32 => {
-                return Err(InjectorError::HostStartupFailed(
+                return Err(HostProcessError::StartupFailed(
                     "startup result exceeded maximum length".to_string(),
                 )
                 .into());
             }
             _ => {
-                return Err(InjectorError::HostLaunchFailed {
+                return Err(HostProcessError::LaunchFailed {
                     operation: "read startup result",
                     source: error,
                 }
@@ -569,7 +569,7 @@ fn write_startup_ack(
     if ok == FALSE {
         let error = last_os_error();
         if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-            return Err(InjectorError::HostLaunchFailed {
+            return Err(HostProcessError::LaunchFailed {
                 operation: "write startup result acknowledgement",
                 source: error,
             }
@@ -588,9 +588,9 @@ fn write_message_with_timeout(
     bytes: &[u8],
     timeout: Duration,
     operation_name: &'static str,
-) -> Result<(), InjectorError> {
+) -> Result<(), HostProcessError> {
     let len = u32::try_from(bytes.len()).map_err(|_| {
-        InjectorError::HostStartupFailed("startup result length does not fit u32".to_string())
+        HostProcessError::StartupFailed("startup result length does not fit u32".to_string())
     })?;
     let mut operation = OverlappedOperation::new("create startup result write event")?;
     let mut written = 0u32;
@@ -606,7 +606,7 @@ fn write_message_with_timeout(
     if ok == FALSE {
         let error = last_os_error();
         if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-            return Err(InjectorError::HostLaunchFailed {
+            return Err(HostProcessError::LaunchFailed {
                 operation: operation_name,
                 source: error,
             });
@@ -622,7 +622,7 @@ fn read_message_waiting(
     handle: HANDLE,
     max_bytes: usize,
     operation_name: &'static str,
-) -> Result<String, InjectorError> {
+) -> Result<String, HostProcessError> {
     let mut bytes = vec![0u8; max_bytes];
     let mut operation = OverlappedOperation::new("create startup acknowledgement read event")?;
     let mut read = 0u32;
@@ -638,7 +638,7 @@ fn read_message_waiting(
     if ok == FALSE {
         let error = last_os_error();
         if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-            return Err(InjectorError::HostLaunchFailed {
+            return Err(HostProcessError::LaunchFailed {
                 operation: operation_name,
                 source: error,
             });
@@ -654,11 +654,11 @@ fn verify_complete_write(
     expected: usize,
     actual: u32,
     message_kind: &'static str,
-) -> Result<(), InjectorError> {
+) -> Result<(), HostProcessError> {
     if actual as usize == expected {
         return Ok(());
     }
-    Err(InjectorError::HostStartupFailed(format!(
+    Err(HostProcessError::StartupFailed(format!(
         "{message_kind} was only partially written"
     )))
 }
@@ -667,20 +667,20 @@ fn wait_for_event(
     event: HANDLE,
     timeout: Duration,
     operation: &'static str,
-) -> Result<(), InjectorError> {
+) -> Result<(), HostProcessError> {
     let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
     let wait =
         unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(event, timeout_ms) };
     match wait {
         WAIT_OBJECT_0 => Ok(()),
-        WAIT_TIMEOUT => Err(InjectorError::HostStartupFailed(format!(
+        WAIT_TIMEOUT => Err(HostProcessError::StartupFailed(format!(
             "{operation} timed out"
         ))),
-        WAIT_FAILED => Err(InjectorError::HostLaunchFailed {
+        WAIT_FAILED => Err(HostProcessError::LaunchFailed {
             operation,
             source: last_os_error(),
         }),
-        value => Err(InjectorError::HostStartupFailed(format!(
+        value => Err(HostProcessError::StartupFailed(format!(
             "unexpected startup wait result {value:#x} during {operation}"
         ))),
     }
@@ -693,10 +693,10 @@ struct OverlappedOperation {
 }
 
 impl OverlappedOperation {
-    fn new(operation: &'static str) -> Result<Self, InjectorError> {
+    fn new(operation: &'static str) -> Result<Self, HostProcessError> {
         let event = unsafe { CreateEventW(null(), TRUE, FALSE, null()) };
         if event.is_null() {
-            return Err(InjectorError::HostLaunchFailed {
+            return Err(HostProcessError::LaunchFailed {
                 operation,
                 source: last_os_error(),
             });
@@ -728,7 +728,7 @@ impl OverlappedOperation {
         self.pending_handle.is_some()
     }
 
-    fn result(&mut self, handle: HANDLE, operation: &'static str) -> Result<u32, InjectorError> {
+    fn result(&mut self, handle: HANDLE, operation: &'static str) -> Result<u32, HostProcessError> {
         self.result_with_wait(handle, operation, FALSE)
     }
 
@@ -736,7 +736,7 @@ impl OverlappedOperation {
         &mut self,
         handle: HANDLE,
         operation: &'static str,
-    ) -> Result<u32, InjectorError> {
+    ) -> Result<u32, HostProcessError> {
         self.result_with_wait(handle, operation, TRUE)
     }
 
@@ -745,7 +745,7 @@ impl OverlappedOperation {
         handle: HANDLE,
         operation: &'static str,
         wait: i32,
-    ) -> Result<u32, InjectorError> {
+    ) -> Result<u32, HostProcessError> {
         let mut transferred = 0u32;
         let ok = unsafe {
             GetOverlappedResult(handle, self.overlapped.as_mut(), &mut transferred, wait)
@@ -754,11 +754,11 @@ impl OverlappedOperation {
         if ok == FALSE {
             let source = last_os_error();
             if source.raw_os_error() == Some(ERROR_MORE_DATA as i32) {
-                return Err(InjectorError::HostStartupFailed(
+                return Err(HostProcessError::StartupFailed(
                     "startup result exceeded maximum length".to_string(),
                 ));
             }
-            return Err(InjectorError::HostLaunchFailed { operation, source });
+            return Err(HostProcessError::LaunchFailed { operation, source });
         }
         Ok(transferred)
     }
@@ -790,7 +790,7 @@ fn last_os_error() -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::InjectorError;
+    use crate::host::{HostProcessError, HostRunError};
 
     use super::{StartupEvent, parse_startup_ack, parse_startup_result, startup_failure_kind};
 
@@ -806,7 +806,7 @@ mod tests {
 
         assert!(matches!(
             event.ensure_not_reported(),
-            Err(InjectorError::HostPanicAlreadyReported)
+            Err(HostProcessError::PanicAlreadyReported)
         ));
     }
 
@@ -832,7 +832,26 @@ mod tests {
         let error =
             parse_startup_result("err\nerror\nmissing hook").expect_err("error result must fail");
 
-        assert!(error.to_string().contains("missing hook"));
+        assert_eq!(error.to_string(), "missing hook");
+    }
+
+    #[test]
+    fn startup_failure_result_preserves_source_display_without_rewrapping() {
+        let process = HostRunError::from(HostProcessError::StartupFailed(
+            "tray initialization failed: boom".to_string(),
+        ));
+        let process_wire = process.to_string();
+        let process_error = parse_startup_result(&format!("err\nerror\n{process_wire}"))
+            .expect_err("process startup failure must parse");
+        assert_eq!(process_error.to_string(), process_wire);
+
+        let control = HostRunError::Control(crate::control::ControlError::Protocol(
+            "bad handshake".to_string(),
+        ));
+        let control_wire = control.to_string();
+        let control_error = parse_startup_result(&format!("err\nerror\n{control_wire}"))
+            .expect_err("control startup failure must parse");
+        assert_eq!(control_error.to_string(), control_wire);
     }
 
     #[test]
@@ -842,7 +861,7 @@ mod tests {
         )
         .expect_err("already running result must be surfaced as a specific error");
 
-        assert!(matches!(error, InjectorError::HostAlreadyRunning));
+        assert!(matches!(error, HostProcessError::AlreadyRunning));
     }
 
     #[test]
@@ -855,7 +874,7 @@ mod tests {
     #[test]
     fn startup_failure_kind_preserves_host_already_running() {
         assert_eq!(
-            startup_failure_kind(&InjectorError::HostAlreadyRunning),
+            startup_failure_kind(&HostRunError::from(HostProcessError::AlreadyRunning)),
             "host_already_running"
         );
     }

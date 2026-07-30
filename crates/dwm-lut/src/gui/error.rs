@@ -1,34 +1,28 @@
 use crate::config;
-use crate::error::InjectorError;
 use crate::host::HostCommandError;
+use crate::paths::PathError;
 use std::fmt;
 
 #[derive(Debug)]
 pub(super) enum GuiError {
-    Injector(InjectorError),
     Config(config::ConfigError),
     Host(HostCommandError),
+    Path(PathError),
     InvalidEdit(String),
 }
 
 impl fmt::Display for GuiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Injector(error) => error.fmt(formatter),
             Self::Config(error) => error.fmt(formatter),
             Self::Host(error) => error.fmt(formatter),
+            Self::Path(error) => error.fmt(formatter),
             Self::InvalidEdit(message) => formatter.write_str(message),
         }
     }
 }
 
 impl std::error::Error for GuiError {}
-
-impl From<InjectorError> for GuiError {
-    fn from(value: InjectorError) -> Self {
-        Self::Injector(value)
-    }
-}
 
 impl From<config::ConfigError> for GuiError {
     fn from(value: config::ConfigError) -> Self {
@@ -39,5 +33,11 @@ impl From<config::ConfigError> for GuiError {
 impl From<HostCommandError> for GuiError {
     fn from(value: HostCommandError) -> Self {
         Self::Host(value)
+    }
+}
+
+impl From<PathError> for GuiError {
+    fn from(value: PathError) -> Self {
+        Self::Path(value)
     }
 }

@@ -7,7 +7,9 @@ fn main() {
     let exit_code = match dwm_lut::entry::parse_app_args() {
         Ok(dwm_lut::entry::AppMode::Launcher) => match dwm_lut::run_app_launcher() {
             Ok(()) => 0,
-            Err(dwm_lut::error::InjectorError::HostPanicAlreadyReported) => 1,
+            Err(dwm_lut::host::HostRunError::Process(
+                dwm_lut::host::HostProcessError::PanicAlreadyReported,
+            )) => 1,
             Err(error) => {
                 dwm_lut::show_error(&error.to_string());
                 1

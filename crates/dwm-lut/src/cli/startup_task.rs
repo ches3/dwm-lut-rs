@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::fmt;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -18,15 +19,76 @@ use windows::core::{BSTR, Interface};
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, FALSE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 
-use crate::error::InjectorError;
-use crate::platform::elevation;
-use crate::platform::security::UserSid;
+use crate::paths::PathError;
+use crate::platform::elevation::{self, ElevationError};
+use crate::platform::security::{SecurityError, UserSid};
+
+#[derive(Debug)]
+pub enum StartupTaskError {
+    Elevation(ElevationError),
+    LaunchFailed {
+        operation: &'static str,
+        source: io::Error,
+    },
+    OperationFailed {
+        operation: &'static str,
+        exit_code: u32,
+    },
+    Path(PathError),
+    Security(SecurityError),
+}
+
+impl fmt::Display for StartupTaskError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Elevation(ElevationError::Cancelled) => {
+                write!(f, "startup task elevation was canceled")
+            }
+            Self::Elevation(ElevationError::RequiresAdministratorUser) => write!(
+                f,
+                "startup task installation and removal require signing in with an administrator account"
+            ),
+            Self::Elevation(error) => write!(f, "startup task {error}"),
+            Self::LaunchFailed { operation, source } => {
+                write!(f, "startup task {operation} failed: {source}")
+            }
+            Self::OperationFailed {
+                operation,
+                exit_code,
+            } => write!(
+                f,
+                "startup task {operation} failed with exit code {exit_code:#x}"
+            ),
+            Self::Path(error) => error.fmt(f),
+            Self::Security(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for StartupTaskError {}
+
+impl From<ElevationError> for StartupTaskError {
+    fn from(value: ElevationError) -> Self {
+        Self::Elevation(value)
+    }
+}
+
+impl From<PathError> for StartupTaskError {
+    fn from(value: PathError) -> Self {
+        Self::Path(value)
+    }
+}
+
+impl From<SecurityError> for StartupTaskError {
+    fn from(value: SecurityError) -> Self {
+        Self::Security(value)
+    }
+}
 
 const TASK_NAME_PREFIX: &str = "dwm-lut-rs-";
-const HOST_EXE_NAME: &str = "dwm-lut.exe";
 const INFINITE: u32 = u32::MAX;
 
-pub(crate) fn install() -> Result<(), InjectorError> {
+pub(crate) fn install() -> Result<(), StartupTaskError> {
     if current_process_is_elevated()? {
         install_elevated()
     } else {
@@ -35,7 +97,7 @@ pub(crate) fn install() -> Result<(), InjectorError> {
     }
 }
 
-pub(crate) fn uninstall() -> Result<(), InjectorError> {
+pub(crate) fn uninstall() -> Result<(), StartupTaskError> {
     if current_process_is_elevated()? {
         uninstall_elevated()
     } else {
@@ -44,24 +106,22 @@ pub(crate) fn uninstall() -> Result<(), InjectorError> {
     }
 }
 
-fn current_process_is_elevated() -> Result<bool, InjectorError> {
-    elevation::is_process_elevated().map_err(|source| InjectorError::StartupTaskLaunchFailed {
+fn current_process_is_elevated() -> Result<bool, StartupTaskError> {
+    elevation::is_process_elevated().map_err(|source| StartupTaskError::LaunchFailed {
         operation: "elevation check",
         source,
     })
 }
 
 fn current_process_elevation_type()
--> Result<windows_sys::Win32::Security::TOKEN_ELEVATION_TYPE, InjectorError> {
-    elevation::current_token_elevation_type().map_err(|source| {
-        InjectorError::StartupTaskLaunchFailed {
-            operation: "elevation type check",
-            source,
-        }
+-> Result<windows_sys::Win32::Security::TOKEN_ELEVATION_TYPE, StartupTaskError> {
+    elevation::current_token_elevation_type().map_err(|source| StartupTaskError::LaunchFailed {
+        operation: "elevation type check",
+        source,
     })
 }
 
-fn install_elevated() -> Result<(), InjectorError> {
+fn install_elevated() -> Result<(), StartupTaskError> {
     let host_path = installed_host_path()?;
     let user_sid = UserSid::current_process()?;
     let result = with_task_service(|service| unsafe {
@@ -108,7 +168,7 @@ fn install_elevated() -> Result<(), InjectorError> {
     map_com_result("installation", result)
 }
 
-fn uninstall_elevated() -> Result<(), InjectorError> {
+fn uninstall_elevated() -> Result<(), StartupTaskError> {
     let user_sid = UserSid::current_process()?;
     let result = with_task_service(|service| unsafe {
         let task_name = BSTR::from(startup_task_name(user_sid.as_sddl()));
@@ -141,62 +201,44 @@ fn with_task_service<T>(
 fn map_com_result(
     operation: &'static str,
     result: windows::core::Result<()>,
-) -> Result<(), InjectorError> {
-    result.map_err(|error| InjectorError::StartupTaskOperationFailed {
+) -> Result<(), StartupTaskError> {
+    result.map_err(|error| StartupTaskError::OperationFailed {
         operation,
         exit_code: error.code().0 as u32,
     })
 }
 
-fn installed_host_path() -> Result<PathBuf, InjectorError> {
-    let cli_path =
-        std::env::current_exe().map_err(|source| InjectorError::StartupTaskLaunchFailed {
-            operation: "install executable resolution",
-            source,
-        })?;
-    let directory = cli_path
-        .parent()
-        .ok_or_else(|| InjectorError::StartupTaskLaunchFailed {
-            operation: "host executable resolution",
-            source: io::Error::other("CLI executable has no parent directory"),
-        })?;
-    let host_path = directory.join(HOST_EXE_NAME);
-    if !host_path.is_file() {
-        return Err(InjectorError::MissingFile {
-            kind: "host executable",
-            path: host_path,
-        });
-    }
-    Ok(host_path)
+fn installed_host_path() -> Result<PathBuf, StartupTaskError> {
+    Ok(crate::entry::launcher::resolve_host_executable_path(None)?)
 }
 
 fn startup_task_name(user_sid: &str) -> String {
     format!("{TASK_NAME_PREFIX}{user_sid}")
 }
 
-fn run_elevated_cli(operation: &'static str, command: &str) -> Result<(), InjectorError> {
+fn run_elevated_cli(operation: &'static str, command: &str) -> Result<(), StartupTaskError> {
     let executable = std::env::current_exe()
-        .map_err(|source| InjectorError::StartupTaskLaunchFailed { operation, source })?;
+        .map_err(|source| StartupTaskError::LaunchFailed { operation, source })?;
     let parameters = OsStr::new(command).encode_wide().collect::<Vec<_>>();
     let process = elevation::run_as(&executable, &parameters).map_err(|error| match error {
-        elevation::RunAsError::Cancelled => InjectorError::StartupTaskElevationCancelled,
+        elevation::RunAsError::Cancelled => StartupTaskError::Elevation(ElevationError::Cancelled),
         elevation::RunAsError::Launch(source) => {
-            InjectorError::StartupTaskLaunchFailed { operation, source }
+            StartupTaskError::LaunchFailed { operation, source }
         }
-        elevation::RunAsError::MissingProcessHandle => InjectorError::StartupTaskLaunchFailed {
+        elevation::RunAsError::MissingProcessHandle => StartupTaskError::LaunchFailed {
             operation,
             source: io::Error::other("elevated CLI returned no process handle"),
         },
     })?;
     if unsafe { WaitForSingleObject(process.handle(), INFINITE) } != WAIT_OBJECT_0 {
-        return Err(InjectorError::StartupTaskLaunchFailed {
+        return Err(StartupTaskError::LaunchFailed {
             operation,
             source: last_os_error(),
         });
     }
     let mut exit_code = 0;
     if unsafe { GetExitCodeProcess(process.handle(), &mut exit_code) } == FALSE {
-        return Err(InjectorError::StartupTaskLaunchFailed {
+        return Err(StartupTaskError::LaunchFailed {
             operation,
             source: last_os_error(),
         });
@@ -204,7 +246,7 @@ fn run_elevated_cli(operation: &'static str, command: &str) -> Result<(), Inject
     if exit_code == 0 {
         Ok(())
     } else {
-        Err(InjectorError::StartupTaskOperationFailed {
+        Err(StartupTaskError::OperationFailed {
             operation,
             exit_code,
         })
@@ -213,13 +255,15 @@ fn run_elevated_cli(operation: &'static str, command: &str) -> Result<(), Inject
 
 fn require_limited_admin_token(
     elevation_type: windows_sys::Win32::Security::TOKEN_ELEVATION_TYPE,
-) -> Result<(), InjectorError> {
+) -> Result<(), StartupTaskError> {
     use windows_sys::Win32::Security::TokenElevationTypeLimited;
 
     if elevation_type == TokenElevationTypeLimited {
         Ok(())
     } else {
-        Err(InjectorError::StartupTaskRequiresAdministratorUser)
+        Err(StartupTaskError::Elevation(
+            ElevationError::RequiresAdministratorUser,
+        ))
     }
 }
 

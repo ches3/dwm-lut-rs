@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Security::{TOKEN_ELEVATION_TYPE, TokenElevationTypeLimited};
 
-use crate::error::InjectorError;
-use crate::platform::elevation;
+use crate::host::HostProcessError;
+use crate::platform::elevation::{self, ElevationError};
 
 pub(crate) use super::startup_ipc::StartupNotifier;
 use super::startup_ipc::{StartupEvent, StartupResultPipe};
@@ -19,7 +19,7 @@ const NEWLINE: u16 = b'\n' as u16;
 pub(crate) fn start_background_host(
     executable: &Path,
     dll_path: Option<PathBuf>,
-) -> Result<(), InjectorError> {
+) -> Result<(), HostProcessError> {
     require_same_user_elevation()?;
     let startup_pipe = StartupResultPipe::new()?;
     let panic_event = StartupEvent::new("panic", "create panic report event")?;
@@ -28,22 +28,14 @@ pub(crate) fn start_background_host(
         Some(startup_pipe.name()),
         Some(panic_event.name()),
     );
-    let process = elevation::run_as(executable, &command_line).map_err(|error| match error {
-        elevation::RunAsError::Cancelled => InjectorError::HostElevationCancelled,
-        elevation::RunAsError::Launch(source) => InjectorError::HostLaunchFailed {
-            operation: "request elevation",
-            source,
-        },
-        elevation::RunAsError::MissingProcessHandle => InjectorError::HostStartupFailed(
-            "elevated host launch returned no process handle".to_string(),
-        ),
-    })?;
+    let process = elevation::run_as(executable, &command_line)
+        .map_err(|error| ElevationError::from_run_as("request elevation", error))?;
     startup_pipe.wait(&process, &panic_event)
 }
 
-fn require_same_user_elevation() -> Result<(), InjectorError> {
+fn require_same_user_elevation() -> Result<(), HostProcessError> {
     let is_elevated =
-        elevation::is_process_elevated().map_err(|source| InjectorError::HostLaunchFailed {
+        elevation::is_process_elevated().map_err(|source| HostProcessError::LaunchFailed {
             operation: "check process elevation",
             source,
         })?;
@@ -51,7 +43,7 @@ fn require_same_user_elevation() -> Result<(), InjectorError> {
         return Ok(());
     }
     let elevation_type = elevation::current_token_elevation_type().map_err(|source| {
-        InjectorError::HostLaunchFailed {
+        HostProcessError::LaunchFailed {
             operation: "check process elevation type",
             source,
         }
@@ -62,11 +54,13 @@ fn require_same_user_elevation() -> Result<(), InjectorError> {
 fn validate_same_user_elevation(
     is_elevated: bool,
     elevation_type: TOKEN_ELEVATION_TYPE,
-) -> Result<(), InjectorError> {
+) -> Result<(), HostProcessError> {
     if is_elevated || elevation_type == TokenElevationTypeLimited {
         Ok(())
     } else {
-        Err(InjectorError::HostRequiresAdministratorUser)
+        Err(HostProcessError::Elevation(
+            ElevationError::RequiresAdministratorUser,
+        ))
     }
 }
 
@@ -217,7 +211,9 @@ mod tests {
     fn standard_user_token_cannot_launch_host_as_another_user() {
         assert!(matches!(
             validate_same_user_elevation(false, TokenElevationTypeDefault),
-            Err(InjectorError::HostRequiresAdministratorUser)
+            Err(HostProcessError::Elevation(
+                ElevationError::RequiresAdministratorUser
+            ))
         ));
     }
 
