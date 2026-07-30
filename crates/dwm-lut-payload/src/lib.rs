@@ -10,7 +10,7 @@ pub use status::{
 };
 
 #[cfg(not(target_pointer_width = "64"))]
-compile_error!("dwm-lut-rs supports only 64-bit Windows targets");
+compile_error!("dwm-lut-payload supports only 64-bit targets");
 
 pub const PAYLOAD_VERSION: u32 = 2;
 pub const PAYLOAD_HEADER_LEN: u32 = 12;

@@ -1,3 +1,11 @@
+#[cfg(not(all(
+    target_arch = "x86_64",
+    target_vendor = "pc",
+    target_os = "windows",
+    target_env = "msvc",
+)))]
+compile_error!("dwm-lut-hook supports only x86_64-pc-windows-msvc");
+
 mod bootstrap;
 mod d3d11;
 mod desktop_redraw;
