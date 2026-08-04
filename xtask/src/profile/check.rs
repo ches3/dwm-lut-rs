@@ -6,7 +6,7 @@ use comfy_table::presets::NOTHING;
 use comfy_table::{Cell, Color, Table, TableComponent};
 use dwm_lut_profile::{
     DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError, SignatureScanError,
-    resolve_signature_rva, select_versioned_profile,
+    resolve_signature_rva, select_profile,
 };
 
 use super::ensure;
@@ -36,8 +36,8 @@ pub(super) fn run(args: Args) -> Result<(), Box<dyn Error>> {
         build: u32::from(pe.file_version.build),
         revision: u32::from(pe.file_version.revision),
     };
-    let entry = select_versioned_profile(version).map_err(profile_select_io_error)?;
-    let profile = (entry.profile)();
+    let selected = select_profile(version).map_err(profile_select_io_error)?;
+    let profile = (selected.profile)();
 
     let pubs = PdbPublics::load(&pdb_path)?;
     pubs.verify_against_pe(&pe.codeview)?;
@@ -45,7 +45,7 @@ pub(super) fn run(args: Args) -> Result<(), Box<dyn Error>> {
 
     println!();
     println!("version  10.0.{version}");
-    println!("profile  >= 10.0.{}", entry.min_version);
+    println!("profile  >= 10.0.{}", selected.min_version);
     println!("dll      {}", dll_path.display());
     println!("pdb      {}", pdb_path.display());
     println!();

@@ -13,11 +13,12 @@ pub use scan::{
     SkippedSignature, SkippedSignatureReason, match_aob, resolve_signature_rva, scan_profile,
 };
 pub use target::HookTarget;
-pub use version::{DWMCORE_MODULE_NAME, DwmcoreVersion, ProfileSelectError, VersionedProfile};
-pub use versions::VERSIONED_PROFILES;
+pub use version::{
+    DWMCORE_MODULE_NAME, DwmcoreVersion, ProfileSelectError, RevisionProfile, SelectedProfile,
+    SupportedBuild,
+};
+pub use versions::SUPPORTED_BUILDS;
 
-pub fn select_versioned_profile(
-    version: DwmcoreVersion,
-) -> Result<&'static VersionedProfile, ProfileSelectError> {
-    version::select_versioned_profile(VERSIONED_PROFILES, version)
+pub fn select_profile(version: DwmcoreVersion) -> Result<SelectedProfile, ProfileSelectError> {
+    version::select_profile(SUPPORTED_BUILDS, version)
 }

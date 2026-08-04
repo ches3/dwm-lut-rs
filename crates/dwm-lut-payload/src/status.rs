@@ -202,10 +202,7 @@ impl fmt::Display for InitializeStatus {
                 write!(f, "dwmcore.dll FileVersion could not be queried")
             }
             Self::UnsupportedDwmcoreVersion => {
-                write!(
-                    f,
-                    "dwmcore.dll FileVersion is below the minimum supported hook profile"
-                )
+                write!(f, "dwmcore.dll FileVersion is not supported")
             }
             Self::PayloadDecodeFailed => write!(f, "payload could not be decoded"),
             Self::PayloadHasNoAssignments => {

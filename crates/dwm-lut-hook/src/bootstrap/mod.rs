@@ -26,7 +26,7 @@ use crate::state::{
     lock_present_runtime, minhook_cleanup_plan, reactivate_retained_state, replace_lut_assignments,
     retain_state_after_shutdown,
 };
-use dwm_lut_profile::{HookProfile, select_versioned_profile};
+use dwm_lut_profile::{HookProfile, select_profile};
 
 #[cfg(test)]
 pub(crate) fn initialize_with_resolution(
@@ -201,9 +201,9 @@ fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
         reactivate_from_payload(payload)
     } else {
         let dwmcore_version = dwmcore_file_version()?;
-        let entry = select_versioned_profile(dwmcore_version)?;
-        log::profile_selected(entry.min_version, dwmcore_version);
-        let profile = (entry.profile)();
+        let selected = select_profile(dwmcore_version)?;
+        log::profile_selected(selected.min_version, dwmcore_version);
+        let profile = (selected.profile)();
 
         let state = prepare_initial_state(profile, payload, resolve_profile)?;
         install_prepared_state(state)
@@ -303,15 +303,18 @@ mod tests {
     use crate::resolver::{HookResolveError, SignatureResolutionReport};
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK};
     use dwm_lut_profile::{
-        DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError, VERSIONED_PROFILES,
+        DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError, SUPPORTED_BUILDS,
     };
 
     use super::HookError;
 
     fn test_profile() -> HookProfile {
-        (VERSIONED_PROFILES
+        (SUPPORTED_BUILDS
+            .first()
+            .expect("SUPPORTED_BUILDS is non-empty")
+            .profiles
             .last()
-            .expect("VERSIONED_PROFILES is non-empty")
+            .expect("supported build must include profiles")
             .profile)()
     }
 

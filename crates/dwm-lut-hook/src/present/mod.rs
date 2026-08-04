@@ -64,14 +64,17 @@ pub(crate) mod test_support {
     use crate::minhook;
     use crate::resolver::SignatureResolutionReport;
     use crate::state;
-    use dwm_lut_profile::{HookProfile, HookTarget, VERSIONED_PROFILES};
+    use dwm_lut_profile::{HookProfile, HookTarget, SUPPORTED_BUILDS};
 
     use super::collect::{RectVec, read_dirty_rects};
 
     pub(crate) fn test_profile() -> HookProfile {
-        (VERSIONED_PROFILES
+        (SUPPORTED_BUILDS
+            .first()
+            .expect("SUPPORTED_BUILDS is non-empty")
+            .profiles
             .last()
-            .expect("VERSIONED_PROFILES is non-empty")
+            .expect("supported build must include profiles")
             .profile)()
     }
 
