@@ -13,6 +13,7 @@ use windows::Win32::System::Memory::{
 use crate::lifecycle;
 #[cfg(debug_assertions)]
 use crate::log::SharedLimiter;
+use crate::resolver::Va;
 
 const OVERLAY_TEST_MODE_FORCE: i32 = 5;
 
@@ -69,14 +70,14 @@ pub(crate) fn apply_flip_gate<T: Default>(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GlobalI32Patch {
-    address: usize,
+    va: Va,
     original: Option<i32>,
     applied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DisableIndependentFlipPatch {
-    address: usize,
+    va: Va,
     original: Option<i32>,
     applied: bool,
     rejected: bool,
@@ -90,26 +91,23 @@ pub struct FlipGateEffects {
 }
 
 impl FlipGateEffects {
-    pub fn new(
-        overlay_test_mode_address: Option<usize>,
-        disable_independent_flip_address: Option<usize>,
-    ) -> Self {
+    pub fn new(overlay_test_mode_va: Option<Va>, disable_independent_flip_va: Option<Va>) -> Self {
         Self {
-            overlay_test_mode: overlay_test_mode_address
-                .filter(|address| *address != 0)
-                .map(|address| GlobalI32Patch {
-                    address,
+            overlay_test_mode: overlay_test_mode_va.filter(|Va(va)| *va != 0).map(|va| {
+                GlobalI32Patch {
+                    va,
                     original: None,
                     applied: false,
-                }),
-            disable_independent_flip: disable_independent_flip_address
-                .filter(|address| *address != 0)
-                .map(|address| DisableIndependentFlipPatch {
-                    address,
+                }
+            }),
+            disable_independent_flip: disable_independent_flip_va.filter(|Va(va)| *va != 0).map(
+                |va| DisableIndependentFlipPatch {
+                    va,
                     original: None,
                     applied: false,
                     rejected: false,
-                }),
+                },
+            ),
             overlays_enabled_override: None,
         }
     }
@@ -133,9 +131,9 @@ impl FlipGateEffects {
         if patch.applied {
             return;
         }
-        let original = unsafe { read_i32(patch.address) };
+        let original = unsafe { read_i32(patch.va) };
         patch.original = Some(original);
-        unsafe { write_i32(patch.address, OVERLAY_TEST_MODE_FORCE) };
+        unsafe { write_i32(patch.va, OVERLAY_TEST_MODE_FORCE) };
         patch.applied = true;
     }
 
@@ -146,7 +144,7 @@ impl FlipGateEffects {
         if !patch.applied {
             return;
         }
-        unsafe { write_i32(patch.address, patch.original.unwrap_or(0)) };
+        unsafe { write_i32(patch.va, patch.original.unwrap_or(0)) };
         patch.applied = false;
     }
 
@@ -158,7 +156,7 @@ impl FlipGateEffects {
             return;
         }
 
-        if !is_writable_i32(patch.address) {
+        if !is_writable_i32(patch.va) {
             patch.rejected = true;
             crate::log::independent_flip(crate::log::IndependentFlipOutcome::Rejected(
                 crate::log::IndependentFlipRejectReason::PageNotWritable,
@@ -166,7 +164,7 @@ impl FlipGateEffects {
             return;
         }
 
-        let original = unsafe { read_i32(patch.address) };
+        let original = unsafe { read_i32(patch.va) };
         if original != 0 && original != 1 {
             patch.rejected = true;
             crate::log::independent_flip(crate::log::IndependentFlipOutcome::Rejected(
@@ -176,7 +174,7 @@ impl FlipGateEffects {
         }
 
         patch.original = Some(original);
-        unsafe { write_i32(patch.address, 1) };
+        unsafe { write_i32(patch.va, 1) };
         patch.applied = true;
         crate::log::independent_flip(crate::log::IndependentFlipOutcome::Applied);
     }
@@ -188,7 +186,7 @@ impl FlipGateEffects {
         if !patch.applied {
             return;
         }
-        unsafe { write_i32(patch.address, patch.original.unwrap_or(0)) };
+        unsafe { write_i32(patch.va, patch.original.unwrap_or(0)) };
         patch.applied = false;
         crate::log::independent_flip(crate::log::IndependentFlipOutcome::Restored);
     }
@@ -216,18 +214,18 @@ impl Default for FlipGateEffects {
     }
 }
 
-unsafe fn read_i32(address: usize) -> i32 {
-    unsafe { (address as *const i32).read_volatile() }
+unsafe fn read_i32(Va(va): Va) -> i32 {
+    unsafe { (va as *const i32).read_volatile() }
 }
 
-unsafe fn write_i32(address: usize, value: i32) {
-    unsafe { (address as *mut i32).write_volatile(value) };
+unsafe fn write_i32(Va(va): Va, value: i32) {
+    unsafe { (va as *mut i32).write_volatile(value) };
 }
 
-fn is_writable_i32(address: usize) -> bool {
+fn is_writable_i32(Va(va): Va) -> bool {
     #[cfg(test)]
     {
-        let _ = address;
+        let _ = va;
         true
     }
     #[cfg(not(test))]
@@ -235,7 +233,7 @@ fn is_writable_i32(address: usize) -> bool {
         let mut info = MEMORY_BASIC_INFORMATION::default();
         let written = unsafe {
             VirtualQuery(
-                Some(address as *const c_void),
+                Some(va as *const c_void),
                 &mut info,
                 size_of::<MEMORY_BASIC_INFORMATION>(),
             )
@@ -263,7 +261,12 @@ mod tests {
     use super::FlipGateKind;
     use super::{FlipGateEffects, apply_flip_gate};
     use crate::lifecycle;
+    use crate::resolver::Va;
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK};
+
+    fn va_of(value: &mut i32) -> Va {
+        Va((value as *mut i32) as usize)
+    }
 
     unsafe extern "system" fn unused_original(_this: usize) -> u8 {
         1
@@ -346,8 +349,7 @@ mod tests {
     #[test]
     fn overlay_test_mode_is_patched_while_applied() {
         let mut overlay_mode = 0i32;
-        let mut effects =
-            FlipGateEffects::new(Some((&mut overlay_mode as *mut i32) as usize), None);
+        let mut effects = FlipGateEffects::new(Some(va_of(&mut overlay_mode)), None);
 
         effects.apply();
         assert_eq!(overlay_mode, 5);
@@ -359,10 +361,7 @@ mod tests {
     #[test]
     fn disable_independent_flip_is_patched_while_applied() {
         let mut disable_independent_flip = 0i32;
-        let mut effects = FlipGateEffects::new(
-            None,
-            Some((&mut disable_independent_flip as *mut i32) as usize),
-        );
+        let mut effects = FlipGateEffects::new(None, Some(va_of(&mut disable_independent_flip)));
 
         effects.apply();
         assert_eq!(disable_independent_flip, 1);
@@ -374,10 +373,7 @@ mod tests {
     #[test]
     fn disable_independent_flip_rejects_unexpected_value() {
         let mut disable_independent_flip = 7i32;
-        let mut effects = FlipGateEffects::new(
-            None,
-            Some((&mut disable_independent_flip as *mut i32) as usize),
-        );
+        let mut effects = FlipGateEffects::new(None, Some(va_of(&mut disable_independent_flip)));
 
         effects.apply();
 
@@ -394,10 +390,7 @@ mod tests {
     #[test]
     fn overlays_enabled_override_is_true_when_dif_is_applied() {
         let mut disable_independent_flip = 0i32;
-        let mut effects = FlipGateEffects::new(
-            None,
-            Some((&mut disable_independent_flip as *mut i32) as usize),
-        );
+        let mut effects = FlipGateEffects::new(None, Some(va_of(&mut disable_independent_flip)));
 
         effects.apply();
 
@@ -418,8 +411,8 @@ mod tests {
         let mut overlay_mode = 0i32;
         let mut disable_independent_flip = 0i32;
         let mut effects = FlipGateEffects::new(
-            Some((&mut overlay_mode as *mut i32) as usize),
-            Some((&mut disable_independent_flip as *mut i32) as usize),
+            Some(va_of(&mut overlay_mode)),
+            Some(va_of(&mut disable_independent_flip)),
         );
 
         effects.apply();
@@ -436,8 +429,7 @@ mod tests {
     #[test]
     fn apply_is_idempotent() {
         let mut overlay_mode = 0i32;
-        let mut effects =
-            FlipGateEffects::new(Some((&mut overlay_mode as *mut i32) as usize), None);
+        let mut effects = FlipGateEffects::new(Some(va_of(&mut overlay_mode)), None);
 
         effects.apply();
         overlay_mode = 9;

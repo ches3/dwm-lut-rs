@@ -1429,6 +1429,7 @@ name = "dwm-lut-hook"
 version = "0.1.0"
 dependencies = [
  "dwm-lut-payload",
+ "dwm-lut-profile",
  "microseh",
  "minhook-sys",
  "windows",
@@ -1441,6 +1442,10 @@ version = "0.1.0"
 dependencies = [
  "bincode",
 ]
+
+[[package]]
+name = "dwm-lut-profile"
+version = "0.1.0"
 
 [[package]]
 name = "either"
@@ -6940,7 +6945,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "comfy-table",
- "dwm-lut-hook",
+ "dwm-lut-profile",
  "flate2",
  "iced-x86",
  "ico",

@@ -7,7 +7,7 @@ use crate::DirtyRect;
 use crate::flip_gate::FlipGateKind;
 use crate::flip_gate::apply_flip_gate;
 use crate::lifecycle;
-use crate::profile::HookTarget;
+use dwm_lut_profile::HookTarget;
 
 type PresentOriginal = unsafe extern "system" fn(usize, usize, u32, usize, i32, usize, u8) -> i64;
 type OverlayDirectFlipOriginal =

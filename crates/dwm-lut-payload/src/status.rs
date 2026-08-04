@@ -34,6 +34,8 @@ pub enum ResolveFailureKind {
     NotFound = 1,
     Ambiguous = 2,
     PrologueConflict = 3,
+    OutOfBounds = 4,
+    IncompatibleLocator = 5,
 }
 
 impl ResolveFailureKind {
@@ -42,6 +44,8 @@ impl ResolveFailureKind {
             1 => Some(Self::NotFound),
             2 => Some(Self::Ambiguous),
             3 => Some(Self::PrologueConflict),
+            4 => Some(Self::OutOfBounds),
+            5 => Some(Self::IncompatibleLocator),
             _ => None,
         }
     }
@@ -220,6 +224,12 @@ impl fmt::Display for InitializeStatus {
                     ResolveFailureKind::PrologueConflict => {
                         write!(f, "{label} prologue is modified by a conflicting hook")
                     }
+                    ResolveFailureKind::OutOfBounds => {
+                        write!(f, "{label} RIP-relative target was out of bounds")
+                    }
+                    ResolveFailureKind::IncompatibleLocator => {
+                        write!(f, "{label} locator is incompatible with the target")
+                    }
                 }
             }
         }
@@ -394,6 +404,26 @@ mod tests {
         assert_eq!(
             InitializeStatus::from_code(0x0001_0309),
             Some(overlays_prologue)
+        );
+
+        let present_out_of_bounds = InitializeStatus::Resolve {
+            kind: ResolveFailureKind::OutOfBounds,
+            target: HookTargetId::Present,
+        };
+        assert_eq!(present_out_of_bounds.to_code(), 0x0001_0401);
+        assert_eq!(
+            InitializeStatus::from_code(0x0001_0401),
+            Some(present_out_of_bounds)
+        );
+
+        let present_incompatible = InitializeStatus::Resolve {
+            kind: ResolveFailureKind::IncompatibleLocator,
+            target: HookTargetId::Present,
+        };
+        assert_eq!(present_incompatible.to_code(), 0x0001_0501);
+        assert_eq!(
+            InitializeStatus::from_code(0x0001_0501),
+            Some(present_incompatible)
         );
     }
 

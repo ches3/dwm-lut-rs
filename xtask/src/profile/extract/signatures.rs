@@ -1,12 +1,11 @@
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
-use dwm_lut_hook::{AobToken, HookTarget};
+use dwm_lut_profile::{AobMatch, AobToken, HookTarget, Rva, match_aob};
 
 use super::report::{LocatorKind, SignatureReport, SignatureStatus, format_rva};
 use super::symbols::{
     EXTRACT_TARGETS, MAX_LEN, MIN_INSNS, ResolvedSymbol, SymbolResolveError,
-    resolve_disable_independent_flip_global, resolve_function_symbol,
-    resolve_overlay_test_mode_global,
+    resolve_function_symbol, resolve_global_symbol,
 };
 use crate::profile::pdb_publics::PdbPublics;
 use crate::profile::pe::PeImage;
@@ -82,7 +81,7 @@ fn extract_overlay_test_mode(
     pe: &PeImage,
     pubs: &PdbPublics,
 ) -> (SignatureReport, Option<Vec<AobToken>>) {
-    let global = match resolve_overlay_test_mode_global(pubs) {
+    let global = match resolve_global_symbol(HookTarget::OverlayTestMode, pubs) {
         Ok(symbol) => symbol,
         Err(error) => {
             return (
@@ -202,7 +201,7 @@ fn extract_overlays_enabled(
 }
 
 fn extract_disable_independent_flip(pe: &PeImage, pubs: &PdbPublics) -> SignatureReport {
-    let global = match resolve_disable_independent_flip_global(pubs) {
+    let global = match resolve_global_symbol(HookTarget::DisableIndependentFlip, pubs) {
         Ok(symbol) => symbol,
         Err(error) => {
             return SignatureReport {
@@ -301,8 +300,10 @@ fn uniquify_at_rva(
 
         let bytes = pe.bytes_at(anchor_rva, len)?;
         let tokens = apply_wildcards(bytes, profile);
-        let hits = scan_aob(&pe.image, &tokens);
-        if hits.len() == 1 && hits[0] == anchor_rva as usize {
+        if matches!(
+            match_aob(&pe.image, &tokens),
+            AobMatch::Unique(Rva(offset)) if offset == anchor_rva as usize
+        ) {
             return Ok(UniquePattern { tokens });
         }
 
@@ -387,30 +388,6 @@ fn apply_wildcards(bytes: &[u8], profile: WildcardProfile) -> Vec<AobToken> {
     tokens
 }
 
-pub fn scan_aob(image: &[u8], tokens: &[AobToken]) -> Vec<usize> {
-    if tokens.is_empty() || tokens.len() > image.len() {
-        return Vec::new();
-    }
-    let mut hits = Vec::new();
-    let last = image.len() - tokens.len();
-    for offset in 0..=last {
-        if tokens_match(&image[offset..offset + tokens.len()], tokens) {
-            hits.push(offset);
-            if hits.len() > 8 {
-                break;
-            }
-        }
-    }
-    hits
-}
-
-fn tokens_match(bytes: &[u8], tokens: &[AobToken]) -> bool {
-    bytes.iter().zip(tokens).all(|(byte, token)| match token {
-        AobToken::Exact(expected) => byte == expected,
-        AobToken::Wildcard => true,
-    })
-}
-
 fn tokens_to_aob(tokens: &[AobToken]) -> String {
     tokens
         .iter()
@@ -463,22 +440,4 @@ fn verify_rip_relative_points_to(
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::scan_aob;
-    use dwm_lut_hook::AobToken;
-
-    #[test]
-    fn scan_respects_wildcards_and_uniqueness() {
-        let image = [0x11, 0x22, 0x33, 0x44, 0x11, 0x99, 0x33, 0x44];
-        let tokens = [
-            AobToken::Exact(0x11),
-            AobToken::Wildcard,
-            AobToken::Exact(0x33),
-            AobToken::Exact(0x44),
-        ];
-        assert_eq!(scan_aob(&image, &tokens), vec![0, 4]);
-    }
 }

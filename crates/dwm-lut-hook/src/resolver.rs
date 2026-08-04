@@ -7,15 +7,16 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::ptr;
 
+use dwm_lut_profile::{
+    AobToken, DWMCORE_MODULE_NAME, HookProfile, HookTarget, Rva, SignatureLocator,
+    SignatureScanError, SignatureScanReport, SkippedSignature, scan_profile,
+};
+
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows_sys::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READONLY,
     SEC_IMAGE_NO_EXECUTE, UnmapViewOfFile,
-};
-
-use crate::profile::{
-    AobToken, HOOK_MODULE_NAME, HookProfile, HookSignature, HookTarget, SignatureLocator,
 };
 
 const IMAGE_DOS_SIGNATURE: u16 = 0x5A4D;
@@ -109,30 +110,39 @@ pub struct LoadedModule {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResolvedTarget {
-    pub target: HookTarget,
-    pub address: usize,
-}
+pub struct Va(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkippedSignatureReason {
-    NotFound,
-    Ambiguous { matches: usize },
+pub struct ResolvedFunctionVa {
+    target: HookTarget,
+    va: Va,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SkippedSignature {
-    pub target: HookTarget,
-    pub reason: SkippedSignatureReason,
+impl ResolvedFunctionVa {
+    pub(crate) fn new(target: HookTarget, va: Va) -> Self {
+        debug_assert!(
+            target.is_function_hook_target(),
+            "ResolvedFunctionVa requires a function hook target"
+        );
+        Self { target, va }
+    }
+
+    pub fn target(self) -> HookTarget {
+        self.target
+    }
+
+    pub fn va(self) -> Va {
+        self.va
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureResolutionReport {
     pub module: LoadedModule,
-    pub function_targets: Vec<ResolvedTarget>,
-    pub overlay_test_mode: Option<usize>,
-    pub disable_independent_flip: Option<usize>,
-    pub skipped_signatures: Vec<SkippedSignature>,
+    pub function_targets: Vec<ResolvedFunctionVa>,
+    pub overlay_test_mode: Option<Va>,
+    pub disable_independent_flip: Option<Va>,
+    pub skipped: Vec<SkippedSignature>,
 }
 
 impl SignatureResolutionReport {
@@ -144,22 +154,21 @@ impl SignatureResolutionReport {
             .iter()
             .enumerate()
             .filter(|(_, signature)| signature.target.is_function_hook_target())
-            .map(|(index, signature)| ResolvedTarget {
-                target: signature.target,
-                address: base_address + 0x1000 + index * 0x100,
+            .map(|(index, signature)| {
+                ResolvedFunctionVa::new(signature.target, Va(base_address + 0x1000 + index * 0x100))
             })
             .collect();
 
         Self {
             module: LoadedModule {
-                module_name: HOOK_MODULE_NAME,
+                module_name: DWMCORE_MODULE_NAME,
                 base_address,
                 size: 0x20_0000,
             },
             function_targets,
             overlay_test_mode: None,
             disable_independent_flip: None,
-            skipped_signatures: Vec::new(),
+            skipped: Vec::new(),
         }
     }
 }
@@ -185,13 +194,6 @@ pub enum HookResolveError {
         live_size: usize,
         backing_size: usize,
     },
-    SignatureNotFound {
-        target: HookTarget,
-    },
-    SignatureAmbiguous {
-        target: HookTarget,
-        matches: usize,
-    },
     ConflictingPrologue {
         target: HookTarget,
         rva: usize,
@@ -199,6 +201,7 @@ pub enum HookResolveError {
         expected: u8,
         actual: u8,
     },
+    Scan(SignatureScanError),
 }
 
 impl fmt::Display for HookResolveError {
@@ -229,14 +232,6 @@ impl fmt::Display for HookResolveError {
                 f,
                 "module {module_name} live image does not match its backing file: timestamp {live_timestamp:#x}/{backing_timestamp:#x}, size {live_size:#x}/{backing_size:#x}"
             ),
-            Self::SignatureNotFound { target } => {
-                write!(f, "signature {} was not found", target.label())
-            }
-            Self::SignatureAmbiguous { target, matches } => write!(
-                f,
-                "signature {} matched {matches} locations",
-                target.label()
-            ),
             Self::ConflictingPrologue {
                 target,
                 rva,
@@ -248,16 +243,23 @@ impl fmt::Display for HookResolveError {
                 "conflicting modification at {} prologue RVA {rva:#x}+{mismatch_offset:#x}: expected {expected:#04x}, found {actual:#04x}",
                 target.label()
             ),
+            Self::Scan(error) => write!(f, "{error}"),
         }
     }
 }
 
 impl std::error::Error for HookResolveError {}
 
+impl From<SignatureScanError> for HookResolveError {
+    fn from(value: SignatureScanError) -> Self {
+        Self::Scan(value)
+    }
+}
+
 pub fn resolve_profile(
     profile: &HookProfile,
 ) -> Result<SignatureResolutionReport, HookResolveError> {
-    let module = load_module(HOOK_MODULE_NAME)?;
+    let module = load_module(DWMCORE_MODULE_NAME)?;
     let live_image =
         unsafe { std::slice::from_raw_parts(module.base_address as *const u8, module.size) };
     let live_identity = image_identity(module.base_address as *const u8, module.module_name)?;
@@ -278,66 +280,34 @@ pub fn resolve_profile(
     resolve_profile_from_clean_image(profile, module, live_image, backing_image.as_slice())
 }
 
-#[cfg(feature = "xtask")]
-pub struct MappedModuleImage {
-    mapped: MappedImage,
-}
-
-#[cfg(feature = "xtask")]
-impl MappedModuleImage {
-    pub fn open(path: &Path) -> Result<Self, HookResolveError> {
-        Ok(Self {
-            mapped: MappedImage::open(path, HOOK_MODULE_NAME)?,
-        })
-    }
-
-    pub fn module(&self) -> LoadedModule {
-        LoadedModule {
-            module_name: HOOK_MODULE_NAME,
-            base_address: self.mapped.view.Value as usize,
-            size: self.mapped.size,
-        }
-    }
-
-    pub fn as_slice(&self) -> &[u8] {
-        self.mapped.as_slice()
-    }
-}
-
 fn resolve_profile_from_clean_image(
     profile: &HookProfile,
     module: LoadedModule,
     live_image: &[u8],
     clean_image: &[u8],
 ) -> Result<SignatureResolutionReport, HookResolveError> {
-    let resolution = resolve_profile_from_image(profile, module, clean_image)?;
+    let scan = scan_profile(profile, clean_image)?;
+    let resolution = report_with_vas(module, scan)?;
     validate_live_prologues(profile, &resolution, live_image)?;
     Ok(resolution)
 }
 
-pub(crate) fn resolve_profile_from_image(
-    profile: &HookProfile,
+fn report_with_vas(
     module: LoadedModule,
-    image: &[u8],
+    scan: SignatureScanReport,
 ) -> Result<SignatureResolutionReport, HookResolveError> {
-    let mut function_targets = Vec::with_capacity(profile.signatures.len());
+    let base = module.base_address;
+    let module_name = module.module_name;
+    let mut function_targets = Vec::new();
     let mut overlay_test_mode = None;
     let mut disable_independent_flip = None;
-    let mut skipped_signatures = Vec::new();
 
-    for signature in profile.signatures {
-        match resolve_signature(module, image, signature) {
-            Ok(target) => match target.target {
-                HookTarget::OverlayTestMode => overlay_test_mode = Some(target.address),
-                HookTarget::DisableIndependentFlip => {
-                    disable_independent_flip = Some(target.address);
-                }
-                _ => function_targets.push(target),
-            },
-            Err(error) if !signature.target.is_required_signature() => {
-                skipped_signatures.push(skipped_signature_from_error(error)?);
-            }
-            Err(error) => return Err(error),
+    for hit in scan.resolved {
+        let va = va_from_rva(base, hit.rva, module_name)?;
+        match hit.target {
+            HookTarget::OverlayTestMode => overlay_test_mode = Some(va),
+            HookTarget::DisableIndependentFlip => disable_independent_flip = Some(va),
+            target => function_targets.push(ResolvedFunctionVa::new(target, va)),
         }
     }
 
@@ -346,24 +316,17 @@ pub(crate) fn resolve_profile_from_image(
         function_targets,
         overlay_test_mode,
         disable_independent_flip,
-        skipped_signatures,
+        skipped: scan.skipped,
     })
 }
 
-fn skipped_signature_from_error(
-    error: HookResolveError,
-) -> Result<SkippedSignature, HookResolveError> {
-    match error {
-        HookResolveError::SignatureNotFound { target } => Ok(SkippedSignature {
-            target,
-            reason: SkippedSignatureReason::NotFound,
-        }),
-        HookResolveError::SignatureAmbiguous { target, matches } => Ok(SkippedSignature {
-            target,
-            reason: SkippedSignatureReason::Ambiguous { matches },
-        }),
-        error => Err(error),
-    }
+fn va_from_rva(base: usize, rva: Rva, module_name: &'static str) -> Result<Va, HookResolveError> {
+    base.checked_add(rva.0)
+        .map(Va)
+        .ok_or(HookResolveError::InvalidModuleImage {
+            module_name,
+            detail: "module base + RVA overflowed",
+        })
 }
 
 fn validate_live_prologues(
@@ -375,7 +338,7 @@ fn validate_live_prologues(
         let signature = profile
             .signatures
             .iter()
-            .find(|signature| signature.target == target.target)
+            .find(|signature| signature.target == target.target())
             .ok_or(HookResolveError::InvalidModuleImage {
                 module_name: resolution.module.module_name,
                 detail: "resolved target had no matching profile signature",
@@ -387,7 +350,8 @@ fn validate_live_prologues(
             });
         };
         let rva = target
-            .address
+            .va()
+            .0
             .checked_sub(resolution.module.base_address)
             .ok_or(HookResolveError::InvalidModuleImage {
                 module_name: resolution.module.module_name,
@@ -411,7 +375,7 @@ fn validate_live_prologues(
             )
         {
             return Err(HookResolveError::ConflictingPrologue {
-                target: target.target,
+                target: target.target(),
                 rva,
                 mismatch_offset,
                 expected,
@@ -421,64 +385,6 @@ fn validate_live_prologues(
     }
 
     Ok(())
-}
-
-pub fn resolve_signature(
-    module: LoadedModule,
-    image: &[u8],
-    signature: &HookSignature,
-) -> Result<ResolvedTarget, HookResolveError> {
-    match signature.locator {
-        SignatureLocator::Aob { tokens, .. } => resolve_unique_match(
-            module,
-            signature.target,
-            find_signature_offsets(image, tokens),
-        ),
-        SignatureLocator::RipRelativeGlobalAob {
-            tokens,
-            displacement_offset,
-            instruction_size,
-            ..
-        } => match find_signature_offsets(image, tokens).as_slice() {
-            [] => Err(HookResolveError::SignatureNotFound {
-                target: signature.target,
-            }),
-            [offset] => {
-                let displacement =
-                    read_i32_from_image(image, *offset + displacement_offset, module.module_name)?
-                        as isize;
-                let base = module.base_address + offset + instruction_size;
-                let address = (base as isize + displacement) as usize;
-
-                Ok(ResolvedTarget {
-                    target: signature.target,
-                    address,
-                })
-            }
-            many => Err(HookResolveError::SignatureAmbiguous {
-                target: signature.target,
-                matches: many.len(),
-            }),
-        },
-    }
-}
-
-fn resolve_unique_match(
-    module: LoadedModule,
-    target: HookTarget,
-    matches: Vec<usize>,
-) -> Result<ResolvedTarget, HookResolveError> {
-    match matches.as_slice() {
-        [] => Err(HookResolveError::SignatureNotFound { target }),
-        [offset] => Ok(ResolvedTarget {
-            target,
-            address: module.base_address + offset,
-        }),
-        many => Err(HookResolveError::SignatureAmbiguous {
-            target,
-            matches: many.len(),
-        }),
-    }
 }
 
 fn load_module(module_name: &'static str) -> Result<LoadedModule, HookResolveError> {
@@ -596,50 +502,6 @@ fn image_identity(
     })
 }
 
-fn find_signature_offsets(image: &[u8], tokens: &[AobToken]) -> Vec<usize> {
-    if tokens.is_empty() || tokens.len() > image.len() {
-        return Vec::new();
-    }
-
-    let mut matches = Vec::new();
-    let scan_limit = image.len() - tokens.len();
-
-    for offset in 0..=scan_limit {
-        if tokens
-            .iter()
-            .zip(&image[offset..offset + tokens.len()])
-            .all(|(token, byte)| matches_token(*token, *byte))
-        {
-            matches.push(offset);
-        }
-    }
-
-    matches
-}
-
-fn read_i32_from_image(
-    image: &[u8],
-    offset: usize,
-    module_name: &'static str,
-) -> Result<i32, HookResolveError> {
-    let bytes = image
-        .get(offset..offset + 4)
-        .ok_or(HookResolveError::InvalidModuleImage {
-            module_name,
-            detail: "RIP-relative displacement was out of image bounds",
-        })?;
-    Ok(i32::from_le_bytes(
-        bytes.try_into().expect("slice length is fixed to 4"),
-    ))
-}
-
-const fn matches_token(token: AobToken, byte: u8) -> bool {
-    match token {
-        AobToken::Exact(expected) => expected == byte,
-        AobToken::Wildcard => true,
-    }
-}
-
 unsafe fn read_u16(base: *const u8, offset: usize) -> u16 {
     unsafe { (base.add(offset) as *const u16).read_unaligned() }
 }
@@ -651,28 +513,41 @@ unsafe fn read_u32(base: *const u8, offset: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        HookResolveError, LoadedModule, ResolvedTarget, find_signature_offsets,
-        resolve_profile_from_clean_image, resolve_profile_from_image,
+        HookResolveError, LoadedModule, ResolvedFunctionVa, Va, resolve_profile_from_clean_image,
     };
-    use crate::profile::{
-        AobToken, HOOK_MODULE_NAME, HookProfile, HookSignature, HookTarget, SignatureLocator,
+    use dwm_lut_profile::{
+        AobToken, DWMCORE_MODULE_NAME, HookProfile, HookSignature, HookTarget,
+        MonitorIdentityOffsets, SignatureLocator, SignatureScanError, SwapChainVtablePath,
     };
 
-    fn test_profile() -> HookProfile {
-        crate::profile::latest_registered_profile()
+    fn test_profile(signatures: &'static [HookSignature]) -> HookProfile {
+        HookProfile {
+            signatures,
+            swap_chain: SwapChainVtablePath {
+                container_vtable_index: 0,
+                resource_vtable_index: 0,
+            },
+            hardware_protected_offset: 0,
+            monitor_identity: MonitorIdentityOffsets {
+                adapter_luid_low_offset: 0,
+                adapter_luid_high_offset: 0,
+                target_id_offset: 0,
+            },
+        }
     }
 
-    #[test]
-    fn aob_scan_honors_wildcards() {
-        let tokens = [
-            AobToken::Exact(0x40),
-            AobToken::Exact(0x55),
-            AobToken::Wildcard,
-            AobToken::Exact(0x57),
-        ];
-        let image = [0x90, 0x40, 0x55, 0xAA, 0x57, 0x90];
-
-        assert_eq!(find_signature_offsets(&image, &tokens), vec![1]);
+    fn prologue_test_profile() -> HookProfile {
+        test_profile(&[HookSignature {
+            target: HookTarget::Present,
+            locator: SignatureLocator::Aob {
+                tokens: &[
+                    AobToken::Exact(0x40),
+                    AobToken::Exact(0x55),
+                    AobToken::Wildcard,
+                    AobToken::Exact(0x57),
+                ],
+            },
+        }])
     }
 
     #[test]
@@ -680,7 +555,7 @@ mod tests {
         let clean_image = [0x90, 0x40, 0x55, 0xAA, 0x57, 0x90];
         let live_image = clean_image;
         let module = LoadedModule {
-            module_name: HOOK_MODULE_NAME,
+            module_name: DWMCORE_MODULE_NAME,
             base_address: 0x1000_0000,
             size: live_image.len(),
         };
@@ -689,7 +564,7 @@ mod tests {
         let report = resolve_profile_from_clean_image(&profile, module, &live_image, &clean_image)
             .expect("matching live prologue should resolve");
 
-        assert_eq!(report.function_targets[0].address, module.base_address + 1);
+        assert_eq!(report.function_targets[0].va(), Va(module.base_address + 1));
     }
 
     #[test]
@@ -697,16 +572,16 @@ mod tests {
         let clean_image = [0x90, 0x40, 0x55, 0xAA, 0x57, 0x90];
         let live_image = [0x90, 0xE9, 0x11, 0x22, 0x33, 0x44];
         let module = LoadedModule {
-            module_name: HOOK_MODULE_NAME,
+            module_name: DWMCORE_MODULE_NAME,
             base_address: 0x1000_0000,
             size: live_image.len(),
         };
         let profile = prologue_test_profile();
 
         let error = resolve_profile_from_clean_image(&profile, module, &live_image, &clean_image)
-            .expect_err("modified live prologue must be rejected");
+            .expect_err("modified live prologue should fail");
 
-        assert_eq!(
+        assert!(matches!(
             error,
             HookResolveError::ConflictingPrologue {
                 target: HookTarget::Present,
@@ -715,33 +590,33 @@ mod tests {
                 expected: 0x40,
                 actual: 0xE9,
             }
-        );
-    }
-
-    const PROLOGUE_TEST_SIGNATURES: &[HookSignature] = &[HookSignature {
-        target: HookTarget::Present,
-        locator: SignatureLocator::Aob {
-            tokens: &[
-                AobToken::Exact(0x40),
-                AobToken::Exact(0x55),
-                AobToken::Wildcard,
-                AobToken::Exact(0x57),
-            ],
-        },
-    }];
-
-    fn prologue_test_profile() -> HookProfile {
-        HookProfile {
-            signatures: PROLOGUE_TEST_SIGNATURES,
-            ..test_profile()
-        }
+        ));
     }
 
     #[test]
-    fn resolve_profile_separates_function_and_global_targets() {
+    fn resolve_profile_from_clean_image_maps_scan_failures() {
+        let image = [0x00];
+        let module = LoadedModule {
+            module_name: DWMCORE_MODULE_NAME,
+            base_address: 0x1000_0000,
+            size: image.len(),
+        };
+        let profile = prologue_test_profile();
+        let error = resolve_profile_from_clean_image(&profile, module, &image, &image)
+            .expect_err("missing required signature");
+        assert!(matches!(
+            error,
+            HookResolveError::Scan(SignatureScanError::NotFound {
+                target: HookTarget::Present
+            })
+        ));
+    }
+
+    #[test]
+    fn resolve_profile_from_clean_image_maps_global_targets_to_vas() {
         let image = [0xAA, 0xBB, 0xCC];
         let module = LoadedModule {
-            module_name: HOOK_MODULE_NAME,
+            module_name: DWMCORE_MODULE_NAME,
             base_address: 0x2000_0000,
             size: image.len(),
         };
@@ -765,162 +640,45 @@ mod tests {
                 },
             },
         ];
-        let profile = HookProfile {
-            signatures: SIGNATURES,
-            ..test_profile()
-        };
+        let profile = test_profile(SIGNATURES);
 
-        let report = resolve_profile_from_image(&profile, module, &image)
+        let report = resolve_profile_from_clean_image(&profile, module, &image, &image)
             .expect("resolution should succeed");
 
         assert_eq!(
             report.function_targets,
-            vec![ResolvedTarget {
-                target: HookTarget::Present,
-                address: module.base_address,
-            }]
+            vec![ResolvedFunctionVa::new(
+                HookTarget::Present,
+                Va(module.base_address),
+            )]
         );
-        assert_eq!(report.overlay_test_mode, Some(module.base_address + 1));
+        assert_eq!(report.overlay_test_mode, Some(Va(module.base_address + 1)));
         assert_eq!(
             report.disable_independent_flip,
-            Some(module.base_address + 2)
+            Some(Va(module.base_address + 2))
         );
-        assert!(report.skipped_signatures.is_empty());
+        assert!(report.skipped.is_empty());
     }
 
     #[test]
-    fn resolve_profile_reports_missing_signature_by_target() {
-        let profile = test_profile();
-        let image = [0u8; 16];
+    fn resolve_profile_from_clean_image_rejects_base_plus_rva_overflow() {
+        let image = [0x90, 0x40, 0x55, 0xAA, 0x57, 0x90];
         let module = LoadedModule {
-            module_name: HOOK_MODULE_NAME,
-            base_address: 0x1000_0000,
+            module_name: DWMCORE_MODULE_NAME,
+            base_address: usize::MAX,
             size: image.len(),
         };
+        let profile = prologue_test_profile();
 
-        let error = resolve_profile_from_image(&profile, module, &image)
-            .expect_err("resolution should fail when no signatures match");
+        let error = resolve_profile_from_clean_image(&profile, module, &image, &image)
+            .expect_err("base + RVA overflow should fail");
 
-        assert_eq!(
+        assert!(matches!(
             error,
-            HookResolveError::SignatureNotFound {
-                target: crate::profile::HookTarget::Present,
+            HookResolveError::InvalidModuleImage {
+                module_name: DWMCORE_MODULE_NAME,
+                detail: "module base + RVA overflowed",
             }
-        );
-    }
-
-    #[test]
-    fn resolve_profile_records_missing_optional_signature() {
-        let image = [0xAA, 0xBB, 0xCC];
-        let module = LoadedModule {
-            module_name: HOOK_MODULE_NAME,
-            base_address: 0x2000_0000,
-            size: image.len(),
-        };
-        const SIGNATURES: &[HookSignature] = &[
-            HookSignature {
-                target: HookTarget::Present,
-                locator: SignatureLocator::Aob {
-                    tokens: &[AobToken::Exact(0xAA)],
-                },
-            },
-            HookSignature {
-                target: HookTarget::IsAdvancedDirectFlipCompatible,
-                locator: SignatureLocator::Aob {
-                    tokens: &[AobToken::Exact(0xDD)],
-                },
-            },
-        ];
-        let profile = HookProfile {
-            signatures: SIGNATURES,
-            ..test_profile()
-        };
-
-        let report =
-            resolve_profile_from_image(&profile, module, &image).expect("optional miss is allowed");
-
-        assert_eq!(report.function_targets.len(), 1);
-        assert_eq!(
-            report.skipped_signatures,
-            vec![crate::resolver::SkippedSignature {
-                target: crate::profile::HookTarget::IsAdvancedDirectFlipCompatible,
-                reason: crate::resolver::SkippedSignatureReason::NotFound,
-            }]
-        );
-    }
-
-    #[test]
-    fn resolve_profile_records_ambiguous_optional_signature() {
-        let image = [0xAA, 0xDD, 0xDD];
-        let module = LoadedModule {
-            module_name: HOOK_MODULE_NAME,
-            base_address: 0x2000_0000,
-            size: image.len(),
-        };
-        const SIGNATURES: &[HookSignature] = &[
-            HookSignature {
-                target: HookTarget::Present,
-                locator: SignatureLocator::Aob {
-                    tokens: &[AobToken::Exact(0xAA)],
-                },
-            },
-            HookSignature {
-                target: HookTarget::IsDirectFlipSupportedOnTarget,
-                locator: SignatureLocator::Aob {
-                    tokens: &[AobToken::Exact(0xDD)],
-                },
-            },
-        ];
-        let profile = HookProfile {
-            signatures: SIGNATURES,
-            ..test_profile()
-        };
-
-        let report = resolve_profile_from_image(&profile, module, &image)
-            .expect("optional ambiguity is allowed");
-
-        assert_eq!(report.function_targets.len(), 1);
-        assert_eq!(
-            report.skipped_signatures,
-            vec![crate::resolver::SkippedSignature {
-                target: crate::profile::HookTarget::IsDirectFlipSupportedOnTarget,
-                reason: crate::resolver::SkippedSignatureReason::Ambiguous { matches: 2 },
-            }]
-        );
-    }
-
-    #[test]
-    fn resolve_profile_rejects_ambiguous_match() {
-        let image = [0x83, 0x10, 0x20, 0x83, 0x30, 0x40];
-        let module = LoadedModule {
-            module_name: HOOK_MODULE_NAME,
-            base_address: 0x2000_0000,
-            size: image.len(),
-        };
-        const SIGNATURES: &[HookSignature] = &[HookSignature {
-            target: HookTarget::OverlayTestMode,
-            locator: SignatureLocator::Aob {
-                tokens: &[
-                    AobToken::Exact(0x83),
-                    AobToken::Wildcard,
-                    AobToken::Wildcard,
-                ],
-            },
-        }];
-        let profile = HookProfile {
-            signatures: SIGNATURES,
-            ..test_profile()
-        };
-
-        let error = resolve_profile_from_image(&profile, module, &image)
-            .expect_err("resolution should fail when the pattern is ambiguous");
-
-        assert_eq!(
-            error,
-            HookResolveError::SignatureAmbiguous {
-                target: crate::profile::HookTarget::OverlayTestMode,
-                matches: 2,
-            }
-        );
+        ));
     }
 }

@@ -61,16 +61,18 @@ pub(crate) mod test_support {
     };
 
     use super::DirtyRect;
-    use crate::HookProfile;
     use crate::minhook;
-    use crate::profile::HookTarget;
     use crate::resolver::SignatureResolutionReport;
     use crate::state;
+    use dwm_lut_profile::{HookProfile, HookTarget, VERSIONED_PROFILES};
 
     use super::collect::{RectVec, read_dirty_rects};
 
     pub(crate) fn test_profile() -> HookProfile {
-        crate::profile::latest_registered_profile()
+        (VERSIONED_PROFILES
+            .last()
+            .expect("VERSIONED_PROFILES is non-empty")
+            .profile)()
     }
 
     static LAST_ORIGINAL_PRESENT_RECTS: Mutex<Option<Vec<DirtyRect>>> = Mutex::new(None);

@@ -3,12 +3,14 @@ members = [
     "crates/dwm-lut-hook",
     "crates/dwm-lut",
     "crates/dwm-lut-payload",
+    "crates/dwm-lut-profile",
     "xtask",
 ]
 default-members = [
     "crates/dwm-lut-hook",
     "crates/dwm-lut",
     "crates/dwm-lut-payload",
+    "crates/dwm-lut-profile",
 ]
 resolver = "2"
 

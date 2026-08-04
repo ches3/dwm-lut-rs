@@ -5,9 +5,9 @@ use std::mem::MaybeUninit;
 use std::mem::{align_of, size_of};
 
 use super::DirtyRect;
-use crate::profile::{HookProfile, MonitorIdentityOffsets};
 use crate::state;
 use dwm_lut_payload::{AdapterLuid, MonitorIdentity};
+use dwm_lut_profile::{HookProfile, MonitorIdentityOffsets};
 #[cfg(not(test))]
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 #[cfg(not(test))]

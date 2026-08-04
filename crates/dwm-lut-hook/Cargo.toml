@@ -9,11 +9,9 @@ name = "dwm_lut_hook"
 crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
-[features]
-xtask = []
-
 [dependencies]
 dwm-lut-payload = { path = "../dwm-lut-payload" }
+dwm-lut-profile = { path = "../dwm-lut-profile" }
 microseh = "1.2.0"
 minhook-sys = "0.1.1"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_Diagnostics_Debug", "Win32_System_Memory", "Win32_System_Threading"] }

@@ -1,6 +1,6 @@
 use comfy_table::presets::NOTHING;
 use comfy_table::{Cell, Color, Table, TableComponent};
-use dwm_lut_hook::HookTarget;
+use dwm_lut_profile::HookTarget;
 
 #[derive(Debug, Clone)]
 pub struct InspectReport {

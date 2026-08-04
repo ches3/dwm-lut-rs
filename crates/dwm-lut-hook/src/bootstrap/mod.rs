@@ -9,6 +9,7 @@ use dwm_lut_payload::{
     deserialize_payload_buffer,
 };
 
+use crate::dwmcore_version::dwmcore_file_version;
 use crate::flip_gate::FlipGateEffects;
 use crate::lifecycle::{
     ReplaceAssignmentsStart, ShutdownStart, begin_initialization, begin_replace_assignments,
@@ -18,7 +19,6 @@ use crate::log;
 use crate::minhook::{
     disable_registered_hooks, enable_registered_hooks, register_plan, unregister_registered_hooks,
 };
-use crate::profile::{HookProfile, dwmcore_file_version, select_versioned_profile};
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::assignments_from_payload;
 use crate::state::{
@@ -26,6 +26,7 @@ use crate::state::{
     lock_present_runtime, minhook_cleanup_plan, reactivate_retained_state, replace_lut_assignments,
     retain_state_after_shutdown,
 };
+use dwm_lut_profile::{HookProfile, select_versioned_profile};
 
 #[cfg(test)]
 pub(crate) fn initialize_with_resolution(
@@ -297,15 +298,21 @@ mod tests {
     };
 
     use crate::DWM_LUT_STATUS;
+    use crate::dwmcore_version::DwmcoreVersionError;
     use crate::lifecycle;
-    use crate::profile::{DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError};
     use crate::resolver::{HookResolveError, SignatureResolutionReport};
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK};
+    use dwm_lut_profile::{
+        DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError, VERSIONED_PROFILES,
+    };
 
     use super::HookError;
 
     fn test_profile() -> HookProfile {
-        crate::profile::latest_registered_profile()
+        (VERSIONED_PROFILES
+            .last()
+            .expect("VERSIONED_PROFILES is non-empty")
+            .profile)()
     }
 
     fn test_payload() -> HookPayload {
@@ -376,7 +383,7 @@ mod tests {
     #[test]
     fn module_access_failure_has_distinct_initialize_status() {
         let status = InitializeStatus::from(HookResolveError::ModuleAccessFailed {
-            module_name: crate::profile::HOOK_MODULE_NAME,
+            module_name: dwm_lut_profile::DWMCORE_MODULE_NAME,
             operation: "map image view",
             error_code: 5,
         });
@@ -386,29 +393,25 @@ mod tests {
 
     #[test]
     fn profile_select_failures_have_distinct_initialize_statuses() {
-        let cases = [
-            (
+        assert_eq!(
+            InitializeStatus::from(HookError::from(
                 ProfileSelectError::UnsupportedDwmcoreVersion {
                     version: DwmcoreVersion {
                         build: 26100,
                         revision: 0,
                     },
-                },
-                InitializeStatus::UnsupportedDwmcoreVersion,
-            ),
-            (
-                ProfileSelectError::DwmcoreModuleNotLoaded,
-                InitializeStatus::DwmcoreModuleNotLoaded,
-            ),
-            (
-                ProfileSelectError::DwmcoreVersionQueryFailed,
-                InitializeStatus::DwmcoreVersionQueryFailed,
-            ),
-        ];
-
-        for (error, expected) in cases {
-            assert_eq!(InitializeStatus::from(HookError::from(error)), expected);
-        }
+                }
+            )),
+            InitializeStatus::UnsupportedDwmcoreVersion
+        );
+        assert_eq!(
+            InitializeStatus::from(HookError::from(DwmcoreVersionError::ModuleNotLoaded)),
+            InitializeStatus::DwmcoreModuleNotLoaded
+        );
+        assert_eq!(
+            InitializeStatus::from(HookError::from(DwmcoreVersionError::QueryFailed)),
+            InitializeStatus::DwmcoreVersionQueryFailed
+        );
     }
 
     #[test]

@@ -4,18 +4,15 @@ use std::path::PathBuf;
 
 use comfy_table::presets::NOTHING;
 use comfy_table::{Cell, Color, Table, TableComponent};
-use dwm_lut_hook::{
-    HookProfile, HookResolveError, HookTarget, LoadedModule, MappedModuleImage, ProfileSelectError,
-    file_version_from_path, resolve_signature, select_versioned_profile,
+use dwm_lut_profile::{
+    DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError, SignatureScanError,
+    resolve_signature_rva, select_versioned_profile,
 };
 
 use super::ensure;
 use super::extract::layout::extract_layout;
 use super::extract::report::{LayoutRow, LayoutStatus, format_hex};
-use super::extract::symbols::{
-    SymbolResolveError, resolve_disable_independent_flip_global, resolve_function_symbol,
-    resolve_overlay_test_mode_global,
-};
+use super::extract::symbols::{SymbolResolveError, resolve_function_symbol, resolve_global_symbol};
 use super::pdb_publics::PdbPublics;
 use super::pe::PeImage;
 
@@ -34,17 +31,17 @@ pub(super) fn run(args: Args) -> Result<(), Box<dyn Error>> {
         args.pdb.as_ref(),
     )?;
 
-    let version = file_version_from_path(&dll_path).map_err(profile_select_io_error)?;
+    let pe = PeImage::load(&dll_path)?;
+    let version = DwmcoreVersion {
+        build: u32::from(pe.file_version.build),
+        revision: u32::from(pe.file_version.revision),
+    };
     let entry = select_versioned_profile(version).map_err(profile_select_io_error)?;
     let profile = (entry.profile)();
 
-    let pe = PeImage::load(&dll_path)?;
     let pubs = PdbPublics::load(&pdb_path)?;
     pubs.verify_against_pe(&pe.codeview)?;
     let layout = extract_layout(&pe, &pubs);
-
-    let image = MappedModuleImage::open(&dll_path).map_err(io::Error::other)?;
-    let module = image.module();
 
     println!();
     println!("version  10.0.{version}");
@@ -54,7 +51,7 @@ pub(super) fn run(args: Args) -> Result<(), Box<dyn Error>> {
     println!();
 
     let layout_failed = print_layout_table(&profile, &layout.rows);
-    let required_failed = print_signatures_table(&profile, module, image.as_slice(), &pe, &pubs)?;
+    let required_failed = print_signatures_table(&profile, &pe, &pubs);
 
     match (layout_failed, required_failed) {
         (0, 0) => Ok(()),
@@ -155,13 +152,7 @@ fn profile_layout_values(profile: &HookProfile) -> [(&'static str, String); 6] {
     ]
 }
 
-fn print_signatures_table(
-    profile: &HookProfile,
-    module: LoadedModule,
-    image: &[u8],
-    pe: &PeImage,
-    pubs: &PdbPublics,
-) -> Result<usize, Box<dyn Error>> {
+fn print_signatures_table(profile: &HookProfile, pe: &PeImage, pubs: &PdbPublics) -> usize {
     let mut table = Table::new();
     table
         .load_preset(NOTHING)
@@ -180,42 +171,37 @@ fn print_signatures_table(
         let required = signature.target.is_required_signature();
         let required_label = if required { "yes" } else { "no" };
 
-        let (status, rva) = match resolve_signature(module, image, signature) {
-            Ok(resolved) => {
-                let rva = resolved
-                    .address
-                    .checked_sub(module.base_address)
-                    .ok_or_else(|| io::Error::other("resolved address was below module base"))?;
-                match expected_symbol_rva(signature.target, pe, pubs) {
-                    Ok(symbol_rva) if symbol_rva as usize == rva => {
-                        (status_cell("ok", Color::Green), format!("{rva:#x}"))
+        let (status, rva) = match resolve_signature_rva(&pe.image, signature) {
+            Ok(resolved) => match expected_symbol_rva(signature.target, pe, pubs) {
+                Ok(symbol_rva) if symbol_rva as usize == resolved.rva.0 => (
+                    status_cell("ok", Color::Green),
+                    format!("{:#x}", resolved.rva.0),
+                ),
+                Ok(_) => {
+                    if required {
+                        required_failed += 1;
                     }
-                    Ok(_) => {
-                        if required {
-                            required_failed += 1;
-                        }
-                        (
-                            status_cell("symbol_mismatch", severity_color(required)),
-                            format!("{rva:#x}"),
-                        )
-                    }
-                    Err(error) => {
-                        if required {
-                            required_failed += 1;
-                        }
-                        let status = if error == SymbolResolveError::Ambiguous {
-                            "ambiguous_symbol"
-                        } else {
-                            "no_symbol"
-                        };
-                        (
-                            status_cell(status, severity_color(required)),
-                            format!("{rva:#x}"),
-                        )
-                    }
+                    (
+                        status_cell("symbol_mismatch", severity_color(required)),
+                        format!("{:#x}", resolved.rva.0),
+                    )
                 }
-            }
-            Err(HookResolveError::SignatureNotFound { .. }) => {
+                Err(error) => {
+                    if required {
+                        required_failed += 1;
+                    }
+                    let status = if error == SymbolResolveError::Ambiguous {
+                        "ambiguous_symbol"
+                    } else {
+                        "no_symbol"
+                    };
+                    (
+                        status_cell(status, severity_color(required)),
+                        format!("{:#x}", resolved.rva.0),
+                    )
+                }
+            },
+            Err(SignatureScanError::NotFound { .. }) => {
                 if required {
                     required_failed += 1;
                 }
@@ -224,16 +210,33 @@ fn print_signatures_table(
                     "-".into(),
                 )
             }
-            Err(HookResolveError::SignatureAmbiguous { matches, .. }) => {
+            Err(SignatureScanError::Ambiguous { .. }) => {
                 if required {
                     required_failed += 1;
                 }
                 (
-                    status_cell(&format!("ambiguous({matches})"), severity_color(required)),
+                    status_cell("ambiguous", severity_color(required)),
                     "-".into(),
                 )
             }
-            Err(error) => return Err(io::Error::other(error).into()),
+            Err(SignatureScanError::OutOfBounds { .. }) => {
+                if required {
+                    required_failed += 1;
+                }
+                (
+                    status_cell("out_of_bounds", severity_color(required)),
+                    "-".into(),
+                )
+            }
+            Err(SignatureScanError::IncompatibleLocator { .. }) => {
+                if required {
+                    required_failed += 1;
+                }
+                (
+                    status_cell("incompatible_locator", severity_color(required)),
+                    "-".into(),
+                )
+            }
         };
 
         table.add_row(vec![
@@ -245,7 +248,7 @@ fn print_signatures_table(
     }
 
     println!("{table}");
-    Ok(required_failed)
+    required_failed
 }
 
 fn expected_symbol_rva(
@@ -253,14 +256,10 @@ fn expected_symbol_rva(
     pe: &PeImage,
     pubs: &PdbPublics,
 ) -> Result<u32, SymbolResolveError> {
-    match target {
-        HookTarget::OverlayTestMode => {
-            resolve_overlay_test_mode_global(pubs).map(|symbol| symbol.rva)
-        }
-        HookTarget::DisableIndependentFlip => {
-            resolve_disable_independent_flip_global(pubs).map(|symbol| symbol.rva)
-        }
-        _ => resolve_function_symbol(target, pubs, pe).map(|symbol| symbol.rva),
+    if target.is_function_hook_target() {
+        resolve_function_symbol(target, pubs, pe).map(|symbol| symbol.rva)
+    } else {
+        resolve_global_symbol(target, pubs).map(|symbol| symbol.rva)
     }
 }
 

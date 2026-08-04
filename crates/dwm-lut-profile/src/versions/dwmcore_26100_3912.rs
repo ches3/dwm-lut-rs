@@ -1,7 +1,8 @@
-use super::{
-    AobToken, HookProfile, HookSignature, HookTarget, MonitorIdentityOffsets, SignatureLocator,
+use crate::profile::{
+    AobToken, HookProfile, HookSignature, MonitorIdentityOffsets, SignatureLocator,
     SwapChainVtablePath,
 };
+use crate::target::HookTarget;
 use AobToken::{Exact, Wildcard};
 
 const PRESENT_AOB: &[AobToken] = &[

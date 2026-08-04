@@ -9,12 +9,12 @@ compile_error!("dwm-lut-hook supports only x86_64-pc-windows-msvc");
 mod bootstrap;
 mod d3d11;
 mod desktop_redraw;
+mod dwmcore_version;
 mod flip_gate;
 mod lifecycle;
 mod log;
 mod minhook;
 mod present;
-mod profile;
 mod resolver;
 mod state;
 
@@ -22,19 +22,10 @@ pub use bootstrap::HookError;
 pub use flip_gate::FlipGateEffects;
 pub use minhook::{MinHookError, MinHookRuntime, MinHookState, RegisteredHook};
 pub use present::DirtyRect;
-#[cfg(feature = "xtask")]
-pub use profile::file_version_from_path;
-pub use profile::{
-    AobToken, DwmcoreVersion, HOOK_MODULE_NAME, HookProfile, HookSignature, HookTarget,
-    MonitorIdentityOffsets, ProfileSelectError, SignatureLocator, SwapChainVtablePath,
-    VERSIONED_PROFILES, VersionedProfile, dwmcore_file_version, select_versioned_profile,
-};
 pub use resolver::{
-    HookResolveError, LoadedModule, ResolvedTarget, SignatureResolutionReport, SkippedSignature,
-    SkippedSignatureReason, resolve_profile,
+    HookResolveError, LoadedModule, ResolvedFunctionVa, SignatureResolutionReport, Va,
+    resolve_profile,
 };
-#[cfg(feature = "xtask")]
-pub use resolver::{MappedModuleImage, resolve_signature};
 pub use state::{
     HookRuntime, HookState, LutAssignment, LutMetadata, ShaderTexture3D, assignments_from_payload,
     cube_to_texture, hook_profile,

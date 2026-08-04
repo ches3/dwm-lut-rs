@@ -1,7 +1,8 @@
-use super::{
-    AobToken, HookProfile, HookSignature, HookTarget, MonitorIdentityOffsets, SignatureLocator,
+use crate::profile::{
+    AobToken, HookProfile, HookSignature, MonitorIdentityOffsets, SignatureLocator,
     SwapChainVtablePath,
 };
+use crate::target::HookTarget;
 use AobToken::{Exact, Wildcard};
 
 const PRESENT_AOB: &[AobToken] = &[
@@ -74,18 +75,9 @@ const IS_CANDIDATE_DIRECT_FLIP_COMPATIBLE_AOB: &[AobToken] = &[
     Exact(0x20),
     Exact(0x33),
     Exact(0xDB),
-    Exact(0x49),
+    Exact(0x4D),
     Exact(0x8B),
-    Exact(0xE9),
-    Exact(0x49),
-    Exact(0x8B),
-    Exact(0xF0),
-    Exact(0x4C),
-    Exact(0x8B),
-    Exact(0xF2),
-    Exact(0x48),
-    Exact(0x8B),
-    Exact(0xF9),
+    Exact(0xF1),
 ];
 
 const OVERLAYS_ENABLED_AOB: &[AobToken] = &[

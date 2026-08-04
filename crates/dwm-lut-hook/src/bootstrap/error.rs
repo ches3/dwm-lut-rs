@@ -1,11 +1,12 @@
 use std::fmt;
 
 use dwm_lut_payload::{
-    InitializeStatus, PayloadError, ReplaceAssignmentsStatus, ResolveFailureKind,
+    HookTargetId, InitializeStatus, PayloadError, ReplaceAssignmentsStatus, ResolveFailureKind,
 };
+use dwm_lut_profile::{HookTarget, ProfileSelectError, SignatureScanError};
 
+use crate::dwmcore_version::DwmcoreVersionError;
 use crate::minhook::MinHookError;
-use crate::profile::ProfileSelectError;
 use crate::resolver::HookResolveError;
 use crate::state::ReplaceLutAssignmentsError;
 
@@ -13,6 +14,7 @@ use crate::state::ReplaceLutAssignmentsError;
 pub enum HookError {
     AlreadyInitialized,
     ProfileSelect(ProfileSelectError),
+    DwmcoreVersion(DwmcoreVersionError),
     Payload(PayloadError),
     MinHook(MinHookError),
     Resolve(HookResolveError),
@@ -23,6 +25,7 @@ impl fmt::Display for HookError {
         match self {
             Self::AlreadyInitialized => write!(f, "hook is already initialized"),
             Self::ProfileSelect(error) => write!(f, "{error}"),
+            Self::DwmcoreVersion(error) => write!(f, "{error}"),
             Self::Payload(error) => write!(f, "{error}"),
             Self::MinHook(error) => write!(f, "{error}"),
             Self::Resolve(error) => write!(f, "{error}"),
@@ -53,6 +56,12 @@ impl From<MinHookError> for HookError {
 impl From<ProfileSelectError> for HookError {
     fn from(value: ProfileSelectError) -> Self {
         Self::ProfileSelect(value)
+    }
+}
+
+impl From<DwmcoreVersionError> for HookError {
+    fn from(value: DwmcoreVersionError) -> Self {
+        Self::DwmcoreVersion(value)
     }
 }
 
@@ -101,19 +110,51 @@ impl From<HookResolveError> for InitializeStatus {
             HookResolveError::InvalidModuleImage { .. } => Self::DwmcoreImageInvalid,
             HookResolveError::ModuleAccessFailed { .. } => Self::DwmcoreImageAccessFailed,
             HookResolveError::ModuleImageMismatch { .. } => Self::DwmcoreImageMismatch,
-            HookResolveError::SignatureNotFound { target } => Self::Resolve {
-                kind: ResolveFailureKind::NotFound,
-                target: target.into(),
-            },
-            HookResolveError::SignatureAmbiguous { target, .. } => Self::Resolve {
-                kind: ResolveFailureKind::Ambiguous,
-                target: target.into(),
-            },
             HookResolveError::ConflictingPrologue { target, .. } => Self::Resolve {
                 kind: ResolveFailureKind::PrologueConflict,
-                target: target.into(),
+                target: to_hook_target_id(target),
             },
+            HookResolveError::Scan(SignatureScanError::NotFound { target }) => Self::Resolve {
+                kind: ResolveFailureKind::NotFound,
+                target: to_hook_target_id(target),
+            },
+            HookResolveError::Scan(SignatureScanError::Ambiguous { target }) => Self::Resolve {
+                kind: ResolveFailureKind::Ambiguous,
+                target: to_hook_target_id(target),
+            },
+            HookResolveError::Scan(SignatureScanError::OutOfBounds { target, .. }) => {
+                Self::Resolve {
+                    kind: ResolveFailureKind::OutOfBounds,
+                    target: to_hook_target_id(target),
+                }
+            }
+            HookResolveError::Scan(SignatureScanError::IncompatibleLocator { target }) => {
+                Self::Resolve {
+                    kind: ResolveFailureKind::IncompatibleLocator,
+                    target: to_hook_target_id(target),
+                }
+            }
         }
+    }
+}
+
+const fn to_hook_target_id(target: HookTarget) -> HookTargetId {
+    match target {
+        HookTarget::Present => HookTargetId::Present,
+        HookTarget::IsCandidateDirectFlipCompatible => {
+            HookTargetId::IsCandidateDirectFlipCompatible
+        }
+        HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
+            HookTargetId::DirectFlipInfoEnsureIndependentFlipState
+        }
+        HookTarget::IsDirectFlipSupportedOnTarget => HookTargetId::IsDirectFlipSupportedOnTarget,
+        HookTarget::LegacySwapChainCheckDirectFlipSupport => {
+            HookTargetId::LegacySwapChainCheckDirectFlipSupport
+        }
+        HookTarget::IsAdvancedDirectFlipCompatible => HookTargetId::IsAdvancedDirectFlipCompatible,
+        HookTarget::OverlayTestMode => HookTargetId::OverlayTestMode,
+        HookTarget::DisableIndependentFlip => HookTargetId::DisableIndependentFlip,
+        HookTarget::OverlaysEnabled => HookTargetId::OverlaysEnabled,
     }
 }
 
@@ -121,13 +162,15 @@ impl From<HookError> for InitializeStatus {
     fn from(error: HookError) -> Self {
         match error {
             HookError::AlreadyInitialized => Self::AlreadyInitialized,
-            HookError::ProfileSelect(error) => match error {
-                ProfileSelectError::UnsupportedDwmcoreVersion { .. } => {
-                    Self::UnsupportedDwmcoreVersion
-                }
-                ProfileSelectError::DwmcoreModuleNotLoaded => Self::DwmcoreModuleNotLoaded,
-                ProfileSelectError::DwmcoreVersionQueryFailed => Self::DwmcoreVersionQueryFailed,
-            },
+            HookError::ProfileSelect(ProfileSelectError::UnsupportedDwmcoreVersion { .. }) => {
+                Self::UnsupportedDwmcoreVersion
+            }
+            HookError::DwmcoreVersion(DwmcoreVersionError::ModuleNotLoaded) => {
+                Self::DwmcoreModuleNotLoaded
+            }
+            HookError::DwmcoreVersion(DwmcoreVersionError::QueryFailed) => {
+                Self::DwmcoreVersionQueryFailed
+            }
             HookError::Resolve(error) => error.into(),
             HookError::Payload(error) => InitializeStatus::from(&error),
             HookError::MinHook(error) => match error.operation {

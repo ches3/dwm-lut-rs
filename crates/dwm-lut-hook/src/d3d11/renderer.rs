@@ -29,9 +29,9 @@ use super::{
 };
 
 use crate::present::DirtyRect;
-use crate::profile::SwapChainVtablePath;
 use crate::state::LutAssignment;
 use dwm_lut_payload::MonitorIdentity;
+use dwm_lut_profile::SwapChainVtablePath;
 
 static RENDERER: OnceLock<Mutex<D3D11Renderer>> = OnceLock::new();
 

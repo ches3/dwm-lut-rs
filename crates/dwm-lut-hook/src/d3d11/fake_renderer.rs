@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FakeRenderPresentLutCall {
     pub overlay_swap_chain: usize,
-    pub swap_chain_path: crate::profile::SwapChainVtablePath,
+    pub swap_chain_path: dwm_lut_profile::SwapChainVtablePath,
     pub monitor_identity: Option<MonitorIdentity>,
     pub dirty_rects: Vec<DirtyRect>,
 }
@@ -42,7 +42,7 @@ pub(crate) fn fake_render_present_lut_call() -> Option<FakeRenderPresentLutCall>
 
 pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
-    swap_chain_path: crate::profile::SwapChainVtablePath,
+    swap_chain_path: dwm_lut_profile::SwapChainVtablePath,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
     _assignments: &[crate::state::LutAssignment],

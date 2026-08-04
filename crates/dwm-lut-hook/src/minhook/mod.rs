@@ -12,13 +12,13 @@ use detours::{detour_for_target, original_slot_for_target};
 
 #[cfg(test)]
 pub(crate) fn original_pointer_for_target(
-    target: crate::profile::HookTarget,
+    target: dwm_lut_profile::HookTarget,
 ) -> &'static AtomicPtr<c_void> {
     detours::original_pointer_for_target(target)
 }
 
-use crate::profile::HookTarget;
-use crate::resolver::ResolvedTarget;
+use crate::resolver::{ResolvedFunctionVa, Va};
+use dwm_lut_profile::HookTarget;
 
 pub type MhStatus = i32;
 
@@ -172,11 +172,11 @@ fn apis_eq(left: MinHookApis, right: MinHookApis) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisteredHook {
     pub target: HookTarget,
-    pub target_address: usize,
+    pub target_va: Va,
 }
 
 pub(crate) fn register_plan(
-    targets: &[ResolvedTarget],
+    targets: &[ResolvedFunctionVa],
 ) -> Result<(MinHookRuntime, Vec<RegisteredHook>), MinHookError> {
     let apis = minhook_apis();
     let status = unsafe { (apis.initialize)() };
@@ -235,7 +235,7 @@ pub(crate) fn reset_test_original_slots() {
 }
 
 pub(crate) fn create_plan_hooks_with_apis(
-    targets: &[ResolvedTarget],
+    targets: &[ResolvedFunctionVa],
     apis: MinHookApis,
 ) -> Result<Vec<RegisteredHook>, MinHookError> {
     create_hooks_for_targets(targets, apis).map(registered_hooks_from_created)
@@ -254,28 +254,28 @@ fn enable_created_hooks_with_apis(apis: MinHookApis) -> Result<(), MinHookError>
 }
 
 fn create_hooks_for_targets(
-    targets: &[ResolvedTarget],
+    targets: &[ResolvedFunctionVa],
     apis: MinHookApis,
 ) -> Result<Vec<CreatedHook>, MinHookError> {
     let mut created = Vec::with_capacity(targets.len());
 
     for target in targets {
-        let detour = detour_for_target(target.target);
-        let original_slot = original_slot_for_target(target.target);
-        let target_address = target.address as *mut c_void;
-        let status = unsafe { (apis.create_hook)(target_address, detour, original_slot) };
+        let detour = detour_for_target(target.target());
+        let original_slot = original_slot_for_target(target.target());
+        let target_ptr = target.va().0 as *mut c_void;
+        let status = unsafe { (apis.create_hook)(target_ptr, detour, original_slot) };
         if status != MH_OK {
             let cleanup_failures = remove_created_hooks(&apis, &created);
             return Err(MinHookError::with_cleanup_failures(
-                MinHookOperation::CreateHook(target.target),
+                MinHookOperation::CreateHook(target.target()),
                 Some(status),
                 cleanup_failures,
             ));
         }
 
         created.push(CreatedHook {
-            target: target.target,
-            target_address: target.address,
+            target: target.target(),
+            target_va: target.va(),
         });
     }
 
@@ -287,7 +287,7 @@ fn registered_hooks_from_created(created: Vec<CreatedHook>) -> Vec<RegisteredHoo
         .into_iter()
         .map(|hook| RegisteredHook {
             target: hook.target,
-            target_address: hook.target_address,
+            target_va: hook.target_va,
         })
         .collect()
 }
@@ -312,7 +312,7 @@ pub(crate) fn unregister_registered_hooks_with_apis(
     let mut failures = disable_registered_hooks_with_apis(hooks, apis);
 
     for hook in hooks.iter().rev() {
-        let status = unsafe { (apis.remove_hook)(hook.target_address as *mut c_void) };
+        let status = unsafe { (apis.remove_hook)(hook.target_va.0 as *mut c_void) };
         if status != MH_OK {
             failures.push(MinHookCleanupFailure {
                 operation: MinHookCleanupOperation::RemoveHook,
@@ -333,7 +333,7 @@ fn disable_registered_hooks_with_apis(
 ) -> Vec<MinHookCleanupFailure> {
     let mut failures = Vec::new();
     for hook in hooks.iter().rev() {
-        let status = unsafe { (apis.disable_hook)(hook.target_address as *mut c_void) };
+        let status = unsafe { (apis.disable_hook)(hook.target_va.0 as *mut c_void) };
         if status != MH_OK {
             failures.push(MinHookCleanupFailure {
                 operation: MinHookCleanupOperation::DisableHook,
@@ -347,13 +347,13 @@ fn disable_registered_hooks_with_apis(
 
 struct CreatedHook {
     target: HookTarget,
-    target_address: usize,
+    target_va: Va,
 }
 
 fn remove_created_hooks(apis: &MinHookApis, created: &[CreatedHook]) -> Vec<MinHookCleanupFailure> {
     let mut failures = Vec::new();
     for hook in created.iter().rev() {
-        let status = unsafe { (apis.remove_hook)(hook.target_address as *mut c_void) };
+        let status = unsafe { (apis.remove_hook)(hook.target_va.0 as *mut c_void) };
         if status != MH_OK {
             failures.push(MinHookCleanupFailure {
                 operation: MinHookCleanupOperation::RemoveHook,
@@ -568,9 +568,10 @@ unsafe extern "system" fn test_remove_hook(_target: *mut c_void) -> MhStatus {
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use crate::profile::HookTarget;
-    use crate::resolver::ResolvedTarget;
+    use crate::resolver::ResolvedFunctionVa;
+    use crate::resolver::Va;
     use crate::state::HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK;
+    use dwm_lut_profile::HookTarget;
 
     use super::{
         MinHookCleanupOperation, MinHookOperation, detours, disable_registered_hooks,
@@ -578,13 +579,10 @@ mod tests {
         unregister_registered_hooks, unregister_registered_hooks_with_apis,
     };
 
-    fn targets(entries: &[(HookTarget, usize)]) -> Vec<ResolvedTarget> {
+    fn targets(entries: &[(HookTarget, usize)]) -> Vec<ResolvedFunctionVa> {
         entries
             .iter()
-            .map(|(target, address)| ResolvedTarget {
-                target: *target,
-                address: *address,
-            })
+            .map(|(target, va)| ResolvedFunctionVa::new(*target, Va(*va)))
             .collect()
     }
 
@@ -617,7 +615,7 @@ mod tests {
 
         assert_eq!(registered.len(), 2);
         assert_eq!(registered[0].target, HookTarget::Present);
-        assert_eq!(registered[0].target_address, 0x1800_1000);
+        assert_eq!(registered[0].target_va, Va(0x1800_1000));
         assert_eq!(
             detours::original_pointer_for_target(HookTarget::Present).load(Ordering::Acquire)
                 as usize,
@@ -627,7 +625,7 @@ mod tests {
             registered[1].target,
             HookTarget::IsCandidateDirectFlipCompatible
         );
-        assert_eq!(registered[1].target_address, 0x1800_2000);
+        assert_eq!(registered[1].target_va, Va(0x1800_2000));
         assert_eq!(
             detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
                 .load(Ordering::Acquire) as usize,

@@ -1,4 +1,4 @@
-use dwm_lut_hook::HookTarget;
+use dwm_lut_profile::HookTarget;
 
 use crate::profile::pdb_publics::{PdbPublics, PublicSymbol, is_icf_false_stub};
 use crate::profile::pe::PeImage;
@@ -36,45 +36,22 @@ pub fn resolve_function_symbol(
     pubs: &PdbPublics,
     pe: &PeImage,
 ) -> Result<ResolvedSymbol, SymbolResolveError> {
-    let prefix = match target {
-        HookTarget::Present => "?Present@COverlayContext@@",
-        HookTarget::IsCandidateDirectFlipCompatible => {
-            "?IsCandidateDirectFlipCompatible@COverlayContext@@"
-        }
-        HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
-            "?EnsureIndependentFlipState@CDirectFlipInfo@@"
-        }
-        HookTarget::IsDirectFlipSupportedOnTarget => {
-            "?IsDirectFlipSupportedOnTarget@COverlayContext@@"
-        }
-        HookTarget::LegacySwapChainCheckDirectFlipSupport => {
-            "?CheckDirectFlipSupport@CLegacySwapChain@@"
-        }
-        HookTarget::IsAdvancedDirectFlipCompatible => {
-            "?IsAdvancedDirectFlipCompatible@CGlobalCompositionSurfaceInfo@@"
-        }
-        HookTarget::OverlaysEnabled => "?OverlaysEnabled@COverlayContext@@",
-        HookTarget::OverlayTestMode | HookTarget::DisableIndependentFlip => {
-            return Err(SymbolResolveError::UnsupportedTarget);
-        }
-    };
+    if !target.is_function_hook_target() {
+        return Err(SymbolResolveError::UnsupportedTarget);
+    }
 
-    pick_function(&pubs.find_by_prefix(prefix), pe)
+    pick_function(&pubs.find_by_prefix(target.pdb_symbol_prefix()), pe)
 }
 
-pub fn resolve_overlay_test_mode_global(
+pub fn resolve_global_symbol(
+    target: HookTarget,
     pubs: &PdbPublics,
 ) -> Result<&PublicSymbol, SymbolResolveError> {
-    pubs.find_by_prefix("?m_dwOverlayTestMode@CCommonRegistryData@@")
-        .into_iter()
-        .next()
-        .ok_or(SymbolResolveError::Missing)
-}
+    if target.is_function_hook_target() {
+        return Err(SymbolResolveError::UnsupportedTarget);
+    }
 
-pub fn resolve_disable_independent_flip_global(
-    pubs: &PdbPublics,
-) -> Result<&PublicSymbol, SymbolResolveError> {
-    pubs.find_by_prefix("?m_fDisableIndependentFlip@CCommonRegistryData@@")
+    pubs.find_by_prefix(target.pdb_symbol_prefix())
         .into_iter()
         .next()
         .ok_or(SymbolResolveError::Missing)

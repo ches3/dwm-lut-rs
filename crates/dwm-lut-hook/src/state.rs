@@ -4,7 +4,7 @@ use dwm_lut_payload::{ColorMode, HookPayload, MonitorIdentity, MonitorTarget, Pa
 
 use crate::flip_gate::FlipGateEffects;
 use crate::minhook::{MinHookRuntime, RegisteredHook};
-use crate::profile::HookProfile;
+use dwm_lut_profile::HookProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LutMetadata {

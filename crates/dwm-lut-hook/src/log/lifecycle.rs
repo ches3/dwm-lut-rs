@@ -3,8 +3,8 @@
 use dwm_lut_payload::{InitializeStatus, ReplaceAssignmentsStatus, ShutdownStatus};
 
 use crate::minhook::{MinHookCleanupFailure, RegisteredHook};
-use crate::profile::DwmcoreVersion;
 use crate::resolver::SignatureResolutionReport;
+use dwm_lut_profile::DwmcoreVersion;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShutdownFinished {
@@ -183,22 +183,22 @@ pub(crate) fn signatures(report: &SignatureResolutionReport) {
         for target in &report.function_targets {
             super::write(format_args!(
                 "event=signature_resolved target={}",
-                super::quoted(target.target.label())
+                super::quoted(target.target().label())
             ));
         }
         if report.overlay_test_mode.is_some() {
             super::write(format_args!(
                 "event=signature_resolved target={}",
-                super::quoted(crate::profile::HookTarget::OverlayTestMode.label())
+                super::quoted(dwm_lut_profile::HookTarget::OverlayTestMode.label())
             ));
         }
         if report.disable_independent_flip.is_some() {
             super::write(format_args!(
                 "event=signature_resolved target={}",
-                super::quoted(crate::profile::HookTarget::DisableIndependentFlip.label())
+                super::quoted(dwm_lut_profile::HookTarget::DisableIndependentFlip.label())
             ));
         }
-        for skipped in &report.skipped_signatures {
+        for skipped in &report.skipped {
             super::write(format_args!(
                 "event=signature_skipped target={} reason={:?}",
                 super::quoted(skipped.target.label()),
