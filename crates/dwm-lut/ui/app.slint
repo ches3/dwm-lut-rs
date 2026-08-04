@@ -1,56 +1,18 @@
 import {
     Button,
     ComboBox,
-    LineEdit,
     Palette,
     ScrollView,
     VerticalBox,
     HorizontalBox,
 } from "std-widgets.slint";
+import { BusyIndicator, ModalOverlay } from "./widgets.slint";
+import { ManageProfilesOverlay, ProfileNameEditKind } from "./manage-profiles.slint";
+import { SettingsOverlay, HostSettings } from "./settings.slint";
 
-component BusyIndicator {
-    width: 18px;
-    height: 18px;
-    horizontal-stretch: 0;
-    vertical-stretch: 0;
-
-    path := Path {
-        private property <float> radius: min(self.viewbox-width, self.viewbox-height) / 2 - 10;
-        private property <float> start-x: self.viewbox-width / 2;
-        private property <float> start-y: self.viewbox-height / 2;
-        private property <float> start: mod(animation-tick(), 1s) / 1s;
-        private property <float> progress: 0.75;
-
-        width: 100%;
-        height: 100%;
-        viewbox-width: 100;
-        viewbox-height: 100;
-        stroke-width: 3px;
-        stroke: Palette.foreground;
-
-        MoveTo {
-            x: path.start-x - path.radius * sin(-(path.start - 0.001) * 360deg);
-            y: path.start-y - path.radius * cos(-(path.start - 0.001) * 360deg);
-        }
-        LineTo {
-            x: path.start-x - path.radius * sin(-path.start * 360deg);
-            y: path.start-y - path.radius * cos(-path.start * 360deg);
-        }
-        ArcTo {
-            radius-x: path.radius;
-            radius-y: path.radius;
-            x: path.start-x - path.radius * sin(-(path.start + path.progress) * 360deg);
-            y: path.start-y - path.radius * cos(-(path.start + path.progress) * 360deg);
-            sweep: true;
-            large-arc: true;
-        }
-    }
-}
-
-export struct TrayProfile {
-    name: string,
-    label: string,
-}
+export { HostTray, TrayProfile } from "./tray.slint";
+export { ProfileNameEditKind } from "./manage-profiles.slint";
+export { HostSettings } from "./settings.slint";
 
 export struct MonitorRow {
     device-path: string,
@@ -60,76 +22,6 @@ export struct MonitorRow {
     hdr-path: string,
     has-sdr: bool,
     has-hdr: bool,
-}
-
-export enum DialogKind {
-    none,
-    error,
-    add-profile,
-    rename-profile,
-    delete-profile,
-}
-
-export component HostTray inherits SystemTrayIcon {
-    in-out property <string> tray-tooltip <=> root.tooltip;
-    in-out property <bool> tray-visible <=> root.visible;
-    in property <[TrayProfile]> apply-profiles;
-    in property <bool> apply-enabled: false;
-    in property <bool> disable-available: true;
-    in property <bool> exit-enabled: true;
-    in property <string> hook-status: "Checking...";
-
-    callback open-window();
-    callback apply-profile(string);
-    callback disable();
-    callback exit();
-
-    icon: @image-url("../assets/icon.png");
-    tooltip: "dwm-lut";
-
-    clicked => {
-        root.open-window();
-    }
-
-    Menu {
-        MenuItem {
-            title: "Status: \{root.hook-status}";
-            enabled: false;
-        }
-        MenuSeparator {}
-        MenuItem {
-            title: "Open";
-            activated => {
-                root.open-window();
-            }
-        }
-        MenuSeparator {}
-        Menu {
-            title: "Apply";
-            enabled: root.apply-enabled;
-            for profile in root.apply-profiles: MenuItem {
-                title: profile.label;
-                activated => {
-                    root.apply-profile(profile.name);
-                }
-            }
-        }
-        MenuItem {
-            title: "Disable";
-            enabled: root.exit-enabled && root.disable-available;
-            activated => {
-                root.disable();
-            }
-        }
-        MenuSeparator {}
-        MenuItem {
-            title: "Exit";
-            enabled: root.exit-enabled;
-            activated => {
-                root.exit();
-            }
-        }
-    }
 }
 
 export component MainWindow inherits Window {
@@ -147,6 +39,8 @@ export component MainWindow inherits Window {
     in property <bool> load-failed: false;
     in property <string> load-error: "";
     in property <bool> controls-disabled: false;
+    in property <bool> main-controls-disabled: false;
+    in property <bool> suppress-mouse-focus-dismiss: false;
     in property <bool> disable-available: true;
     in property <bool> can-exit: true;
     in property <bool> mutation-busy: false;
@@ -158,13 +52,23 @@ export component MainWindow inherits Window {
         root.selected-profile-index >= 0 && root.selected-profile-index < root.profile-names.length
             ? root.profile-names[root.selected-profile-index]
             : "";
-    in property <string> default-profile: "";
+    in property <int> default-profile-index: 0;
+    private property <string> default-profile:
+        root.default-profile-index >= 0 && root.default-profile-index < root.profile-names.length
+            ? root.profile-names[root.default-profile-index]
+            : "";
     in property <[MonitorRow]> monitors;
-    in property <DialogKind> dialog-kind: DialogKind.none;
-    in property <string> dialog-title: "";
-    in property <string> dialog-message: "";
-    in-out property <string> dialog-input: "";
-    in property <string> dialog-error: "";
+    in property <string> error-message: "";
+    in property <string> delete-dialog-profile: "";
+    in property <bool> settings-open: false;
+    in property <int> settings-focus-nonce: 0;
+    in property <bool> manage-profiles-open: false;
+    in property <ProfileNameEditKind> profile-name-edit-kind: ProfileNameEditKind.none;
+    in property <string> profile-name-edit-original: "";
+    in-out property <string> profile-name-edit-input: "";
+    in property <string> profile-name-edit-error: "";
+    in property <int> profile-name-edit-focus-nonce: 0;
+    in property <bool> apply-on-start: false;
 
     callback apply();
     callback disable();
@@ -172,13 +76,22 @@ export component MainWindow inherits Window {
     callback exit();
     callback profile-selected(string);
     callback add-profile();
-    callback rename-profile();
-    callback delete-profile();
-    callback set-default-profile();
+    callback rename-profile(string);
+    callback delete-profile(string);
+    callback set-default-profile(string);
+    callback open-manage-profiles();
+    callback close-manage-profiles();
+    callback open-settings();
+    callback close-settings();
+    callback settings-changed(HostSettings);
     callback browse-lut(string, bool);
     callback clear-lut(string, bool);
-    callback dialog-accept();
-    callback dialog-cancel();
+    callback error-dismiss();
+    callback delete-confirm();
+    callback delete-cancel();
+    callback profile-name-edit-commit();
+    callback profile-name-edit-cancel();
+    callback dismiss-top();
 
     public function restore-default-focus() {
         app-focus.focus();
@@ -190,11 +103,11 @@ export component MainWindow inherits Window {
         focus-on-click: true;
 
         capture-key-pressed(event) => {
-            if (root.dialog-kind != DialogKind.none && event.text == Key.Escape) {
-                root.dialog-cancel();
-                return accept;
+            if (event.text != Key.Escape) {
+                return reject;
             }
-            reject
+            root.dismiss-top();
+            accept
         }
 
         VerticalBox {
@@ -223,7 +136,7 @@ export component MainWindow inherits Window {
                     alignment: start;
                     Button {
                         text: "Reload";
-                        enabled: !root.controls-disabled;
+                        enabled: !root.main-controls-disabled;
                         clicked => {
                             root.reload-config();
                         }
@@ -252,7 +165,7 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 0;
                         model: root.profile-names;
                         current-index <=> root.selected-profile-index;
-                        enabled: !root.controls-disabled;
+                        enabled: !root.main-controls-disabled;
                         selected(value) => {
                             root.profile-selected(value);
                         }
@@ -266,31 +179,17 @@ export component MainWindow inherits Window {
                         spacing: 6px;
                         horizontal-stretch: 1;
                         Button {
-                            text: "Add";
-                            enabled: !root.controls-disabled;
+                            text: "Manage Profiles";
+                            enabled: !root.main-controls-disabled;
                             clicked => {
-                                root.add-profile();
+                                root.open-manage-profiles();
                             }
                         }
                         Button {
-                            text: "Rename";
-                            enabled: !root.controls-disabled;
+                            text: "Settings";
+                            enabled: !root.main-controls-disabled;
                             clicked => {
-                                root.rename-profile();
-                            }
-                        }
-                        Button {
-                            text: "Delete";
-                            enabled: !root.controls-disabled;
-                            clicked => {
-                                root.delete-profile();
-                            }
-                        }
-                        Button {
-                            text: "Set Default";
-                            enabled: !root.controls-disabled && root.selected-profile != root.default-profile;
-                            clicked => {
-                                root.set-default-profile();
+                                root.open-settings();
                             }
                         }
                     }
@@ -352,14 +251,14 @@ export component MainWindow inherits Window {
                                 }
                                 Button {
                                     text: "Browse";
-                                    enabled: !root.controls-disabled;
+                                    enabled: !root.main-controls-disabled;
                                     clicked => {
                                         root.browse-lut(monitor.device-path, false);
                                     }
                                 }
                                 Button {
                                     text: "Clear";
-                                    enabled: !root.controls-disabled && monitor.has-sdr;
+                                    enabled: !root.main-controls-disabled && monitor.has-sdr;
                                     clicked => {
                                         root.clear-lut(monitor.device-path, false);
                                     }
@@ -382,14 +281,14 @@ export component MainWindow inherits Window {
                                 }
                                 Button {
                                     text: "Browse";
-                                    enabled: !root.controls-disabled;
+                                    enabled: !root.main-controls-disabled;
                                     clicked => {
                                         root.browse-lut(monitor.device-path, true);
                                     }
                                 }
                                 Button {
                                     text: "Clear";
-                                    enabled: !root.controls-disabled && monitor.has-hdr;
+                                    enabled: !root.main-controls-disabled && monitor.has-hdr;
                                     clicked => {
                                         root.clear-lut(monitor.device-path, true);
                                     }
@@ -420,14 +319,14 @@ export component MainWindow inherits Window {
                             spacing: 8px;
                             Button {
                                 text: "Apply";
-                                enabled: !root.controls-disabled;
+                                enabled: !root.main-controls-disabled;
                                 clicked => {
                                     root.apply();
                                 }
                             }
                             Button {
                                 text: "Disable";
-                                enabled: !root.controls-disabled && root.disable-available;
+                                enabled: !root.main-controls-disabled && root.disable-available;
                                 clicked => {
                                     root.disable();
                                 }
@@ -438,84 +337,85 @@ export component MainWindow inherits Window {
             }
         }
 
-        if root.dialog-kind != DialogKind.none: Rectangle {
-            background: #000000b4;
-            width: 100%;
-            height: 100%;
+        if root.manage-profiles-open: ManageProfilesOverlay {
+            profile-names: root.profile-names;
+            default-profile-index: root.default-profile-index;
+            controls-disabled: root.controls-disabled;
+            edit-kind: root.profile-name-edit-kind;
+            edit-original: root.profile-name-edit-original;
+            edit-input <=> root.profile-name-edit-input;
+            edit-error: root.profile-name-edit-error;
+            edit-focus-nonce: root.profile-name-edit-focus-nonce;
+            delete-dialog-profile: root.delete-dialog-profile;
+            close => {
+                root.close-manage-profiles();
+            }
+            set-default-profile(name) => {
+                root.set-default-profile(name);
+            }
+            rename-profile(name) => {
+                root.rename-profile(name);
+            }
+            delete-profile(name) => {
+                root.delete-profile(name);
+            }
+            add-profile => {
+                root.add-profile();
+            }
+            edit-commit => {
+                root.profile-name-edit-commit();
+            }
+            edit-cancel => {
+                root.profile-name-edit-cancel();
+            }
+            delete-confirm => {
+                root.delete-confirm();
+            }
+            delete-cancel => {
+                root.delete-cancel();
+            }
+        }
 
-            TouchArea {
-                width: 100%;
-                height: 100%;
-                clicked => {
-                    root.dialog-cancel();
-                }
+        if root.settings-open: SettingsOverlay {
+            apply-on-start: root.apply-on-start;
+            focus-nonce: root.settings-focus-nonce;
+            controls-disabled: root.controls-disabled;
+            close => {
+                root.close-settings();
+            }
+            changed(settings) => {
+                root.settings-changed(settings);
+            }
+        }
+
+        if root.error-message != "": ModalOverlay {
+            panel-max-width: 360px;
+            close => {
+                root.error-dismiss();
             }
 
-            Rectangle {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: min(360px, parent.width - 40px);
-                height: dialog-content.preferred-height;
-                background: Palette.background;
-                border-width: 1px;
-                border-color: Palette.border;
-                border-radius: 6px;
-                drop-shadow-blur: 16px;
-                drop-shadow-color: #00000066;
+            VerticalBox {
+                padding: 16px;
+                spacing: 16px;
 
-                TouchArea {
-                    width: 100%;
-                    height: 100%;
+                Text {
+                    text: "Error";
+                    font-size: 16px;
+                    font-weight: 700;
                 }
 
-                dialog-content := VerticalBox {
-                    padding: 16px;
-                    spacing: 16px;
+                Text {
+                    text: root.error-message;
+                    wrap: word-wrap;
+                }
 
-                    Text {
-                        text: root.dialog-title;
-                        font-size: 16px;
-                        font-weight: 700;
-                    }
-
-                    if root.dialog-kind == DialogKind.error || root.dialog-kind == DialogKind.delete-profile: Text {
-                        text: root.dialog-message;
-                        wrap: word-wrap;
-                    }
-
-                    if root.dialog-kind == DialogKind.add-profile || root.dialog-kind == DialogKind.rename-profile: VerticalLayout {
-                        spacing: 8px;
-                        Text {
-                            text: "Profile name";
-                        }
-                        LineEdit {
-                            text <=> root.dialog-input;
-                            enabled: true;
-                            init => {
-                                self.focus();
-                            }
-                        }
-                        if root.dialog-error != "": Text {
-                            text: root.dialog-error;
-                            color: #d9534f;
-                            wrap: word-wrap;
-                        }
-                    }
-
-                    HorizontalLayout {
-                        spacing: 8px;
-                        alignment: end;
-                        Button {
-                            text: root.dialog-kind == DialogKind.delete-profile ? "Delete" : "OK";
-                            clicked => {
-                                root.dialog-accept();
-                            }
-                        }
-                        if root.dialog-kind != DialogKind.error: Button {
-                            text: "Cancel";
-                            clicked => {
-                                root.dialog-cancel();
-                            }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    Button {
+                        text: "OK";
+                        clicked => {
+                            root.error-dismiss();
                         }
                     }
                 }

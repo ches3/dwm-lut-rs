@@ -24,8 +24,9 @@ fn main() {
             .unwrap_or_else(|error| panic!("failed to embed application icon: {error}"));
     }
 
-    let ui_path = manifest_dir.join("ui/app.slint");
-    println!("cargo:rerun-if-changed={}", ui_path.display());
+    let ui_dir = manifest_dir.join("ui");
+    println!("cargo:rerun-if-changed={}", ui_dir.display());
+    let ui_path = ui_dir.join("app.slint");
     let ui_config = slint_build::CompilerConfiguration::new().with_style("cosmic".into());
     slint_build::compile_with_config(ui_path, ui_config)
         .unwrap_or_else(|error| panic!("slint build failed: {error}"));

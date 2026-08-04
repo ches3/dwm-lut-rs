@@ -1,0 +1,69 @@
+import { CheckBox, VerticalBox } from "std-widgets.slint";
+import { CloseButton, ModalOverlay } from "./widgets.slint";
+
+export struct HostSettings {
+    apply-on-start: bool,
+}
+
+export component SettingsOverlay {
+    in property <bool> apply-on-start: false;
+    in property <int> focus-nonce: 0;
+    in property <bool> controls-disabled: false;
+
+    callback close;
+    callback changed(HostSettings);
+
+    width: 100%;
+    height: 100%;
+
+    ModalOverlay {
+        panel-max-width: 420px;
+        close => {
+            root.close();
+        }
+
+        VerticalBox {
+            padding: 24px;
+            spacing: 16px;
+
+            private property <int> focus-nonce: root.focus-nonce;
+            changed focus-nonce => {
+                apply-on-start-checkbox.focus();
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: space-between;
+                cross-axis-alignment: center;
+                Text {
+                    text: "Settings";
+                    font-size: 20px;
+                    font-weight: 700;
+                }
+                CloseButton {
+                    clicked => {
+                        root.close();
+                    }
+                }
+            }
+
+            VerticalLayout {
+                padding-top: 4px;
+                padding-bottom: 12px;
+                padding-left: 4px;
+                padding-right: 4px;
+                spacing: 12px;
+                apply-on-start-checkbox := CheckBox {
+                    text: "Apply default profile on host start";
+                    checked: root.apply-on-start;
+                    enabled: !root.controls-disabled;
+                    toggled => {
+                        root.changed({
+                            apply-on-start: self.checked,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}

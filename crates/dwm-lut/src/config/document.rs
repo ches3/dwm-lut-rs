@@ -32,6 +32,8 @@ fn reject_invalid_profile_name(name: &str, context: &str) -> Result<(), ConfigEr
 pub(crate) struct ConfigDocument {
     pub(crate) default_profile: String,
     pub(crate) profiles: BTreeMap<String, ProfileDocument>,
+    #[serde(default)]
+    pub(crate) apply_on_start: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -69,6 +71,7 @@ impl Default for ConfigDocument {
         Self {
             default_profile: "default".to_string(),
             profiles: BTreeMap::from([("default".to_string(), ProfileDocument::default())]),
+            apply_on_start: false,
         }
     }
 }
@@ -396,5 +399,28 @@ mod document_tests {
             parsed.profiles["default"].assignments[0].lut_path,
             PathBuf::from("luts/desktop.cube")
         );
+    }
+
+    #[test]
+    fn legacy_document_without_apply_on_start_defaults_to_false() {
+        let parsed = parse_config_document_str(
+            r#"{
+                "default_profile": "default",
+                "profiles": { "default": { "assignments": [] } }
+            }"#,
+        )
+        .unwrap();
+        assert!(!parsed.apply_on_start);
+    }
+
+    #[test]
+    fn document_roundtrip_preserves_apply_on_start() {
+        let document = ConfigDocument {
+            apply_on_start: true,
+            ..ConfigDocument::default()
+        };
+        let json = serde_json::to_string(&document).unwrap();
+        let parsed = parse_config_document_str(&json).unwrap();
+        assert!(parsed.apply_on_start);
     }
 }

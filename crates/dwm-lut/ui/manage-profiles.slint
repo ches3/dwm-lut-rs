@@ -1,0 +1,324 @@
+import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { CloseButton, ModalOverlay } from "./widgets.slint";
+
+export enum ProfileNameEditKind {
+    none,
+    add,
+    rename,
+}
+
+component ProfileNameEditor {
+    in-out property <string> text;
+    in property <string> error: "";
+    in property <int> focus-nonce: 0;
+    callback commit;
+    callback cancel;
+
+    horizontal-stretch: 1;
+    private property <bool> committed: false;
+
+    changed focus-nonce => {
+        root.committed = false;
+        edit.focus();
+        edit.set-selection-offsets(2147483647, 2147483647);
+    }
+
+    VerticalLayout {
+        spacing: 4px;
+        horizontal-stretch: 1;
+        width: 100%;
+
+        edit := LineEdit {
+            text <=> root.text;
+            enabled: true;
+            horizontal-stretch: 1;
+            width: 100%;
+            private property <bool> had-focus: false;
+
+            changed has-focus => {
+                if (self.had-focus && !self.has-focus && !root.committed) {
+                    root.committed = true;
+                    root.commit();
+                }
+                self.had-focus = self.has-focus;
+            }
+
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.cancel();
+                    return accept;
+                }
+                reject
+            }
+
+            accepted(_) => {
+                root.committed = true;
+                root.commit();
+            }
+
+            init => {
+                self.focus();
+                self.had-focus = true;
+                self.set-selection-offsets(2147483647, 2147483647);
+            }
+        }
+
+        if root.error != "": Text {
+            text: root.error;
+            color: #d9534f;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component ManageProfilesOverlay {
+    in property <[string]> profile-names;
+    in property <int> default-profile-index: 0;
+    in property <bool> controls-disabled: false;
+    in property <ProfileNameEditKind> edit-kind: ProfileNameEditKind.none;
+    in property <string> edit-original: "";
+    in-out property <string> edit-input: "";
+    in property <string> edit-error: "";
+    in property <int> edit-focus-nonce: 0;
+    in property <string> delete-dialog-profile: "";
+
+    callback close;
+    callback set-default-profile(string);
+    callback rename-profile(string);
+    callback delete-profile(string);
+    callback add-profile();
+    callback edit-commit();
+    callback edit-cancel();
+    callback delete-confirm();
+    callback delete-cancel();
+
+    width: 100%;
+    height: 100%;
+
+    private property <bool> edit-commit-sent: false;
+
+    changed edit-kind => {
+        root.edit-commit-sent = false;
+    }
+    changed edit-focus-nonce => {
+        root.edit-commit-sent = false;
+    }
+
+    public function request-edit-commit() {
+        if root.edit-kind == ProfileNameEditKind.none || root.edit-commit-sent {
+            return;
+        }
+        root.edit-commit-sent = true;
+        root.edit-commit();
+    }
+
+    ModalOverlay {
+        panel-max-width: 360px;
+        close => {
+            if root.delete-dialog-profile == "" {
+                if root.edit-kind != ProfileNameEditKind.none {
+                    root.request-edit-commit();
+                } else {
+                    root.close();
+                }
+            }
+        }
+
+        FocusScope {
+            width: 100%;
+            focus-on-click: true;
+
+            VerticalLayout {
+                padding-top: 24px;
+                padding-bottom: 24px;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    spacing: 8px;
+                    alignment: space-between;
+                    cross-axis-alignment: center;
+                    Text {
+                        text: "Manage Profiles";
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
+                    CloseButton {
+                        enabled: root.edit-kind == ProfileNameEditKind.none && root.delete-dialog-profile == "";
+                        clicked => {
+                            root.close();
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    spacing: 16px;
+                    Text {
+                        text: "Default Profile";
+                        vertical-alignment: center;
+                    }
+                    ComboBox {
+                        horizontal-stretch: 1;
+                        model: root.profile-names;
+                        current-index: root.default-profile-index;
+                        enabled: !root.controls-disabled && root.edit-kind == ProfileNameEditKind.none;
+                        selected(value) => {
+                            root.set-default-profile(value);
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-right: 10px;
+                    ScrollView {
+                        private property <length> list-cap: max(120px, root.height - 220px);
+                        height: min(list.preferred-height, list-cap);
+                        viewport-height: list.preferred-height;
+
+                        list := VerticalLayout {
+                            alignment: start;
+                            spacing: 8px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            padding-left: 8px;
+                            padding-right: 14px;
+
+                            for name in root.profile-names: HorizontalLayout {
+                                spacing: 8px;
+
+                                if root.edit-kind == ProfileNameEditKind.rename && root.edit-original == name: ProfileNameEditor {
+                                    horizontal-stretch: 1;
+                                    text <=> root.edit-input;
+                                    error: root.edit-error;
+                                    focus-nonce: root.edit-focus-nonce;
+                                    commit => {
+                                        root.request-edit-commit();
+                                    }
+                                    cancel => {
+                                        root.edit-cancel();
+                                    }
+                                }
+                                if root.edit-kind != ProfileNameEditKind.rename || root.edit-original != name: HorizontalLayout {
+                                    padding-left: 16px;
+                                    horizontal-stretch: 1;
+                                    if root.edit-kind != ProfileNameEditKind.none: TouchArea {
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            root.request-edit-commit();
+                                        }
+                                        Text {
+                                            text: name;
+                                            width: 100%;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+                                    if root.edit-kind == ProfileNameEditKind.none: Text {
+                                        text: name;
+                                        horizontal-stretch: 1;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                                Button {
+                                    text: "Rename";
+                                    enabled: !root.controls-disabled && root.edit-kind == ProfileNameEditKind.none;
+                                    clicked => {
+                                        root.rename-profile(name);
+                                    }
+                                }
+                                Button {
+                                    text: "Delete";
+                                    enabled: !root.controls-disabled && root.edit-kind == ProfileNameEditKind.none;
+                                    clicked => {
+                                        root.delete-profile(name);
+                                    }
+                                }
+                            }
+
+                            if root.edit-kind == ProfileNameEditKind.add: HorizontalLayout {
+                                spacing: 8px;
+                                ProfileNameEditor {
+                                    horizontal-stretch: 1;
+                                    text <=> root.edit-input;
+                                    error: root.edit-error;
+                                    focus-nonce: root.edit-focus-nonce;
+                                    commit => {
+                                        root.request-edit-commit();
+                                    }
+                                    cancel => {
+                                        root.edit-cancel();
+                                    }
+                                }
+                                Button {
+                                    text: "Rename";
+                                    enabled: !root.controls-disabled && root.edit-kind == ProfileNameEditKind.none;
+                                }
+                                Button {
+                                    text: "Delete";
+                                    enabled: !root.controls-disabled && root.edit-kind == ProfileNameEditKind.none;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    Button {
+                        text: "Add Profile";
+                        horizontal-stretch: 1;
+                        enabled: !root.controls-disabled && root.edit-kind == ProfileNameEditKind.none;
+                        clicked => {
+                            root.add-profile();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.delete-dialog-profile != "": ModalOverlay {
+        panel-max-width: 360px;
+        close => {
+            root.delete-cancel();
+        }
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 16px;
+
+            Text {
+                text: "Delete Profile";
+                font-size: 16px;
+                font-weight: 700;
+            }
+
+            Text {
+                text: "Are you sure you want to delete profile \"\{root.delete-dialog-profile}\"?";
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                Button {
+                    text: "Delete";
+                    clicked => {
+                        root.delete-confirm();
+                    }
+                }
+                Button {
+                    text: "Cancel";
+                    clicked => {
+                        root.delete-cancel();
+                    }
+                }
+            }
+        }
+    }
+}

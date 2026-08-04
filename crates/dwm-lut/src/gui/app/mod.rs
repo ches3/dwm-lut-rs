@@ -2,6 +2,7 @@ mod config_editor;
 mod file_dialog;
 mod monitor_events;
 mod mouse_focus;
+mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -18,6 +19,7 @@ pub(crate) use monitor_events::{
     SETTLE_DELAY as MONITOR_CHANGE_SETTLE_DELAY,
 };
 pub(crate) use mouse_focus::{MouseFocusDismissListener, MouseFocusDismissSignal};
+pub(super) use view::{ProfileNameEdit, ViewState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ErrorPresentation {
@@ -170,32 +172,6 @@ pub(super) fn assignment_path(
                 && assignment.color_mode == color_mode
         })
         .map(|assignment| assignment.lut_path.clone())
-}
-
-pub(super) enum ProfileDialog {
-    Add { value: String },
-    Rename { original: String, value: String },
-}
-
-impl ProfileDialog {
-    pub(super) fn title(&self) -> &'static str {
-        match self {
-            Self::Add { .. } => "Add Profile",
-            Self::Rename { .. } => "Rename Profile",
-        }
-    }
-
-    pub(super) fn value(&self) -> &str {
-        match self {
-            Self::Add { value } | Self::Rename { value, .. } => value,
-        }
-    }
-}
-
-pub(super) enum ModalState {
-    Error(String),
-    Profile(ProfileDialog),
-    DeleteProfile(String),
 }
 
 #[cfg(test)]

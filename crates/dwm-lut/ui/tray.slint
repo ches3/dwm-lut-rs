@@ -1,0 +1,66 @@
+export struct TrayProfile {
+    name: string,
+    label: string,
+}
+
+export component HostTray inherits SystemTrayIcon {
+    in-out property <string> tray-tooltip <=> root.tooltip;
+    in-out property <bool> tray-visible <=> root.visible;
+    in property <[TrayProfile]> apply-profiles;
+    in property <bool> apply-enabled: false;
+    in property <bool> disable-available: true;
+    in property <bool> exit-enabled: true;
+    in property <string> hook-status: "Checking...";
+
+    callback open-window();
+    callback apply-profile(string);
+    callback disable();
+    callback exit();
+
+    icon: @image-url("../assets/icon.png");
+    tooltip: "dwm-lut";
+
+    clicked => {
+        root.open-window();
+    }
+
+    Menu {
+        MenuItem {
+            title: "Status: \{root.hook-status}";
+            enabled: false;
+        }
+        MenuSeparator {}
+        MenuItem {
+            title: "Open";
+            activated => {
+                root.open-window();
+            }
+        }
+        MenuSeparator {}
+        Menu {
+            title: "Apply";
+            enabled: root.apply-enabled;
+            for profile in root.apply-profiles: MenuItem {
+                title: profile.label;
+                activated => {
+                    root.apply-profile(profile.name);
+                }
+            }
+        }
+        MenuItem {
+            title: "Disable";
+            enabled: root.exit-enabled && root.disable-available;
+            activated => {
+                root.disable();
+            }
+        }
+        MenuSeparator {}
+        MenuItem {
+            title: "Exit";
+            enabled: root.exit-enabled;
+            activated => {
+                root.exit();
+            }
+        }
+    }
+}
