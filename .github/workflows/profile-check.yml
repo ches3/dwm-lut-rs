@@ -1,0 +1,194 @@
+name: profile-check
+
+on:
+  # After Winbindex updates (daily 07:00 / Tue 18:15 UTC)
+  # https://github.com/m417z/winbindex/blob/main/.github/workflows/deploy.yml
+  schedule:
+    - cron: "0 9 * * *"
+    - cron: "0 20 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Restore dwmcore artifacts
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: dwmcore
+          # Placeholder exact key; real hits come from restore-keys prefix match.
+          key: dwmcore-restore
+          restore-keys: |
+            dwmcore-
+
+      - name: Profile check
+        id: check
+        env:
+          # Keep in sync with SUPPORTED_BUILDS in crates/dwm-lut-profile.
+          PROFILE_BUILDS: "26100"
+        run: |
+          set -uo pipefail
+
+          mkdir -p check-outputs
+          : > mismatched-versions.txt
+          : > checked-versions.txt
+          hard_fail=0
+          mismatch=0
+
+          for build in $PROFILE_BUILDS; do
+            out="check-outputs/${build}.txt"
+            set +e
+            cargo xtask profile check --build-latest "$build" -y 2>&1 | tee "$out"
+            code=${PIPESTATUS[0]}
+            set -e
+
+            VERSION=$(sed -n 's/^version  //p' "$out" | head -n 1 | tr -d '[:space:]')
+
+            if [[ -n "$VERSION" && ! "$VERSION" =~ ^10\.0\.[0-9]+\.[0-9]+$ ]]; then
+              echo "unexpected version format: ${VERSION}" >&2
+              hard_fail=1
+              continue
+            fi
+
+            if [[ "$code" -eq 0 ]]; then
+              if [[ -z "$VERSION" ]]; then
+                echo "profile check for build ${build} succeeded without a version line" >&2
+                hard_fail=1
+                continue
+              fi
+              echo "$VERSION" >> checked-versions.txt
+              continue
+            fi
+            if [[ "$code" -eq 2 ]]; then
+              if [[ -z "$VERSION" ]]; then
+                echo "profile mismatch for build ${build} without a version line" >&2
+                hard_fail=1
+                continue
+              fi
+              echo "$VERSION" >> checked-versions.txt
+              echo "$VERSION|$out" >> mismatched-versions.txt
+              mismatch=1
+              continue
+            fi
+            hard_fail=1
+          done
+
+          if [[ -s checked-versions.txt ]]; then
+            cache_key="dwmcore-$(sort -u checked-versions.txt | paste -sd_ -)"
+            echo "cache_key=${cache_key}" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [[ "$mismatch" -eq 1 ]]; then
+            echo "has_mismatch=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_mismatch=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [[ "$hard_fail" -eq 1 ]]; then
+            exit 1
+          fi
+
+      - name: Lookup dwmcore cache key
+        id: dwmcore-lookup
+        if: steps.check.outputs.cache_key != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: dwmcore
+          key: ${{ steps.check.outputs.cache_key }}
+          lookup-only: true
+
+      - name: Prune dwmcore artifacts
+        if: >-
+          steps.check.outputs.cache_key != '' &&
+          steps.dwmcore-lookup.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+
+          if [[ ! -s checked-versions.txt ]]; then
+            echo "checked-versions.txt is empty; refusing to prune" >&2
+            exit 1
+          fi
+
+          mkdir -p dwmcore
+          declare -A keep=()
+          while IFS= read -r ver; do
+            [[ -n "$ver" ]] || continue
+            keep["dwmcore-${ver}.dll"]=1
+            keep["dwmcore-${ver}.pdb"]=1
+          done < checked-versions.txt
+
+          shopt -s nullglob
+          for path in dwmcore/*; do
+            base=$(basename "$path")
+            if [[ -z "${keep[$base]+x}" ]]; then
+              rm -f "$path"
+            fi
+          done
+
+      - name: Save dwmcore artifacts
+        if: >-
+          steps.check.outputs.cache_key != '' &&
+          steps.dwmcore-lookup.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: dwmcore
+          key: ${{ steps.check.outputs.cache_key }}
+
+      - name: Open profile issues
+        if: steps.check.outputs.has_mismatch == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -s mismatched-versions.txt ]]; then
+            echo "has_mismatch without mismatched versions" >&2
+            exit 1
+          fi
+
+          gh label create dwmcore-compat \
+            --description "Compatibility with dwmcore versions" \
+            --color "E87722" \
+            2>/dev/null || true
+
+          while IFS='|' read -r VERSION OUT; do
+            [[ -n "$VERSION" ]] || continue
+
+            TITLE="Hook profile mismatch: ${VERSION}"
+            EXISTING=$(gh issue list \
+              --state open \
+              --label dwmcore-compat \
+              --json number,title \
+              | jq --arg title "$TITLE" \
+                '.[] | select(.title == $title) | .number' \
+              | head -n 1)
+
+            if [[ -n "$EXISTING" ]]; then
+              continue
+            fi
+
+            BODY_FILE=$(mktemp)
+            {
+              echo '```'
+              cat "$OUT"
+              echo '```'
+            } > "$BODY_FILE"
+
+            gh issue create --title "$TITLE" --label dwmcore-compat --body-file "$BODY_FILE"
+          done < mismatched-versions.txt
