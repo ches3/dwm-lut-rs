@@ -19,14 +19,18 @@ pub(super) struct Args {
     pub dll: Option<PathBuf>,
     pub pdb: Option<PathBuf>,
     pub version: Option<String>,
+    pub build_latest: Option<u16>,
+    pub yes: bool,
 }
 
 pub(super) fn run(args: Args) -> Result<(), Box<dyn Error>> {
     let (dll, pdb) = ensure::resolve_inputs(
         args.system,
         args.version.as_ref(),
+        args.build_latest,
         args.dll.as_ref(),
         args.pdb.as_ref(),
+        args.yes,
     )?;
     let report = extract(&dll, &pdb)?;
     print_report(&report);

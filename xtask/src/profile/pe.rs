@@ -13,7 +13,7 @@ pub struct CodeViewInfo {
     pub pdb_file_name: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FileVersion {
     pub major: u16,
     pub minor: u16,
@@ -23,23 +23,8 @@ pub struct FileVersion {
 
 impl FileVersion {
     pub fn parse(text: &str) -> Result<Self, Box<dyn Error>> {
-        let parts: Vec<_> = text.split('.').collect();
-        if parts.len() != 4 {
-            return Err(
-                "version must be FileVersion 10.0.<build>.<revision> (example: 10.0.26100.4484)"
-                    .into(),
-            );
-        }
-        let parse = |part: &str, name: &str| {
-            part.parse::<u16>()
-                .map_err(|error| format!("invalid {name} '{part}': {error}"))
-        };
-        let version = Self {
-            major: parse(parts[0], "major")?,
-            minor: parse(parts[1], "minor")?,
-            build: parse(parts[2], "build")?,
-            revision: parse(parts[3], "revision")?,
-        };
+        let version =
+            parse_file_version(text).map_err(|error| -> Box<dyn Error> { error.into() })?;
         if version.major != 10 || version.minor != 0 {
             return Err(
                 "version must be FileVersion 10.0.<build>.<revision> (example: 10.0.26100.4484)"
@@ -222,5 +207,12 @@ mod tests {
     #[test]
     fn rejects_short_build_revision_label() {
         assert!(FileVersion::parse("26100.4484").is_err());
+    }
+
+    #[test]
+    fn orders_file_versions() {
+        let older = FileVersion::parse("10.0.26100.4484").expect("parse");
+        let newer = FileVersion::parse("10.0.26100.8737").expect("parse");
+        assert!(older < newer);
     }
 }

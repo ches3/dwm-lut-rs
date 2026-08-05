@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::io;
+use std::fmt;
 use std::path::PathBuf;
 
 use comfy_table::presets::NOTHING;
@@ -16,19 +16,65 @@ use super::extract::symbols::{SymbolResolveError, resolve_function_symbol, resol
 use super::pdb_publics::PdbPublics;
 use super::pe::PeImage;
 
+#[derive(Debug)]
+pub enum CheckError {
+    Mismatch(String),
+    Other(Box<dyn Error>),
+}
+
+impl fmt::Display for CheckError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mismatch(message) => f.write_str(message),
+            Self::Other(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl Error for CheckError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Mismatch(_) => None,
+            Self::Other(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+impl From<Box<dyn Error>> for CheckError {
+    fn from(error: Box<dyn Error>) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<String> for CheckError {
+    fn from(error: String) -> Self {
+        Self::Other(error.into())
+    }
+}
+
+impl From<ProfileSelectError> for CheckError {
+    fn from(error: ProfileSelectError) -> Self {
+        Self::Other(Box::new(error))
+    }
+}
+
 pub(super) struct Args {
     pub system: bool,
     pub dll: Option<PathBuf>,
     pub pdb: Option<PathBuf>,
     pub version: Option<String>,
+    pub build_latest: Option<u16>,
+    pub yes: bool,
 }
 
-pub(super) fn run(args: Args) -> Result<(), Box<dyn Error>> {
+pub(super) fn run(args: Args) -> Result<(), CheckError> {
     let (dll_path, pdb_path) = ensure::resolve_inputs(
         args.system,
         args.version.as_ref(),
+        args.build_latest,
         args.dll.as_ref(),
         args.pdb.as_ref(),
+        args.yes,
     )?;
 
     let pe = PeImage::load(&dll_path)?;
@@ -36,7 +82,7 @@ pub(super) fn run(args: Args) -> Result<(), Box<dyn Error>> {
         build: u32::from(pe.file_version.build),
         revision: u32::from(pe.file_version.revision),
     };
-    let selected = select_profile(version).map_err(profile_select_io_error)?;
+    let selected = select_profile(version)?;
     let profile = (selected.profile)();
 
     let pubs = PdbPublics::load(&pdb_path)?;
@@ -52,25 +98,25 @@ pub(super) fn run(args: Args) -> Result<(), Box<dyn Error>> {
 
     let layout_failed = print_layout_table(&profile, &layout.rows);
     let required_failed = print_signatures_table(&profile, &pe, &pubs);
+    mismatch_result(layout_failed, required_failed)
+}
 
+fn mismatch_result(layout_failed: usize, required_failed: usize) -> Result<(), CheckError> {
     match (layout_failed, required_failed) {
         (0, 0) => Ok(()),
-        (layouts, 0) => Err(io::Error::other(format!(
+        (layouts, 0) => Err(CheckError::Mismatch(format!(
             "{layouts} layout value{} failed",
             if layouts == 1 { "" } else { "s" }
-        ))
-        .into()),
-        (0, signatures) => Err(io::Error::other(format!(
+        ))),
+        (0, signatures) => Err(CheckError::Mismatch(format!(
             "{signatures} required signature{} failed",
             if signatures == 1 { "" } else { "s" }
-        ))
-        .into()),
-        (layouts, signatures) => Err(io::Error::other(format!(
+        ))),
+        (layouts, signatures) => Err(CheckError::Mismatch(format!(
             "{layouts} layout value{} failed, {signatures} required signature{} failed",
             if layouts == 1 { "" } else { "s" },
             if signatures == 1 { "" } else { "s" }
-        ))
-        .into()),
+        ))),
     }
 }
 
@@ -280,6 +326,40 @@ fn stdout_supports_color() -> bool {
     supports_color::on_cached(supports_color::Stream::Stdout).is_some()
 }
 
-fn profile_select_io_error(error: ProfileSelectError) -> io::Error {
-    io::Error::other(error.to_string())
+#[cfg(test)]
+mod tests {
+    use super::{CheckError, mismatch_result};
+
+    #[test]
+    fn zero_failures_succeed() {
+        assert!(mismatch_result(0, 0).is_ok());
+    }
+
+    #[test]
+    fn layout_failures_are_mismatch() {
+        let error = mismatch_result(2, 0).expect_err("mismatch");
+        assert!(matches!(
+            error,
+            CheckError::Mismatch(message) if message == "2 layout values failed"
+        ));
+    }
+
+    #[test]
+    fn signature_failures_are_mismatch() {
+        let error = mismatch_result(0, 1).expect_err("mismatch");
+        assert!(matches!(
+            error,
+            CheckError::Mismatch(message) if message == "1 required signature failed"
+        ));
+    }
+
+    #[test]
+    fn combined_failures_are_mismatch() {
+        let error = mismatch_result(1, 2).expect_err("mismatch");
+        assert!(matches!(
+            error,
+            CheckError::Mismatch(message)
+                if message == "1 layout value failed, 2 required signatures failed"
+        ));
+    }
 }
