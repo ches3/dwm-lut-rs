@@ -69,6 +69,7 @@ export component MainWindow inherits Window {
     in property <string> profile-name-edit-error: "";
     in property <int> profile-name-edit-focus-nonce: 0;
     in property <bool> apply-on-start: false;
+    in property <bool> flip-gate-enabled: true;
 
     callback apply();
     callback disable();
@@ -378,6 +379,7 @@ export component MainWindow inherits Window {
 
         if root.settings-open: SettingsOverlay {
             apply-on-start: root.apply-on-start;
+            flip-gate-enabled: root.flip-gate-enabled;
             focus-nonce: root.settings-focus-nonce;
             controls-disabled: root.controls-disabled;
             close => {

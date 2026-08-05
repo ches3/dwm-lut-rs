@@ -19,7 +19,6 @@ mod resolver;
 mod state;
 
 pub use bootstrap::HookError;
-pub use flip_gate::FlipGateEffects;
 pub use minhook::{MinHookError, MinHookRuntime, MinHookState, RegisteredHook};
 pub use present::DirtyRect;
 pub use resolver::{

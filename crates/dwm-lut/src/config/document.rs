@@ -27,6 +27,10 @@ fn reject_invalid_profile_name(name: &str, context: &str) -> Result<(), ConfigEr
     Ok(())
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ConfigDocument {
@@ -34,6 +38,8 @@ pub(crate) struct ConfigDocument {
     pub(crate) profiles: BTreeMap<String, ProfileDocument>,
     #[serde(default)]
     pub(crate) apply_on_start: bool,
+    #[serde(default = "default_true")]
+    pub(crate) flip_gate_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -72,6 +78,7 @@ impl Default for ConfigDocument {
             default_profile: "default".to_string(),
             profiles: BTreeMap::from([("default".to_string(), ProfileDocument::default())]),
             apply_on_start: false,
+            flip_gate_enabled: true,
         }
     }
 }
@@ -422,5 +429,28 @@ mod document_tests {
         let json = serde_json::to_string(&document).unwrap();
         let parsed = parse_config_document_str(&json).unwrap();
         assert!(parsed.apply_on_start);
+    }
+
+    #[test]
+    fn legacy_document_without_flip_gate_enabled_defaults_to_true() {
+        let parsed = parse_config_document_str(
+            r#"{
+                "default_profile": "default",
+                "profiles": { "default": { "assignments": [] } }
+            }"#,
+        )
+        .unwrap();
+        assert!(parsed.flip_gate_enabled);
+    }
+
+    #[test]
+    fn document_roundtrip_preserves_flip_gate_enabled() {
+        let document = ConfigDocument {
+            flip_gate_enabled: false,
+            ..ConfigDocument::default()
+        };
+        let json = serde_json::to_string(&document).unwrap();
+        let parsed = parse_config_document_str(&json).unwrap();
+        assert!(!parsed.flip_gate_enabled);
     }
 }

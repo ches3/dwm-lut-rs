@@ -1122,6 +1122,7 @@ mod tests {
                     lut,
                 })
                 .collect(),
+            flip_gate_enabled: true,
         }
     }
 

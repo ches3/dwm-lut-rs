@@ -78,7 +78,7 @@ pub struct HookRuntime {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookState {
-    pub payload: HookPayload,
+    pub profile_name: String,
     pub profile: HookProfile,
     pub assignments: Arc<Vec<LutAssignment>>,
     pub runtime: HookRuntime,
@@ -117,7 +117,7 @@ pub fn hook_profile() -> Option<HookProfile> {
 }
 
 pub(crate) fn active_profile_name() -> Option<String> {
-    with_state(|state| state.payload.profile_name.clone())
+    with_state(|state| state.profile_name.clone())
 }
 
 pub(crate) fn assignments() -> Option<Arc<Vec<LutAssignment>>> {
@@ -143,28 +143,33 @@ pub(crate) fn try_lock_present_runtime() -> Option<MutexGuard<'static, ()>> {
 }
 
 pub(crate) fn clear_state_after_shutdown() {
+    set_flip_gate(false);
     if let Some(state) = STATE.get()
         && let Ok(mut guard) = state.lock()
     {
-        *guard = None;
+        let _ = guard.take();
     }
     if let Some(state) = RETAINED_STATE.get()
         && let Ok(mut guard) = state.lock()
+        && let Some(mut state) = guard.take()
     {
-        *guard = None;
+        state.runtime.flip_gate_effects.set_enabled(false);
     }
 }
 
 pub(crate) fn retain_state_after_shutdown() {
+    set_flip_gate(false);
     let active = STATE.get_or_init(|| Mutex::new(None));
     let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
-    if let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock()) {
-        *retained = active.take();
+    if let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock())
+        && let Some(state) = active.take()
+    {
+        *retained = Some(state);
     }
 }
 
 pub(crate) fn reactivate_retained_state(
-    payload: HookPayload,
+    profile_name: String,
     assignments: Vec<LutAssignment>,
 ) -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
     let active = STATE.get_or_init(|| Mutex::new(None));
@@ -176,10 +181,17 @@ pub(crate) fn reactivate_retained_state(
         return None;
     }
     let mut state = retained.take()?;
-    update_lut_assignments(&mut state, payload, assignments);
+    update_lut_assignments(&mut state, profile_name, assignments);
     let plan = (state.runtime.minhook, state.runtime.hooks.clone());
     *active = Some(state);
     Some(plan)
+}
+
+pub(crate) fn set_flip_gate(enabled: bool) {
+    crate::flip_gate::set_enabled(enabled);
+    let _ = with_state_mut(|state| {
+        state.runtime.flip_gate_effects.set_enabled(enabled);
+    });
 }
 
 pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
@@ -192,21 +204,22 @@ pub enum ReplaceLutAssignmentsError {
 }
 
 pub fn replace_lut_assignments(
-    payload: HookPayload,
+    profile_name: String,
     assignments: Vec<LutAssignment>,
 ) -> Result<(), ReplaceLutAssignmentsError> {
     with_state_mut(|state| {
-        update_lut_assignments(state, payload, assignments);
+        update_lut_assignments(state, profile_name, assignments);
     })
-    .ok_or(ReplaceLutAssignmentsError::NotInitialized)
+    .ok_or(ReplaceLutAssignmentsError::NotInitialized)?;
+    Ok(())
 }
 
 fn update_lut_assignments(
     state: &mut HookState,
-    payload: HookPayload,
+    profile_name: String,
     assignments: Vec<LutAssignment>,
 ) {
-    state.payload = payload;
+    state.profile_name = profile_name;
     state.assignments = Arc::new(assignments);
 }
 
@@ -216,7 +229,7 @@ fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
     guard.as_ref().map(f)
 }
 
-pub(crate) fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
+fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
     let state = STATE.get()?;
     let mut guard = state.lock().ok()?;
     guard.as_mut().map(f)
@@ -224,18 +237,7 @@ pub(crate) fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R
 
 #[cfg(test)]
 pub(crate) fn reset_state_for_tests() {
-    if let Some(state) = STATE.get() {
-        let mut guard = state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard = None;
-    }
-    if let Some(state) = RETAINED_STATE.get() {
-        let mut guard = state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard = None;
-    }
+    clear_state_after_shutdown();
     crate::lifecycle::reset_for_tests();
     crate::d3d11::reset_fake_render_result();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
@@ -284,6 +286,7 @@ mod tests {
                     lut,
                 })
                 .collect(),
+            flip_gate_enabled: true,
         }
     }
 

@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 #[cfg(not(test))]
 use std::mem::size_of;
@@ -16,6 +16,8 @@ use crate::log::SharedLimiter;
 use crate::resolver::Va;
 
 const OVERLAY_TEST_MODE_FORCE: i32 = 5;
+
+static FLIP_GATE_ENABLED: AtomicBool = AtomicBool::new(true);
 
 #[cfg(debug_assertions)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,7 +58,7 @@ pub(crate) fn apply_flip_gate<T: Default>(
     #[cfg(debug_assertions)] kind: FlipGateKind,
     call_original: impl FnOnce(*mut c_void) -> T,
 ) -> T {
-    if lifecycle::is_runtime_active() {
+    if lifecycle::is_runtime_active() && is_enabled() {
         #[cfg(debug_assertions)]
         record_flip_gate_denied(kind);
         return T::default();
@@ -66,6 +68,14 @@ pub(crate) fn apply_flip_gate<T: Default>(
         return T::default();
     }
     call_original(original)
+}
+
+fn is_enabled() -> bool {
+    FLIP_GATE_ENABLED.load(Ordering::Acquire)
+}
+
+pub(crate) fn set_enabled(enabled: bool) {
+    FLIP_GATE_ENABLED.store(enabled, Ordering::Release);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,13 +122,21 @@ impl FlipGateEffects {
         }
     }
 
-    pub fn apply(&mut self) {
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        if enabled {
+            self.apply();
+        } else {
+            self.restore();
+        }
+    }
+
+    fn apply(&mut self) {
         self.apply_overlay_test_mode();
         self.apply_disable_independent_flip();
         self.set_overlays_enabled_override(true);
     }
 
-    pub fn restore(&mut self) {
+    fn restore(&mut self) {
         self.restore_overlay_test_mode();
         self.restore_disable_independent_flip();
         self.set_overlays_enabled_override(false);
@@ -208,12 +226,6 @@ impl FlipGateEffects {
     }
 }
 
-impl Default for FlipGateEffects {
-    fn default() -> Self {
-        Self::new(None, None)
-    }
-}
-
 unsafe fn read_i32(Va(va): Va) -> i32 {
     unsafe { (va as *const i32).read_volatile() }
 }
@@ -260,7 +272,6 @@ mod tests {
     #[cfg(debug_assertions)]
     use super::FlipGateKind;
     use super::{FlipGateEffects, apply_flip_gate};
-    use crate::lifecycle;
     use crate::resolver::Va;
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK};
 
@@ -278,9 +289,9 @@ mod tests {
             .lock()
             .expect("test mutex should lock");
         state::reset_state_for_tests();
-        lifecycle::begin_initialization()
-            .expect("initialization transition should start")
-            .commit_active("test");
+        crate::present::test_support::initialize_test_state_from_payload(
+            crate::present::test_support::test_payload(&[dwm_lut_payload::ColorMode::Sdr]),
+        );
 
         let slot = AtomicPtr::new(unused_original as *mut c_void);
         let called = AtomicBool::new(false);
@@ -296,6 +307,37 @@ mod tests {
 
         assert_eq!(result, 0);
         assert!(!called.load(Ordering::Relaxed));
+        state::reset_state_for_tests();
+    }
+
+    #[test]
+    fn apply_flip_gate_calls_original_when_disabled_even_if_runtime_is_active() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        state::reset_state_for_tests();
+        super::set_enabled(true);
+
+        let mut payload =
+            crate::present::test_support::test_payload(&[dwm_lut_payload::ColorMode::Sdr]);
+        payload.flip_gate_enabled = false;
+        crate::present::test_support::initialize_test_state_from_payload(payload);
+
+        let expected = unused_original as *mut c_void;
+        let slot = AtomicPtr::new(expected);
+        let seen = AtomicPtr::new(std::ptr::null_mut());
+        let result = apply_flip_gate(
+            &slot,
+            #[cfg(debug_assertions)]
+            FlipGateKind::IsAdvancedDirectFlipCompatible,
+            |original| {
+                seen.store(original, Ordering::Relaxed);
+                7u8
+            },
+        );
+
+        assert_eq!(result, 7);
+        assert_eq!(seen.load(Ordering::Relaxed), expected);
         state::reset_state_for_tests();
     }
 
@@ -348,34 +390,43 @@ mod tests {
 
     #[test]
     fn overlay_test_mode_is_patched_while_applied() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
         let mut overlay_mode = 0i32;
         let mut effects = FlipGateEffects::new(Some(va_of(&mut overlay_mode)), None);
 
-        effects.apply();
+        effects.set_enabled(true);
         assert_eq!(overlay_mode, 5);
 
-        effects.restore();
+        effects.set_enabled(false);
         assert_eq!(overlay_mode, 0);
     }
 
     #[test]
     fn disable_independent_flip_is_patched_while_applied() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
         let mut disable_independent_flip = 0i32;
         let mut effects = FlipGateEffects::new(None, Some(va_of(&mut disable_independent_flip)));
 
-        effects.apply();
+        effects.set_enabled(true);
         assert_eq!(disable_independent_flip, 1);
 
-        effects.restore();
+        effects.set_enabled(false);
         assert_eq!(disable_independent_flip, 0);
     }
 
     #[test]
     fn disable_independent_flip_rejects_unexpected_value() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
         let mut disable_independent_flip = 7i32;
         let mut effects = FlipGateEffects::new(None, Some(va_of(&mut disable_independent_flip)));
 
-        effects.apply();
+        effects.set_enabled(true);
 
         assert_eq!(disable_independent_flip, 7);
         assert!(
@@ -389,25 +440,34 @@ mod tests {
 
     #[test]
     fn overlays_enabled_override_is_true_when_dif_is_applied() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
         let mut disable_independent_flip = 0i32;
         let mut effects = FlipGateEffects::new(None, Some(va_of(&mut disable_independent_flip)));
 
-        effects.apply();
+        effects.set_enabled(true);
 
         assert_eq!(effects.overlays_enabled_override, Some(true));
     }
 
     #[test]
     fn overlays_enabled_override_is_false_when_dif_is_unavailable() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
         let mut effects = FlipGateEffects::new(None, None);
 
-        effects.apply();
+        effects.set_enabled(true);
 
         assert_eq!(effects.overlays_enabled_override, Some(false));
     }
 
     #[test]
     fn restore_clears_all_effects() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
         let mut overlay_mode = 0i32;
         let mut disable_independent_flip = 0i32;
         let mut effects = FlipGateEffects::new(
@@ -415,25 +475,46 @@ mod tests {
             Some(va_of(&mut disable_independent_flip)),
         );
 
-        effects.apply();
+        effects.set_enabled(true);
         assert_eq!(overlay_mode, 5);
         assert_eq!(disable_independent_flip, 1);
         assert_eq!(effects.overlays_enabled_override, Some(true));
 
-        effects.restore();
+        effects.set_enabled(false);
         assert_eq!(overlay_mode, 0);
         assert_eq!(disable_independent_flip, 0);
         assert_eq!(effects.overlays_enabled_override, None);
     }
 
     #[test]
-    fn apply_is_idempotent() {
+    fn set_enabled_true_is_idempotent() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
         let mut overlay_mode = 0i32;
         let mut effects = FlipGateEffects::new(Some(va_of(&mut overlay_mode)), None);
 
-        effects.apply();
+        effects.set_enabled(true);
         overlay_mode = 9;
-        effects.apply();
+        effects.set_enabled(true);
         assert_eq!(overlay_mode, 9);
+    }
+
+    #[test]
+    fn set_enabled_keeps_effects_for_reenable() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        let mut overlay_mode = 0i32;
+        let mut effects = FlipGateEffects::new(Some(va_of(&mut overlay_mode)), None);
+
+        effects.set_enabled(true);
+        assert_eq!(overlay_mode, 5);
+
+        effects.set_enabled(false);
+        assert_eq!(overlay_mode, 0);
+
+        effects.set_enabled(true);
+        assert_eq!(overlay_mode, 5);
     }
 }

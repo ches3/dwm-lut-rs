@@ -3,10 +3,12 @@ import { CloseButton, ModalOverlay } from "./widgets.slint";
 
 export struct HostSettings {
     apply-on-start: bool,
+    flip-gate-enabled: bool,
 }
 
 export component SettingsOverlay {
     in property <bool> apply-on-start: false;
+    in property <bool> flip-gate-enabled: true;
     in property <int> focus-nonce: 0;
     in property <bool> controls-disabled: false;
 
@@ -60,6 +62,18 @@ export component SettingsOverlay {
                     toggled => {
                         root.changed({
                             apply-on-start: self.checked,
+                            flip-gate-enabled: flip-gate-enabled-checkbox.checked,
+                        });
+                    }
+                }
+                flip-gate-enabled-checkbox := CheckBox {
+                    text: "Prevent apps from bypassing the LUT";
+                    checked: root.flip-gate-enabled;
+                    enabled: !root.controls-disabled;
+                    toggled => {
+                        root.changed({
+                            apply-on-start: apply-on-start-checkbox.checked,
+                            flip-gate-enabled: self.checked,
                         });
                     }
                 }

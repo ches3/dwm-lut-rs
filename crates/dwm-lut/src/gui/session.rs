@@ -695,6 +695,7 @@ impl HostSession {
     fn settings_changed(&mut self, settings: HostSettings) {
         let result = self.persist_config(|config| {
             config.apply_on_start = settings.apply_on_start;
+            config.flip_gate_enabled = settings.flip_gate_enabled;
             Ok::<(), GuiError>(())
         });
         self.refresh_window();
@@ -1123,6 +1124,7 @@ impl HostSession {
             ui.set_selected_profile_index(0);
             ui.set_default_profile_index(0);
             ui.set_apply_on_start(false);
+            ui.set_flip_gate_enabled(true);
             ui.set_monitors(ModelRc::default());
         } else if let Some(editor) = self.config_state.editor() {
             ui.set_load_failed(false);
@@ -1147,6 +1149,7 @@ impl HostSession {
             ui.set_selected_profile_index(selected_profile_index);
             ui.set_default_profile_index(default_profile_index);
             ui.set_apply_on_start(editor.document.apply_on_start);
+            ui.set_flip_gate_enabled(editor.document.flip_gate_enabled);
             let rows = display_monitors(
                 &self.monitors,
                 Some(&editor.document),

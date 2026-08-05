@@ -12,7 +12,7 @@ pub use status::{
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("dwm-lut-payload supports only 64-bit targets");
 
-pub const PAYLOAD_VERSION: u32 = 2;
+pub const PAYLOAD_VERSION: u32 = 3;
 pub const PAYLOAD_HEADER_LEN: u32 = 12;
 pub const MAX_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
 pub const HOOK_STATUS_ABI_VERSION: u32 = 1;
@@ -93,10 +93,21 @@ pub struct PayloadAssignment {
     pub lut: PayloadLut,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct HookPayload {
     pub profile_name: String,
     pub assignments: Vec<PayloadAssignment>,
+    pub flip_gate_enabled: bool,
+}
+
+impl Default for HookPayload {
+    fn default() -> Self {
+        Self {
+            profile_name: String::new(),
+            assignments: Vec::new(),
+            flip_gate_enabled: true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -440,6 +451,7 @@ mod tests {
                     values: vec![[0.0, 0.0, 0.0]; 8],
                 },
             }],
+            flip_gate_enabled: true,
         }
     }
 
@@ -479,10 +491,27 @@ mod tests {
     }
 
     #[test]
+    fn payload_default_enables_flip_gate() {
+        assert!(HookPayload::default().flip_gate_enabled);
+    }
+
+    #[test]
+    fn payload_roundtrips_flip_gate_enabled() {
+        let mut payload = payload();
+        payload.flip_gate_enabled = false;
+        let bytes = serialize_payload(&payload).expect("payload should serialize");
+        assert_eq!(
+            deserialize_payload(&bytes).expect("payload should decode"),
+            payload
+        );
+    }
+
+    #[test]
     fn payload_rejects_empty_assignments() {
         let error = serialize_payload(&HookPayload {
             profile_name: "default".to_string(),
             assignments: Vec::new(),
+            flip_gate_enabled: true,
         })
         .expect_err("empty payload fails");
 

@@ -153,6 +153,7 @@ pub(crate) mod test_support {
                     lut: identity_lut(),
                 })
                 .collect(),
+            flip_gate_enabled: true,
         }
     }
 

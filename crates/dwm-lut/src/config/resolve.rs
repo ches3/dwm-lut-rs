@@ -16,21 +16,6 @@ pub struct LutAssignment {
     pub lut_path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct LutConfig {
-    pub assignments: Vec<LutAssignment>,
-}
-
-impl LutConfig {
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    pub fn add(&mut self, assignment: LutAssignment) {
-        self.assignments.push(assignment);
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileAssignment {
     pub monitor_device_path: String,
@@ -47,12 +32,14 @@ pub struct FileProfileConfig {
 pub struct FileConfig {
     pub default_profile: String,
     pub profiles: HashMap<String, FileProfileConfig>,
+    pub flip_gate_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedConfig {
     pub profile_name: String,
-    pub config: LutConfig,
+    pub assignments: Vec<LutAssignment>,
+    pub flip_gate_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,38 +89,37 @@ pub fn load_config(path: &Path, profile: Option<&str>) -> Result<LoadedConfig, C
     let contents = fs::read_to_string(path)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let file_config = parse_config_str(base_dir, &contents)?;
-    let (profile_name, config) =
+    let (profile_name, assignments) =
         resolve_file_config(&file_config, profile, resolve_monitor_identity)?;
     Ok(LoadedConfig {
         profile_name,
-        config,
+        assignments,
+        flip_gate_enabled: file_config.flip_gate_enabled,
     })
 }
 
 pub fn load_payload(path: &Path, profile: Option<&str>) -> Result<LoadedPayload, ConfigError> {
     let loaded = load_config(path, profile)?;
-    let payload = config_to_payload(&loaded.profile_name, &loaded.config)?;
+    let payload = config_to_payload(&loaded)?;
     Ok(LoadedPayload {
         profile_name: loaded.profile_name,
         payload,
     })
 }
 
-pub fn config_to_payload(
-    profile_name: &str,
-    config: &LutConfig,
-) -> Result<HookPayload, ConfigError> {
-    let mut assignments = Vec::with_capacity(config.assignments.len());
+pub fn config_to_payload(config: &LoadedConfig) -> Result<HookPayload, ConfigError> {
+    let mut payload_assignments = Vec::with_capacity(config.assignments.len());
     for assignment in &config.assignments {
-        assignments.push(PayloadAssignment {
+        payload_assignments.push(PayloadAssignment {
             target: assignment.target,
             lut: parse_lut(&assignment.lut_path)?,
         });
     }
 
     let payload = HookPayload {
-        profile_name: profile_name.to_string(),
-        assignments,
+        profile_name: config.profile_name.clone(),
+        assignments: payload_assignments,
+        flip_gate_enabled: config.flip_gate_enabled,
     };
     validate_payload(&payload).map_err(ConfigError::InvalidPayload)?;
     Ok(payload)
@@ -154,6 +140,7 @@ pub fn parse_config_str(base_dir: &Path, contents: &str) -> Result<FileConfig, C
     Ok(FileConfig {
         default_profile: document.default_profile,
         profiles,
+        flip_gate_enabled: document.flip_gate_enabled,
     })
 }
 
@@ -184,10 +171,10 @@ pub fn resolve_file_config(
     file_config: &FileConfig,
     profile: Option<&str>,
     mut resolve: impl FnMut(&str) -> Result<MonitorIdentity, ConfigError>,
-) -> Result<(String, LutConfig), ConfigError> {
+) -> Result<(String, Vec<LutAssignment>), ConfigError> {
     let (profile_name, assignments) = file_config.resolve_profile(profile)?;
 
-    let mut config = LutConfig::empty();
+    let mut resolved = Vec::with_capacity(assignments.len());
     let mut identity_keys = HashSet::new();
 
     for assignment in assignments {
@@ -206,13 +193,13 @@ pub fn resolve_file_config(
             )));
         }
 
-        config.add(LutAssignment {
+        resolved.push(LutAssignment {
             target,
             lut_path: assignment.lut_path.clone(),
         });
     }
 
-    Ok((profile_name.to_string(), config))
+    Ok((profile_name.to_string(), resolved))
 }
 
 #[cfg(test)]
@@ -221,7 +208,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        ColorMode, ConfigError, FileConfig, LutAssignment, LutConfig, MonitorIdentity,
+        ColorMode, ConfigError, FileConfig, LoadedConfig, LutAssignment, MonitorIdentity,
         MonitorTarget, config_to_payload, load_config, parse_config_str, resolve_file_config,
     };
     use dwm_lut_payload::AdapterLuid;
@@ -327,12 +314,9 @@ mod tests {
             PathBuf::from(r"C:\work\profiles").join("panel.cube")
         );
 
-        let (_, config) = resolve_file_config(&file_config, None, resolve_test_monitor)
+        let (_, assignments) = resolve_file_config(&file_config, None, resolve_test_monitor)
             .expect("config should resolve");
-        assert_eq!(
-            config.assignments[0].target.identity,
-            test_monitor_identity()
-        );
+        assert_eq!(assignments[0].target.identity, test_monitor_identity());
     }
 
     #[test]
@@ -425,17 +409,17 @@ mod tests {
         )
         .expect("SDR and HDR assignments should coexist for one monitor path");
 
-        let (_, config) = resolve_file_config(&file_config, None, resolve_test_monitor)
+        let (_, assignments) = resolve_file_config(&file_config, None, resolve_test_monitor)
             .expect("config should resolve");
 
-        assert_eq!(config.assignments.len(), 2);
+        assert_eq!(assignments.len(), 2);
         assert_eq!(
-            config.assignments[0].target.identity,
-            config.assignments[1].target.identity
+            assignments[0].target.identity,
+            assignments[1].target.identity
         );
         assert_ne!(
-            config.assignments[0].target.color_mode,
-            config.assignments[1].target.color_mode
+            assignments[0].target.color_mode,
+            assignments[1].target.color_mode
         );
     }
 
@@ -603,13 +587,14 @@ mod tests {
         )
         .expect("config should parse");
 
-        let (profile_name, config) = resolve_file_config(&file_config, None, resolve_test_monitor)
-            .expect("default profile should resolve");
+        let (profile_name, assignments) =
+            resolve_file_config(&file_config, None, resolve_test_monitor)
+                .expect("default profile should resolve");
         assert_eq!(profile_name, "work");
-        assert_eq!(config.assignments.len(), 1);
-        assert_eq!(config.assignments[0].target.color_mode, ColorMode::Sdr);
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].target.color_mode, ColorMode::Sdr);
         assert_eq!(
-            config.assignments[0].lut_path,
+            assignments[0].lut_path,
             PathBuf::from(r"C:\work\profiles").join("work.cube")
         );
     }
@@ -644,14 +629,14 @@ mod tests {
         )
         .expect("config should parse");
 
-        let (profile_name, config) =
+        let (profile_name, assignments) =
             resolve_file_config(&file_config, Some("gaming"), resolve_test_monitor)
                 .expect("named profile should resolve");
         assert_eq!(profile_name, "gaming");
-        assert_eq!(config.assignments.len(), 1);
-        assert_eq!(config.assignments[0].target.color_mode, ColorMode::Hdr);
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].target.color_mode, ColorMode::Hdr);
         assert_eq!(
-            config.assignments[0].lut_path,
+            assignments[0].lut_path,
             PathBuf::from(r"C:\work\profiles").join("gaming.cube")
         );
     }
@@ -686,12 +671,12 @@ mod tests {
         )
         .expect("config should parse");
 
-        let (profile_name, config) =
+        let (profile_name, assignments) =
             resolve_file_config(&file_config, Some("GAMING"), resolve_test_monitor)
                 .expect("named profile should resolve case-insensitively");
         assert_eq!(profile_name, "gaming");
-        assert_eq!(config.assignments.len(), 1);
-        assert_eq!(config.assignments[0].target.color_mode, ColorMode::Hdr);
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].target.color_mode, ColorMode::Hdr);
     }
 
     #[test]
@@ -736,10 +721,11 @@ mod tests {
         )
         .expect("config should parse");
 
-        let (profile_name, config) = resolve_file_config(&file_config, None, resolve_test_monitor)
-            .expect("default profile should resolve case-insensitively");
+        let (profile_name, assignments) =
+            resolve_file_config(&file_config, None, resolve_test_monitor)
+                .expect("default profile should resolve case-insensitively");
         assert_eq!(profile_name, "work");
-        assert_eq!(config.assignments.len(), 1);
+        assert_eq!(assignments.len(), 1);
     }
 
     #[test]
@@ -849,6 +835,7 @@ mod tests {
                     assignments: Vec::new(),
                 },
             )]),
+            flip_gate_enabled: true,
         };
 
         let (profile_name, assignments) = file_config
@@ -887,16 +874,17 @@ mod tests {
         assert!(file_config.profiles.contains_key("work"));
         assert!(file_config.profiles.contains_key("gaming"));
 
-        let (profile_name, config) = resolve_file_config(&file_config, None, resolve_test_monitor)
-            .expect("trimmed default profile should resolve");
+        let (profile_name, assignments) =
+            resolve_file_config(&file_config, None, resolve_test_monitor)
+                .expect("trimmed default profile should resolve");
         assert_eq!(profile_name, "work");
-        assert_eq!(config.assignments.len(), 1);
+        assert_eq!(assignments.len(), 1);
 
-        let (profile_name, config) =
+        let (profile_name, assignments) =
             resolve_file_config(&file_config, Some("gaming"), resolve_test_monitor)
                 .expect("trimmed profile key should resolve");
         assert_eq!(profile_name, "gaming");
-        assert!(config.assignments.is_empty());
+        assert!(assignments.is_empty());
     }
 
     #[test]
@@ -992,7 +980,7 @@ mod tests {
 
         let loaded = load_config(&path, Some("GAMING")).expect("mixed-case profile should load");
         assert_eq!(loaded.profile_name, "gaming");
-        assert!(loaded.config.assignments.is_empty());
+        assert!(loaded.assignments.is_empty());
 
         fs::remove_dir_all(&dir).expect("temp dir should be removed");
     }
@@ -1018,7 +1006,7 @@ mod tests {
 
         let loaded = load_config(&path, Some("gaming")).expect("named profile should load");
         assert_eq!(loaded.profile_name, "gaming");
-        assert!(loaded.config.assignments.is_empty());
+        assert!(loaded.assignments.is_empty());
 
         fs::remove_dir_all(&dir).expect("temp dir should be removed");
     }
@@ -1050,19 +1038,21 @@ mod tests {
             identity: test_monitor_identity(),
             color_mode: ColorMode::Sdr,
         };
-        let config = LutConfig {
+        let config = LoadedConfig {
+            profile_name: "gaming".to_string(),
             assignments: vec![LutAssignment {
                 target,
                 lut_path: lut_path.clone(),
             }],
+            flip_gate_enabled: true,
         };
 
-        let payload =
-            config_to_payload("gaming", &config).expect("config should produce a payload");
+        let payload = config_to_payload(&config).expect("config should produce a payload");
 
         assert_eq!(payload.profile_name, "gaming");
         assert_eq!(payload.assignments.len(), 1);
         assert_eq!(payload.assignments[0].target, target);
+        assert!(payload.flip_gate_enabled);
 
         fs::remove_dir_all(&dir).expect("temp dir should be removed");
     }

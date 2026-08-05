@@ -10,7 +10,6 @@ use dwm_lut_payload::{
 };
 
 use crate::dwmcore_version::dwmcore_file_version;
-use crate::flip_gate::FlipGateEffects;
 use crate::lifecycle::{
     ReplaceAssignmentsStart, ShutdownStart, begin_initialization, begin_replace_assignments,
     begin_shutdown,
@@ -39,8 +38,9 @@ pub(crate) fn initialize_with_resolution(
     let result = if has_retained_state() {
         reactivate_from_payload(payload)
     } else {
+        let flip_gate_enabled = payload.flip_gate_enabled;
         let state = prepare_initial_state(profile, payload, |_| Ok(resolution))?;
-        install_prepared_state(state)
+        install_prepared_state(state, flip_gate_enabled)
     };
     if result.is_ok() {
         transition.commit_active(&profile_name);
@@ -120,9 +120,7 @@ pub(crate) fn ffi_shutdown() -> u32 {
     let cleanup_failures = {
         let _present_guard = lock_present_runtime();
         let _ = crate::d3d11::shutdown_renderer_resources();
-        let _ = crate::state::with_state_mut(|state| {
-            state.runtime.flip_gate_effects.restore();
-        });
+        crate::state::set_flip_gate(false);
         crate::desktop_redraw::request_desktop_redraw();
         disable_registered_hooks(&minhook, &hooks)
     };
@@ -172,6 +170,7 @@ pub(crate) unsafe fn ffi_replace_assignments(payload_buffer: *const DwmLutPayloa
 
 fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsError> {
     let profile_name = payload.profile_name.clone();
+    let flip_gate_enabled = payload.flip_gate_enabled;
     let transition = match begin_replace_assignments() {
         ReplaceAssignmentsStart::Started(transition) => transition,
         ReplaceAssignmentsStart::NotInitialized => {
@@ -186,7 +185,8 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
 
     {
         let _present_guard = lock_present_runtime();
-        replace_lut_assignments(payload, assignments)?;
+        replace_lut_assignments(profile_name.clone(), assignments)?;
+        crate::state::set_flip_gate(flip_gate_enabled);
         let _ = crate::d3d11::shutdown_renderer_resources();
     }
     crate::desktop_redraw::request_desktop_redraw();
@@ -205,8 +205,9 @@ fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
         log::profile_selected(selected.min_version, dwmcore_version);
         let profile = (selected.profile)();
 
+        let flip_gate_enabled = payload.flip_gate_enabled;
         let state = prepare_initial_state(profile, payload, resolve_profile)?;
-        install_prepared_state(state)
+        install_prepared_state(state, flip_gate_enabled)
     };
     if result.is_ok() {
         transition.commit_active(&profile_name);
@@ -219,23 +220,23 @@ fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
 }
 
 fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
+    let flip_gate_enabled = payload.flip_gate_enabled;
     let assignments = assignments_from_payload(&payload);
 
-    let Some((minhook, hooks)) = reactivate_retained_state(payload, assignments) else {
+    let Some((minhook, hooks)) = reactivate_retained_state(payload.profile_name, assignments)
+    else {
         return Err(HookError::AlreadyInitialized);
     };
     if let Err(error) = enable_registered_hooks(&minhook) {
         retain_state_after_shutdown();
         return Err(HookError::MinHook(error));
     }
-    let _ = crate::state::with_state_mut(|state| {
-        state.runtime.flip_gate_effects.apply();
-    });
+    crate::state::set_flip_gate(flip_gate_enabled);
     log::hooks(log::HooksPhase::Reenabled, &hooks);
     Ok(())
 }
 
-fn install_prepared_state(state: HookState) -> Result<(), HookError> {
+fn install_prepared_state(state: HookState, flip_gate_enabled: bool) -> Result<(), HookError> {
     let minhook = state.runtime.minhook;
     let hooks = state.runtime.hooks.clone();
 
@@ -250,9 +251,7 @@ fn install_prepared_state(state: HookState) -> Result<(), HookError> {
         return Err(HookError::MinHook(error));
     }
 
-    let _ = crate::state::with_state_mut(|state| {
-        state.runtime.flip_gate_effects.apply();
-    });
+    crate::state::set_flip_gate(flip_gate_enabled);
     log::hooks(log::HooksPhase::Enabled, &hooks);
     Ok(())
 }
@@ -273,13 +272,13 @@ where
     let (minhook, registered_hooks) = register_plan(&resolution.function_targets)?;
     log::hooks(log::HooksPhase::Created, &registered_hooks);
 
-    let flip_gate_effects = FlipGateEffects::new(
+    let flip_gate_effects = crate::flip_gate::FlipGateEffects::new(
         resolution.overlay_test_mode,
         resolution.disable_independent_flip,
     );
 
     Ok(HookState {
-        payload,
+        profile_name: payload.profile_name,
         profile,
         assignments: Arc::new(assignments),
         runtime: HookRuntime {
@@ -339,6 +338,7 @@ mod tests {
                     values: vec![[0.0, 0.0, 0.0]; 8],
                 },
             }],
+            flip_gate_enabled: true,
         }
     }
 
