@@ -97,23 +97,23 @@ pub(super) fn run(args: Args) -> Result<(), CheckError> {
     println!();
 
     let layout_failed = print_layout_table(&profile, &layout.rows);
-    let required_failed = print_signatures_table(&profile, &pe, &pubs);
-    mismatch_result(layout_failed, required_failed)
+    let signature_failed = print_signatures_table(&profile, &pe, &pubs);
+    mismatch_result(layout_failed, signature_failed)
 }
 
-fn mismatch_result(layout_failed: usize, required_failed: usize) -> Result<(), CheckError> {
-    match (layout_failed, required_failed) {
+fn mismatch_result(layout_failed: usize, signature_failed: usize) -> Result<(), CheckError> {
+    match (layout_failed, signature_failed) {
         (0, 0) => Ok(()),
         (layouts, 0) => Err(CheckError::Mismatch(format!(
             "{layouts} layout value{} failed",
             if layouts == 1 { "" } else { "s" }
         ))),
         (0, signatures) => Err(CheckError::Mismatch(format!(
-            "{signatures} required signature{} failed",
+            "{signatures} signature{} failed",
             if signatures == 1 { "" } else { "s" }
         ))),
         (layouts, signatures) => Err(CheckError::Mismatch(format!(
-            "{layouts} layout value{} failed, {signatures} required signature{} failed",
+            "{layouts} layout value{} failed, {signatures} signature{} failed",
             if layouts == 1 { "" } else { "s" },
             if signatures == 1 { "" } else { "s" }
         ))),
@@ -206,16 +206,13 @@ fn print_signatures_table(profile: &HookProfile, pe: &PeImage, pubs: &PdbPublics
     table.set_header(vec![
         Cell::new("Signature"),
         Cell::new("Status"),
-        Cell::new("Required"),
         Cell::new("RVA"),
     ]);
 
-    let mut required_failed = 0usize;
+    let mut signature_failed = 0usize;
 
     for signature in profile.signatures {
         let label = signature.target.label();
-        let required = signature.target.is_required_signature();
-        let required_label = if required { "yes" } else { "no" };
 
         let (status, rva) = match resolve_signature_rva(&pe.image, signature) {
             Ok(resolved) => match expected_symbol_rva(signature.target, pe, pubs) {
@@ -224,77 +221,48 @@ fn print_signatures_table(profile: &HookProfile, pe: &PeImage, pubs: &PdbPublics
                     format!("{:#x}", resolved.rva.0),
                 ),
                 Ok(_) => {
-                    if required {
-                        required_failed += 1;
-                    }
+                    signature_failed += 1;
                     (
-                        status_cell("symbol_mismatch", severity_color(required)),
+                        status_cell("symbol_mismatch", Color::Red),
                         format!("{:#x}", resolved.rva.0),
                     )
                 }
                 Err(error) => {
-                    if required {
-                        required_failed += 1;
-                    }
+                    signature_failed += 1;
                     let status = if error == SymbolResolveError::Ambiguous {
                         "ambiguous_symbol"
                     } else {
                         "no_symbol"
                     };
                     (
-                        status_cell(status, severity_color(required)),
+                        status_cell(status, Color::Red),
                         format!("{:#x}", resolved.rva.0),
                     )
                 }
             },
             Err(SignatureScanError::NotFound { .. }) => {
-                if required {
-                    required_failed += 1;
-                }
-                (
-                    status_cell("not_found", severity_color(required)),
-                    "-".into(),
-                )
+                signature_failed += 1;
+                (status_cell("not_found", Color::Red), "-".into())
             }
             Err(SignatureScanError::Ambiguous { .. }) => {
-                if required {
-                    required_failed += 1;
-                }
-                (
-                    status_cell("ambiguous", severity_color(required)),
-                    "-".into(),
-                )
+                signature_failed += 1;
+                (status_cell("ambiguous", Color::Red), "-".into())
             }
             Err(SignatureScanError::OutOfBounds { .. }) => {
-                if required {
-                    required_failed += 1;
-                }
-                (
-                    status_cell("out_of_bounds", severity_color(required)),
-                    "-".into(),
-                )
+                signature_failed += 1;
+                (status_cell("out_of_bounds", Color::Red), "-".into())
             }
             Err(SignatureScanError::IncompatibleLocator { .. }) => {
-                if required {
-                    required_failed += 1;
-                }
-                (
-                    status_cell("incompatible_locator", severity_color(required)),
-                    "-".into(),
-                )
+                signature_failed += 1;
+                (status_cell("incompatible_locator", Color::Red), "-".into())
             }
         };
 
-        table.add_row(vec![
-            Cell::new(label),
-            status,
-            Cell::new(required_label),
-            Cell::new(rva),
-        ]);
+        table.add_row(vec![Cell::new(label), status, Cell::new(rva)]);
     }
 
     println!("{table}");
-    required_failed
+    signature_failed
 }
 
 fn expected_symbol_rva(
@@ -307,10 +275,6 @@ fn expected_symbol_rva(
     } else {
         resolve_global_symbol(target, pubs).map(|symbol| symbol.rva)
     }
-}
-
-fn severity_color(required: bool) -> Color {
-    if required { Color::Red } else { Color::Yellow }
 }
 
 fn status_cell(text: &str, color: Color) -> Cell {
@@ -349,7 +313,7 @@ mod tests {
         let error = mismatch_result(0, 1).expect_err("mismatch");
         assert!(matches!(
             error,
-            CheckError::Mismatch(message) if message == "1 required signature failed"
+            CheckError::Mismatch(message) if message == "1 signature failed"
         ));
     }
 
@@ -359,7 +323,7 @@ mod tests {
         assert!(matches!(
             error,
             CheckError::Mismatch(message)
-                if message == "1 layout value failed, 2 required signatures failed"
+                if message == "1 layout value failed, 2 signatures failed"
         ));
     }
 }
