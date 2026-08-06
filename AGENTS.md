@@ -18,7 +18,7 @@ https://github.com/ed1ii/dwm_lut_fixed
 ```
 cargo fmt
 cargo clippy --all-targets --all-features -- -D warnings
-cargo check --all-targets --all-features
+cargo clippy --all-targets --all-features --release -- -D warnings
 cargo test --all-features
 ```
 
