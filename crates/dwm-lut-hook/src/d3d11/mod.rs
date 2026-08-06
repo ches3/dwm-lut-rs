@@ -13,7 +13,7 @@ mod plan;
 mod renderer;
 
 #[cfg(test)]
-pub(crate) use plan::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT};
+pub(crate) use plan::DXGI_FORMAT_B8G8R8A8_UNORM;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DrawPlanSkipReason {
@@ -87,8 +87,12 @@ impl PresentDrawFailReason {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PresentDrawStatus {
-    Applied { full_redraw: bool },
+    Applied {
+        full_redraw: bool,
+    },
+    #[cfg_attr(test, allow(dead_code))]
     Skipped(DrawPlanSkipReason),
+    #[cfg_attr(test, allow(dead_code))]
     Failed(PresentDrawFailReason),
 }
 

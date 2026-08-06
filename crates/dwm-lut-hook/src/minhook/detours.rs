@@ -2,9 +2,8 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::DirtyRect;
 use crate::flip_gate;
-use crate::lifecycle;
+use crate::present;
 use dwm_lut_profile::HookTarget;
 
 static PRESENT_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
@@ -46,14 +45,14 @@ pub(super) fn detour_for_target(target: HookTarget) -> *mut c_void {
 unsafe extern "system" fn present_detour(
     this: usize,
     overlay_swap_chain: usize,
-    a3: u32,
+    a2: usize,
     rect_vec: usize,
-    a5: i32,
+    a4: usize,
+    a5: usize,
     a6: usize,
-    a7: u8,
 ) -> i64 {
     type PresentOriginal =
-        unsafe extern "system" fn(usize, usize, u32, usize, i32, usize, u8) -> i64;
+        unsafe extern "system" fn(usize, usize, usize, usize, usize, usize, usize) -> i64;
 
     let original = present_original();
     if original.is_null() {
@@ -61,25 +60,9 @@ unsafe extern "system" fn present_detour(
     }
     let original: PresentOriginal = unsafe { std::mem::transmute(original) };
 
-    if !lifecycle::is_runtime_active() {
-        return unsafe { original(this, overlay_swap_chain, a3, rect_vec, a5, a6, a7) };
-    }
-
-    let mut present_rect_storage = [DirtyRect {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    }];
-    let mut present_rect_vec_storage = crate::present::empty_rect_vec_storage();
-    let prepared = crate::present::prepare_present(
-        this,
-        overlay_swap_chain,
-        rect_vec,
-        &mut present_rect_storage,
-        &mut present_rect_vec_storage,
-    );
-    unsafe { original(this, overlay_swap_chain, a3, prepared.rect_vec, a5, a6, a7) }
+    present::present(this, overlay_swap_chain, rect_vec, |rect_vec| unsafe {
+        original(this, overlay_swap_chain, a2, rect_vec, a4, a5, a6)
+    })
 }
 
 fn apply_flip_gate<T: Default>(
@@ -158,10 +141,10 @@ unsafe extern "system" fn is_candidate_overlay_compatible_detour(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::c_void;
     use std::ptr;
     use std::sync::atomic::Ordering;
 
-    use crate::present::test_support::initialize_test_state;
     use crate::state::HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK;
     use dwm_lut_profile::HookTarget;
 
@@ -171,60 +154,25 @@ mod tests {
         }
     }
 
+    unsafe extern "system" fn returns_fixed_return_value(
+        _this: usize,
+        _overlay_swap_chain: usize,
+        _a2: usize,
+        _rect_vec: usize,
+        _a4: usize,
+        _a5: usize,
+        _a6: usize,
+    ) -> i64 {
+        0x55
+    }
+
     #[test]
-    fn present_detour_forwards_apply_rect_override_to_original() {
+    fn present_detour_forwards_original_return_value() {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        use crate::DirtyRect;
-        use crate::present::test_support::{
-            FakePresentObjects, install_present_original, last_original_present_rects,
-            reset_last_original_present_rects,
-        };
+        super::original_pointer_for_target(HookTarget::Present)
+            .store(returns_fixed_return_value as *mut c_void, Ordering::Release);
 
-        reset_last_original_present_rects();
-        initialize_test_state();
-        let fake = FakePresentObjects::new(
-            vec![DirtyRect {
-                left: 10,
-                top: 20,
-                right: 64,
-                bottom: 96,
-            }],
-            false,
-        );
-        let full_rect = DirtyRect {
-            left: 0,
-            top: 0,
-            right: 1920,
-            bottom: 1080,
-        };
-        crate::d3d11::set_fake_render_result(Ok(crate::d3d11::PresentLutOutcome {
-            lut_active: true,
-            present_dirty_rect: Some(full_rect),
-            draw: crate::d3d11::PresentDrawStatus::Applied { full_redraw: true },
-            dxgi_format: Some(crate::d3d11::DXGI_FORMAT_B8G8R8A8_UNORM),
-            width: None,
-            height: None,
-            lut_index: Some(0),
-            #[cfg(debug_assertions)]
-            back_buffer_id: None,
-        }));
-        install_present_original();
-
-        assert_eq!(
-            unsafe {
-                super::present_detour(
-                    fake.context_address(),
-                    fake.overlay_swap_chain_address(),
-                    0,
-                    fake.rect_vec_address(),
-                    0,
-                    0,
-                    0,
-                )
-            },
-            0x55
-        );
-        assert_eq!(last_original_present_rects(), Some(vec![full_rect]));
+        assert_eq!(unsafe { super::present_detour(0, 0, 0, 0, 0, 0, 0) }, 0x55);
         reset_original_slots();
     }
 }

@@ -2,20 +2,11 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr;
-#[cfg(test)]
-use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::Ordering;
 
 mod detours;
 
 use detours::{detour_for_target, original_slot_for_target};
-
-#[cfg(test)]
-pub(crate) fn original_pointer_for_target(
-    target: dwm_lut_profile::HookTarget,
-) -> &'static AtomicPtr<c_void> {
-    detours::original_pointer_for_target(target)
-}
 
 use crate::resolver::{ResolvedFunctionVa, Va};
 use dwm_lut_profile::HookTarget;
