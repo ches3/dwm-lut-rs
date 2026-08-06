@@ -7,6 +7,7 @@ mod dwmcore_26100_4484;
 mod dwmcore_26100_7309;
 mod dwmcore_26100_7705;
 mod dwmcore_26100_8737;
+mod dwmcore_26100_8972;
 
 use crate::version::{RevisionProfile, SupportedBuild};
 
@@ -48,6 +49,10 @@ pub const SUPPORTED_BUILDS: &[SupportedBuild] = &[SupportedBuild {
         RevisionProfile {
             min_revision: 8737,
             profile: dwmcore_26100_8737::profile,
+        },
+        RevisionProfile {
+            min_revision: 8972,
+            profile: dwmcore_26100_8972::profile,
         },
     ],
 }];
