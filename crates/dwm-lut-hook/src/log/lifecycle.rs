@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), allow(dead_code))]
 
-use dwm_lut_payload::{InitializeStatus, ReplaceAssignmentsStatus, ShutdownStatus};
+#[cfg(debug_assertions)]
+use dwm_lut_payload::ShutdownStatus;
+use dwm_lut_payload::{InitializeStatus, ReplaceAssignmentsStatus};
 
 use crate::minhook::{MinHookCleanupFailure, RegisteredHook};
 use crate::resolver::SignatureResolutionReport;

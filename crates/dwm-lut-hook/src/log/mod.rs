@@ -1,9 +1,11 @@
+#[cfg(debug_assertions)]
 mod flip;
 mod lifecycle;
 #[cfg(not(test))]
 mod misc;
 mod present;
 
+#[cfg(debug_assertions)]
 pub(crate) use flip::*;
 pub(crate) use lifecycle::*;
 #[cfg(not(test))]
