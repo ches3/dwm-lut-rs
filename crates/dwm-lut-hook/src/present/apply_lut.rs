@@ -1,8 +1,8 @@
 use std::ptr;
 
-use super::DirtyRect;
 #[cfg(debug_assertions)]
 use crate::d3d11::{BackBufferId, PresentDrawStatus};
+use crate::dwmcore::{DirtyRect, RectVec};
 use crate::lifecycle;
 #[cfg(debug_assertions)]
 use crate::log::SharedLimiter;
@@ -10,7 +10,7 @@ use crate::log::{self, PresentLutAcquireFailReason};
 use crate::state;
 use dwm_lut_payload::MonitorIdentity;
 
-use super::collect::{PresentInputs, RectVec};
+use super::collect::PresentInputs;
 
 #[cfg(debug_assertions)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -92,7 +92,7 @@ pub(crate) fn apply_lut(
     match unsafe {
         crate::d3d11::render_present_lut(
             overlay_swap_chain,
-            profile.swap_chain,
+            profile.swap_chain_to_resource_path,
             inputs.monitor_identity,
             &inputs.dirty_rects,
             &assignments,
@@ -149,14 +149,14 @@ fn full_present_rect_vec(
 mod tests {
     use dwm_lut_payload::ColorMode;
 
-    use super::super::collect::{PresentInputs, read_dirty_rects};
+    use super::super::collect::PresentInputs;
     use super::super::test_support::{
         initialize_test_state, initialize_test_state_from_payload, test_monitor_identity,
         test_payload,
     };
-    use super::DirtyRect;
     use super::{ApplyOutcome, apply_lut, empty_rect_vec_storage};
     use crate::d3d11::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT};
+    use crate::dwmcore::{self, DirtyRect};
     use crate::lifecycle;
     use crate::state;
     use crate::state::HOOK_GLOBAL_TEST_LOCK;
@@ -311,7 +311,7 @@ mod tests {
 
         assert_ne!(outcome.rect_vec, 0xdead);
         assert_eq!(
-            unsafe { read_dirty_rects(outcome.rect_vec) }.expect("expanded rect vec"),
+            unsafe { dwmcore::read_dirty_rects(outcome.rect_vec) }.expect("expanded rect vec"),
             vec![full_rect]
         );
         let render_call = crate::d3d11::fake_render_present_lut_call()

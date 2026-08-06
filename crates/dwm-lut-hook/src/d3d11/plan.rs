@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::present::DirtyRect;
+use crate::dwmcore::DirtyRect;
 use crate::state::{LutAssignment, find_assignment};
 use dwm_lut_payload::{ColorMode, MonitorIdentity};
 

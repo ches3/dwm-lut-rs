@@ -5,10 +5,10 @@ use dwm_lut_payload::{
 };
 use dwm_lut_profile::{HookTarget, ProfileSelectError, SignatureScanError};
 
-use crate::dwmcore_version::DwmcoreVersionError;
+use crate::dwmcore::DwmcoreVersionError;
 use crate::minhook::MinHookError;
 use crate::resolver::HookResolveError;
-use crate::state::ReplaceLutAssignmentsError;
+use crate::state::HookStateError;
 
 #[derive(Debug)]
 pub enum HookError {
@@ -70,7 +70,9 @@ pub enum ReplaceAssignmentsError {
     NotInitialized,
     AlreadyInProgress,
     Payload(PayloadError),
-    State(ReplaceLutAssignmentsError),
+    State(HookStateError),
+    MinHook(MinHookError),
+    MinHookCleanupFailed,
 }
 
 impl fmt::Display for ReplaceAssignmentsError {
@@ -82,9 +84,14 @@ impl fmt::Display for ReplaceAssignmentsError {
                 "hook initialization, assignment replacement, or shutdown is in progress"
             ),
             Self::Payload(error) => write!(f, "{error}"),
-            Self::State(ReplaceLutAssignmentsError::NotInitialized) => {
+            Self::State(HookStateError::NotInitialized) => {
                 write!(f, "hook is not initialized")
             }
+            Self::MinHook(error) => write!(f, "{error}"),
+            Self::MinHookCleanupFailed => write!(
+                f,
+                "flip-gate hooks could not be restored and were force-disabled"
+            ),
         }
     }
 }
@@ -97,9 +104,15 @@ impl From<PayloadError> for ReplaceAssignmentsError {
     }
 }
 
-impl From<ReplaceLutAssignmentsError> for ReplaceAssignmentsError {
-    fn from(value: ReplaceLutAssignmentsError) -> Self {
+impl From<HookStateError> for ReplaceAssignmentsError {
+    fn from(value: HookStateError) -> Self {
         Self::State(value)
+    }
+}
+
+impl From<MinHookError> for ReplaceAssignmentsError {
+    fn from(value: MinHookError) -> Self {
+        Self::MinHook(value)
     }
 }
 
@@ -122,18 +135,6 @@ impl From<HookResolveError> for InitializeStatus {
                 kind: ResolveFailureKind::Ambiguous,
                 target: to_hook_target_id(target),
             },
-            HookResolveError::Scan(SignatureScanError::OutOfBounds { target, .. }) => {
-                Self::Resolve {
-                    kind: ResolveFailureKind::OutOfBounds,
-                    target: to_hook_target_id(target),
-                }
-            }
-            HookResolveError::Scan(SignatureScanError::IncompatibleLocator { target }) => {
-                Self::Resolve {
-                    kind: ResolveFailureKind::IncompatibleLocator,
-                    target: to_hook_target_id(target),
-                }
-            }
         }
     }
 }
@@ -144,17 +145,7 @@ const fn to_hook_target_id(target: HookTarget) -> HookTargetId {
         HookTarget::IsCandidateDirectFlipCompatible => {
             HookTargetId::IsCandidateDirectFlipCompatible
         }
-        HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
-            HookTargetId::DirectFlipInfoEnsureIndependentFlipState
-        }
-        HookTarget::IsDirectFlipSupportedOnTarget => HookTargetId::IsDirectFlipSupportedOnTarget,
-        HookTarget::LegacySwapChainCheckDirectFlipSupport => {
-            HookTargetId::LegacySwapChainCheckDirectFlipSupport
-        }
-        HookTarget::IsAdvancedDirectFlipCompatible => HookTargetId::IsAdvancedDirectFlipCompatible,
-        HookTarget::OverlayTestMode => HookTargetId::OverlayTestMode,
-        HookTarget::DisableIndependentFlip => HookTargetId::DisableIndependentFlip,
-        HookTarget::OverlaysEnabled => HookTargetId::OverlaysEnabled,
+        HookTarget::IsCandidateOverlayCompatible => HookTargetId::IsCandidateOverlayCompatible,
     }
 }
 
@@ -176,7 +167,8 @@ impl From<HookError> for InitializeStatus {
             HookError::MinHook(error) => match error.operation {
                 crate::minhook::MinHookOperation::Initialize => Self::MinHookInitializeFailed,
                 crate::minhook::MinHookOperation::CreateHook(_) => Self::MinHookCreateHookFailed,
-                crate::minhook::MinHookOperation::EnableHook => Self::MinHookEnableHookFailed,
+                crate::minhook::MinHookOperation::EnableHook(_) => Self::MinHookEnableHookFailed,
+                crate::minhook::MinHookOperation::DisableHook(_) => Self::MinHookDisableHookFailed,
             },
         }
     }
@@ -186,11 +178,13 @@ impl From<&ReplaceAssignmentsError> for ReplaceAssignmentsStatus {
     fn from(error: &ReplaceAssignmentsError) -> Self {
         match error {
             ReplaceAssignmentsError::NotInitialized
-            | ReplaceAssignmentsError::State(ReplaceLutAssignmentsError::NotInitialized) => {
+            | ReplaceAssignmentsError::State(HookStateError::NotInitialized) => {
                 Self::NotInitialized
             }
             ReplaceAssignmentsError::AlreadyInProgress => Self::AlreadyInProgress,
             ReplaceAssignmentsError::Payload(error) => Self::from(error),
+            ReplaceAssignmentsError::MinHook(_) => Self::MinHookFailed,
+            ReplaceAssignmentsError::MinHookCleanupFailed => Self::MinHookCleanupFailed,
         }
     }
 }

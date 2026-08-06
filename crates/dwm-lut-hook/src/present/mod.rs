@@ -2,19 +2,12 @@ mod apply_lut;
 mod collect;
 
 use apply_lut::apply_lut;
-use collect::{RectVec, collect_present_inputs};
+use collect::collect_present_inputs;
 
 pub(crate) use apply_lut::empty_rect_vec_storage;
 pub(crate) use collect::PresentInputError;
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DirtyRect {
-    pub left: i32,
-    pub top: i32,
-    pub right: i32,
-    pub bottom: i32,
-}
+use crate::dwmcore::{DirtyRect, RectVec};
 
 #[derive(Debug)]
 pub(crate) struct PreparedPresent {
@@ -51,7 +44,6 @@ pub(crate) fn prepare_present(
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::ffi::c_void;
-    use std::mem::size_of;
     use std::sync::Mutex;
     use std::sync::atomic::Ordering;
 
@@ -60,13 +52,11 @@ pub(crate) mod test_support {
         PayloadLut,
     };
 
-    use super::DirtyRect;
+    use crate::dwmcore::{self, DirtyRect, RectVec};
     use crate::minhook;
     use crate::resolver::SignatureResolutionReport;
     use crate::state;
     use dwm_lut_profile::{HookProfile, HookTarget, SUPPORTED_BUILDS};
-
-    use super::collect::{RectVec, read_dirty_rects};
 
     pub(crate) fn test_profile() -> HookProfile {
         (SUPPORTED_BUILDS
@@ -103,7 +93,7 @@ pub(crate) mod test_support {
         _a6: u8,
     ) -> i64 {
         if let Ok(mut rects) = LAST_ORIGINAL_PRESENT_RECTS.lock() {
-            *rects = unsafe { read_dirty_rects(a3) }.ok();
+            *rects = unsafe { dwmcore::read_dirty_rects(a3) }.ok();
         }
         0x55
     }
@@ -176,7 +166,7 @@ pub(crate) mod test_support {
 
     pub(crate) struct FakePresentObjects {
         context: Box<usize>,
-        overlay_swap_chain: Vec<usize>,
+        overlay_swap_chain: Vec<u8>,
         pub(crate) dirty_rects: Vec<DirtyRect>,
         rect_vec: RectVec,
     }
@@ -185,28 +175,13 @@ pub(crate) mod test_support {
         pub(crate) fn new(dirty_rects: Vec<DirtyRect>, hardware_protected: bool) -> Self {
             let profile = test_profile();
             let context = Box::new(0usize);
-
-            let identity = profile.monitor_identity;
-            let overlay_swap_chain_len = (profile
-                .hardware_protected_offset
-                .max(identity.target_id_offset + size_of::<u32>())
-                + 1)
-            .div_ceil(size_of::<usize>());
-            let mut overlay_swap_chain = vec![0usize; overlay_swap_chain_len];
-            unsafe {
-                (overlay_swap_chain.as_mut_ptr() as *mut u8)
-                    .add(profile.hardware_protected_offset)
-                    .write(u8::from(hardware_protected));
-                ((overlay_swap_chain.as_mut_ptr() as *mut u8).add(identity.adapter_luid_low_offset)
-                    as *mut u32)
-                    .write(test_monitor_identity().adapter_luid.low_part);
-                ((overlay_swap_chain.as_mut_ptr() as *mut u8)
-                    .add(identity.adapter_luid_high_offset) as *mut i32)
-                    .write(test_monitor_identity().adapter_luid.high_part);
-                ((overlay_swap_chain.as_mut_ptr() as *mut u8).add(identity.target_id_offset)
-                    as *mut u32)
-                    .write(test_monitor_identity().target_id);
-            }
+            let overlay_swap_chain =
+                dwmcore::test_support::overlay_swap_chain_bytes_with_hardware_protected(
+                    profile.monitor_identity_offsets,
+                    profile.hardware_protected_offset,
+                    test_monitor_identity(),
+                    hardware_protected,
+                );
 
             let rect_vec = if dirty_rects.is_empty() {
                 RectVec {
@@ -248,7 +223,8 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::initialize_test_state;
-    use super::{DirtyRect, empty_rect_vec_storage, prepare_present};
+    use super::{empty_rect_vec_storage, prepare_present};
+    use crate::dwmcore::DirtyRect;
     use crate::state::HOOK_GLOBAL_TEST_LOCK;
 
     #[test]

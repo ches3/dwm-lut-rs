@@ -1,4 +1,3 @@
-use std::ffi::c_void;
 use std::mem::size_of;
 
 use windows::Win32::Graphics::Direct3D11::{
@@ -13,7 +12,7 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_SAMPLE_DESC,
 };
-use windows::core::{Interface, PCSTR};
+use windows::core::PCSTR;
 
 use super::plan::{BackBufferFormat, ShaderConstants, Vertex, dxgi_format_for_copy_texture};
 use crate::state::LutAssignment;
@@ -22,14 +21,6 @@ pub(super) const LUT_VERTEX_SHADER_BYTECODE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/lut_pipeline_vs.cso"));
 pub(super) const LUT_PIXEL_SHADER_BYTECODE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/lut_pipeline_ps.cso"));
-
-pub(super) unsafe fn take_owned_interface<T: Interface>(raw: *mut c_void) -> Option<T> {
-    if raw.is_null() {
-        None
-    } else {
-        Some(unsafe { T::from_raw(raw) })
-    }
-}
 
 pub(super) fn create_vertex_shader(
     device: &ID3D11Device,

@@ -9,21 +9,23 @@ use dwm_lut_payload::{
     deserialize_payload_buffer,
 };
 
-use crate::dwmcore_version::dwmcore_file_version;
+use crate::dwmcore::dwmcore_file_version;
 use crate::lifecycle::{
     ReplaceAssignmentsStart, ShutdownStart, begin_initialization, begin_replace_assignments,
     begin_shutdown,
 };
 use crate::log;
 use crate::minhook::{
-    disable_registered_hooks, enable_registered_hooks, register_plan, unregister_registered_hooks,
+    MinHookRuntime, RegisteredHook, disable_registered_hooks, enable_hooks_for_cleanup,
+    enable_registered_hooks, flip_gate_hooks, non_flip_gate_hooks, register_plan,
+    set_flip_gate_hooks_enabled, unregister_registered_hooks,
 };
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
 use crate::state::assignments_from_payload;
 use crate::state::{
     HookRuntime, HookState, clear_state_after_shutdown, has_retained_state, install_state,
-    lock_present_runtime, minhook_cleanup_plan, reactivate_retained_state, replace_lut_assignments,
-    retain_state_after_shutdown,
+    lock_present_runtime, minhook_cleanup_plan, reactivate_retained_state,
+    retain_state_after_shutdown, store_flip_gate_enabled, swap_lut_assignments,
 };
 use dwm_lut_profile::{HookProfile, select_profile};
 
@@ -120,7 +122,6 @@ pub(crate) fn ffi_shutdown() -> u32 {
     let cleanup_failures = {
         let _present_guard = lock_present_runtime();
         let _ = crate::d3d11::shutdown_renderer_resources();
-        crate::state::set_flip_gate(false);
         crate::desktop_redraw::request_desktop_redraw();
         disable_registered_hooks(&minhook, &hooks)
     };
@@ -170,7 +171,7 @@ pub(crate) unsafe fn ffi_replace_assignments(payload_buffer: *const DwmLutPayloa
 
 fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsError> {
     let profile_name = payload.profile_name.clone();
-    let flip_gate_enabled = payload.flip_gate_enabled;
+    let next_flip_gate_enabled = payload.flip_gate_enabled;
     let transition = match begin_replace_assignments() {
         ReplaceAssignmentsStart::Started(transition) => transition,
         ReplaceAssignmentsStart::NotInitialized => {
@@ -181,17 +182,77 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
         }
     };
 
-    let assignments = assignments_from_payload(&payload);
+    let assignments = Arc::new(assignments_from_payload(&payload));
+    let previous_flip_gate_enabled =
+        crate::state::flip_gate_enabled().ok_or(ReplaceAssignmentsError::NotInitialized)?;
 
     {
         let _present_guard = lock_present_runtime();
-        replace_lut_assignments(profile_name.clone(), assignments)?;
-        crate::state::set_flip_gate(flip_gate_enabled);
+        let Some((minhook, hooks)) = minhook_cleanup_plan() else {
+            return Err(ReplaceAssignmentsError::NotInitialized);
+        };
+
+        let previous = swap_lut_assignments(profile_name.clone(), Arc::clone(&assignments))?;
+        if let Err(error) = set_flip_gate_hooks_enabled(&minhook, &hooks, next_flip_gate_enabled) {
+            let _ = swap_lut_assignments(previous.0, previous.1);
+            return Err(flip_gate_hook_failure(
+                &minhook,
+                &hooks,
+                previous_flip_gate_enabled,
+                error,
+            ));
+        }
+        let _ = store_flip_gate_enabled(next_flip_gate_enabled);
         let _ = crate::d3d11::shutdown_renderer_resources();
     }
     crate::desktop_redraw::request_desktop_redraw();
     transition.commit_active(&profile_name);
     Ok(())
+}
+
+enum FlipGateReconcileOutcome {
+    Restored,
+    FailSafeDisabled,
+}
+
+fn reconcile_or_fail_safe_flip_gate(
+    minhook: &MinHookRuntime,
+    hooks: &[RegisteredHook],
+    previous_enabled: bool,
+) -> FlipGateReconcileOutcome {
+    let flip_hooks = flip_gate_hooks(hooks);
+    let reconcile_failures = if previous_enabled {
+        enable_hooks_for_cleanup(minhook, &flip_hooks)
+    } else {
+        disable_registered_hooks(minhook, &flip_hooks)
+    };
+    if reconcile_failures.is_empty() {
+        return FlipGateReconcileOutcome::Restored;
+    }
+    for failure in &reconcile_failures {
+        log::minhook_cleanup_failed(*failure);
+    }
+    let fail_safe_failures = disable_registered_hooks(minhook, &flip_hooks);
+    for failure in &fail_safe_failures {
+        log::minhook_cleanup_failed(*failure);
+    }
+    let _ = store_flip_gate_enabled(false);
+    FlipGateReconcileOutcome::FailSafeDisabled
+}
+
+fn flip_gate_hook_failure(
+    minhook: &MinHookRuntime,
+    hooks: &[RegisteredHook],
+    previous_flip_gate_enabled: bool,
+    error: crate::minhook::MinHookError,
+) -> ReplaceAssignmentsError {
+    if !error.has_cleanup_failures() {
+        return ReplaceAssignmentsError::MinHook(error);
+    }
+    match reconcile_or_fail_safe_flip_gate(minhook, hooks, previous_flip_gate_enabled) {
+        FlipGateReconcileOutcome::Restored => ReplaceAssignmentsError::MinHook(error),
+        FlipGateReconcileOutcome::FailSafeDisabled => ReplaceAssignmentsError::MinHookCleanupFailed,
+    }
 }
 
 fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
@@ -221,19 +282,18 @@ fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
 
 fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
     let flip_gate_enabled = payload.flip_gate_enabled;
-    let assignments = assignments_from_payload(&payload);
+    let assignments = Arc::new(assignments_from_payload(&payload));
 
     let Some((minhook, hooks)) = reactivate_retained_state(payload.profile_name, assignments)
     else {
         return Err(HookError::AlreadyInitialized);
     };
-    if let Err(error) = enable_registered_hooks(&minhook) {
-        retain_state_after_shutdown();
-        return Err(HookError::MinHook(error));
-    }
-    crate::state::set_flip_gate(flip_gate_enabled);
-    log::hooks(log::HooksPhase::Reenabled, &hooks);
-    Ok(())
+    enable_hooks_for_runtime(
+        &minhook,
+        &hooks,
+        flip_gate_enabled,
+        log::HooksPhase::Reenabled,
+    )
 }
 
 fn install_prepared_state(state: HookState, flip_gate_enabled: bool) -> Result<(), HookError> {
@@ -245,14 +305,37 @@ fn install_prepared_state(state: HookState, flip_gate_enabled: bool) -> Result<(
         HookError::AlreadyInitialized
     })?;
 
-    if let Err(error) = enable_registered_hooks(&minhook) {
-        disable_registered_hooks(&minhook, &hooks);
+    enable_hooks_for_runtime(
+        &minhook,
+        &hooks,
+        flip_gate_enabled,
+        log::HooksPhase::Enabled,
+    )
+}
+
+fn enable_hooks_for_runtime(
+    minhook: &MinHookRuntime,
+    hooks: &[RegisteredHook],
+    flip_gate_enabled: bool,
+    phase: log::HooksPhase,
+) -> Result<(), HookError> {
+    let non_flip_hooks = non_flip_gate_hooks(hooks);
+    if let Err(error) = enable_registered_hooks(minhook, &non_flip_hooks) {
+        disable_registered_hooks(minhook, hooks);
         retain_state_after_shutdown();
         return Err(HookError::MinHook(error));
     }
-
-    crate::state::set_flip_gate(flip_gate_enabled);
-    log::hooks(log::HooksPhase::Enabled, &hooks);
+    if let Err(error) = set_flip_gate_hooks_enabled(minhook, hooks, flip_gate_enabled) {
+        disable_registered_hooks(minhook, hooks);
+        retain_state_after_shutdown();
+        return Err(HookError::MinHook(error));
+    }
+    let _ = store_flip_gate_enabled(flip_gate_enabled);
+    if flip_gate_enabled {
+        log::hooks(phase, hooks);
+    } else {
+        log::hooks(phase, &non_flip_hooks);
+    }
     Ok(())
 }
 
@@ -272,19 +355,14 @@ where
     let (minhook, registered_hooks) = register_plan(&resolution.function_targets)?;
     log::hooks(log::HooksPhase::Created, &registered_hooks);
 
-    let flip_gate_effects = crate::flip_gate::FlipGateEffects::new(
-        resolution.overlay_test_mode,
-        resolution.disable_independent_flip,
-    );
-
     Ok(HookState {
         profile_name: payload.profile_name,
         profile,
         assignments: Arc::new(assignments),
+        flip_gate_enabled: false,
         runtime: HookRuntime {
             minhook,
             hooks: registered_hooks,
-            flip_gate_effects,
         },
     })
 }
@@ -297,7 +375,7 @@ mod tests {
     };
 
     use crate::DWM_LUT_STATUS;
-    use crate::dwmcore_version::DwmcoreVersionError;
+    use crate::dwmcore::DwmcoreVersionError;
     use crate::lifecycle;
     use crate::resolver::{HookResolveError, SignatureResolutionReport};
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK};
@@ -476,6 +554,191 @@ mod tests {
     }
 
     #[test]
+    fn replace_assignments_rolls_back_when_flip_gate_enable_fails() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        state::reset_state_for_tests();
+        let profile = test_profile();
+        let mut initial = test_payload();
+        initial.profile_name = "original".to_string();
+        initial.flip_gate_enabled = false;
+        super::initialize_with_resolution(
+            profile,
+            initial,
+            SignatureResolutionReport::synthetic_for_tests(&profile),
+        )
+        .expect("initialization should succeed");
+        let original_assignments = state::assignments().expect("assignments should be installed");
+        assert_exported_status(HookStatus::Active, Some("original"));
+
+        let next_enable = crate::minhook::test_minhook_call_counts().enable_calls + 1;
+        crate::minhook::set_test_minhook_enable_fail_on(Some(next_enable));
+
+        let mut replacement = test_payload();
+        replacement.profile_name = "updated".to_string();
+        replacement.flip_gate_enabled = true;
+        replacement.assignments[0].target.identity.target_id = 99;
+        let error = super::replace_assignments(replacement)
+            .expect_err("flip-gate enable failure should abort replacement");
+
+        assert_eq!(
+            ReplaceAssignmentsStatus::from(&error),
+            ReplaceAssignmentsStatus::MinHookFailed
+        );
+        assert!(lifecycle::is_runtime_active());
+        assert_eq!(state::active_profile_name().as_deref(), Some("original"));
+        assert_eq!(state::assignments(), Some(original_assignments));
+        assert_eq!(state::flip_gate_enabled(), Some(false));
+        assert_eq!(crate::minhook::test_enabled_target_count(), 1);
+        assert_exported_status(HookStatus::Active, Some("original"));
+
+        state::reset_state_for_tests();
+    }
+
+    #[test]
+    fn replace_assignments_rolls_back_when_flip_gate_disable_fails() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        state::reset_state_for_tests();
+        let profile = test_profile();
+        let mut initial = test_payload();
+        initial.profile_name = "original".to_string();
+        initial.flip_gate_enabled = true;
+        super::initialize_with_resolution(
+            profile,
+            initial,
+            SignatureResolutionReport::synthetic_for_tests(&profile),
+        )
+        .expect("initialization should succeed");
+        let original_assignments = state::assignments().expect("assignments should be installed");
+        let enabled_before = crate::minhook::test_enabled_target_count();
+        assert!(enabled_before > 1);
+        assert_eq!(state::flip_gate_enabled(), Some(true));
+        assert_exported_status(HookStatus::Active, Some("original"));
+
+        let next_disable = crate::minhook::test_minhook_call_counts().disable_calls + 1;
+        crate::minhook::set_test_minhook_disable_fail_on(Some(next_disable));
+
+        let mut replacement = test_payload();
+        replacement.profile_name = "updated".to_string();
+        replacement.flip_gate_enabled = false;
+        replacement.assignments[0].target.identity.target_id = 99;
+        let error = super::replace_assignments(replacement)
+            .expect_err("flip-gate disable failure should abort replacement");
+
+        assert_eq!(
+            ReplaceAssignmentsStatus::from(&error),
+            ReplaceAssignmentsStatus::MinHookFailed
+        );
+        assert!(lifecycle::is_runtime_active());
+        assert_eq!(state::active_profile_name().as_deref(), Some("original"));
+        assert_eq!(state::assignments(), Some(original_assignments));
+        assert_eq!(state::flip_gate_enabled(), Some(true));
+        assert_eq!(crate::minhook::test_enabled_target_count(), enabled_before);
+        assert_exported_status(HookStatus::Active, Some("original"));
+
+        state::reset_state_for_tests();
+    }
+
+    #[test]
+    fn replace_assignments_reconciles_when_flip_gate_enable_cleanup_fails() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        state::reset_state_for_tests();
+        let profile = test_profile();
+        let mut initial = test_payload();
+        initial.profile_name = "original".to_string();
+        initial.flip_gate_enabled = false;
+        super::initialize_with_resolution(
+            profile,
+            initial,
+            SignatureResolutionReport::synthetic_for_tests(&profile),
+        )
+        .expect("initialization should succeed");
+        let original_assignments = state::assignments().expect("assignments should be installed");
+        assert_eq!(crate::minhook::test_enabled_target_count(), 1);
+
+        let counts = crate::minhook::test_minhook_call_counts();
+        crate::minhook::set_test_minhook_enable_fail_on(Some(counts.enable_calls + 2));
+        crate::minhook::set_test_minhook_disable_fail_on(Some(counts.disable_calls + 1));
+
+        let mut replacement = test_payload();
+        replacement.profile_name = "updated".to_string();
+        replacement.flip_gate_enabled = true;
+        replacement.assignments[0].target.identity.target_id = 99;
+        let error = super::replace_assignments(replacement)
+            .expect_err("flip-gate enable cleanup failure should abort replacement");
+
+        assert_eq!(
+            ReplaceAssignmentsStatus::from(&error),
+            ReplaceAssignmentsStatus::MinHookFailed
+        );
+        assert!(matches!(
+            error,
+            super::ReplaceAssignmentsError::MinHook(ref minhook)
+            if minhook.has_cleanup_failures()
+        ));
+        assert_eq!(state::active_profile_name().as_deref(), Some("original"));
+        assert_eq!(state::assignments(), Some(original_assignments));
+        assert_eq!(state::flip_gate_enabled(), Some(false));
+        assert_eq!(crate::minhook::test_enabled_target_count(), 1);
+        assert_exported_status(HookStatus::Active, Some("original"));
+
+        state::reset_state_for_tests();
+    }
+
+    #[test]
+    fn replace_assignments_disables_flip_gate_when_reconcile_fails() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        state::reset_state_for_tests();
+        let profile = test_profile();
+        let mut initial = test_payload();
+        initial.profile_name = "original".to_string();
+        initial.flip_gate_enabled = true;
+        super::initialize_with_resolution(
+            profile,
+            initial,
+            SignatureResolutionReport::synthetic_for_tests(&profile),
+        )
+        .expect("initialization should succeed");
+        let original_assignments = state::assignments().expect("assignments should be installed");
+        let enabled_before = crate::minhook::test_enabled_target_count();
+        assert!(enabled_before > 1);
+
+        let counts = crate::minhook::test_minhook_call_counts();
+        crate::minhook::set_test_minhook_disable_fail_on(Some(counts.disable_calls + 2));
+        crate::minhook::set_test_minhook_enable_fail_from(Some(counts.enable_calls + 1));
+
+        let mut replacement = test_payload();
+        replacement.profile_name = "updated".to_string();
+        replacement.flip_gate_enabled = false;
+        replacement.assignments[0].target.identity.target_id = 99;
+        let error = super::replace_assignments(replacement)
+            .expect_err("flip-gate reconcile failure should disable gates");
+
+        assert_eq!(
+            ReplaceAssignmentsStatus::from(&error),
+            ReplaceAssignmentsStatus::MinHookCleanupFailed
+        );
+        assert!(matches!(
+            error,
+            super::ReplaceAssignmentsError::MinHookCleanupFailed
+        ));
+        assert_eq!(state::active_profile_name().as_deref(), Some("original"));
+        assert_eq!(state::assignments(), Some(original_assignments));
+        assert_eq!(state::flip_gate_enabled(), Some(false));
+        assert_eq!(crate::minhook::test_enabled_target_count(), 1);
+        assert_exported_status(HookStatus::Active, Some("original"));
+
+        state::reset_state_for_tests();
+    }
+
+    #[test]
     fn shutdown_cleanup_failure_still_publishes_inactive() {
         let _guard = HOOK_GLOBAL_TEST_LOCK
             .lock()
@@ -539,7 +802,7 @@ mod tests {
         );
         assert_eq!(
             reinitialized_calls.enable_calls,
-            initialized_calls.enable_calls + 1
+            initialized_calls.enable_calls * 2
         );
         assert_eq!(reinitialized_calls.remove_calls, 0);
         assert_eq!(reinitialized_calls.uninitialize_calls, 0);

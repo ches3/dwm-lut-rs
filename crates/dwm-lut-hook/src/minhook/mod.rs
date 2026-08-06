@@ -24,7 +24,8 @@ pub type MhStatus = i32;
 
 pub const MH_OK: MhStatus = 0;
 pub const MH_ERROR_ALREADY_INITIALIZED: MhStatus = 1;
-const MH_ALL_HOOKS: *mut c_void = ptr::null_mut();
+pub const MH_ERROR_ENABLED: MhStatus = 5;
+pub const MH_ERROR_DISABLED: MhStatus = 6;
 
 pub type MhInitializeApi = unsafe extern "system" fn() -> MhStatus;
 pub type MhUninitializeApi = unsafe extern "system" fn() -> MhStatus;
@@ -106,14 +107,20 @@ pub(crate) struct MinHookCleanupFailure {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum MinHookCleanupOperation {
     DisableHook,
+    EnableHook,
     RemoveHook,
 }
 
 impl MinHookError {
     pub(crate) fn has_remove_hook_cleanup_failure(&self) -> bool {
         cleanup_has_remove_hook_failure(&self.cleanup_failures)
+    }
+
+    pub(crate) fn has_cleanup_failures(&self) -> bool {
+        !self.cleanup_failures.is_empty()
     }
 
     fn new(operation: MinHookOperation, status: Option<MhStatus>) -> Self {
@@ -147,7 +154,8 @@ fn cleanup_has_remove_hook_failure(failures: &[MinHookCleanupFailure]) -> bool {
 pub(crate) enum MinHookOperation {
     Initialize,
     CreateHook(HookTarget),
-    EnableHook,
+    EnableHook(HookTarget),
+    DisableHook(HookTarget),
 }
 
 #[derive(Clone, Copy)]
@@ -213,8 +221,11 @@ pub(crate) fn register_plan(
     ))
 }
 
-pub(crate) fn enable_registered_hooks(runtime: &MinHookRuntime) -> Result<(), MinHookError> {
-    enable_created_hooks_with_apis(runtime.apis)
+pub(crate) fn enable_registered_hooks(
+    runtime: &MinHookRuntime,
+    hooks: &[RegisteredHook],
+) -> Result<(), MinHookError> {
+    enable_registered_hooks_with_apis(hooks, runtime.apis)
 }
 
 pub(crate) fn disable_registered_hooks(
@@ -224,14 +235,40 @@ pub(crate) fn disable_registered_hooks(
     disable_registered_hooks_with_apis(hooks, runtime.apis)
 }
 
-#[cfg(not(test))]
-pub(crate) fn set_overlays_enabled_override(value: Option<bool>) {
-    detours::set_overlays_enabled_override(value);
+pub(crate) fn non_flip_gate_hooks(hooks: &[RegisteredHook]) -> Vec<RegisteredHook> {
+    hooks
+        .iter()
+        .copied()
+        .filter(|hook| !hook.target.is_flip_gate())
+        .collect()
 }
 
-#[cfg(test)]
-pub(crate) fn reset_test_original_slots() {
-    detours::reset_test_original_slots();
+pub(crate) fn flip_gate_hooks(hooks: &[RegisteredHook]) -> Vec<RegisteredHook> {
+    hooks
+        .iter()
+        .copied()
+        .filter(|hook| hook.target.is_flip_gate())
+        .collect()
+}
+
+pub(crate) fn set_flip_gate_hooks_enabled(
+    runtime: &MinHookRuntime,
+    hooks: &[RegisteredHook],
+    enabled: bool,
+) -> Result<(), MinHookError> {
+    let flip_hooks = flip_gate_hooks(hooks);
+    if enabled {
+        enable_registered_hooks(runtime, &flip_hooks)
+    } else {
+        disable_flip_gate_hooks_transactionally(runtime.apis, &flip_hooks)
+    }
+}
+
+pub(crate) fn enable_hooks_for_cleanup(
+    runtime: &MinHookRuntime,
+    hooks: &[RegisteredHook],
+) -> Vec<MinHookCleanupFailure> {
+    enable_hooks_for_cleanup_with_apis(runtime.apis, hooks)
 }
 
 pub(crate) fn create_plan_hooks_with_apis(
@@ -241,16 +278,64 @@ pub(crate) fn create_plan_hooks_with_apis(
     create_hooks_for_targets(targets, apis).map(registered_hooks_from_created)
 }
 
-fn enable_created_hooks_with_apis(apis: MinHookApis) -> Result<(), MinHookError> {
-    let status = unsafe { (apis.enable_hook)(MH_ALL_HOOKS) };
-    if status != MH_OK {
-        return Err(MinHookError::new(
-            MinHookOperation::EnableHook,
-            Some(status),
-        ));
+fn enable_registered_hooks_with_apis(
+    hooks: &[RegisteredHook],
+    apis: MinHookApis,
+) -> Result<(), MinHookError> {
+    let mut newly_enabled = Vec::new();
+    for hook in hooks {
+        let status = unsafe { (apis.enable_hook)(hook.target_va.0 as *mut c_void) };
+        if status == MH_OK {
+            newly_enabled.push(*hook);
+        } else if status != MH_ERROR_ENABLED {
+            let cleanup_failures = disable_registered_hooks_with_apis(&newly_enabled, apis);
+            return Err(MinHookError::with_cleanup_failures(
+                MinHookOperation::EnableHook(hook.target),
+                Some(status),
+                cleanup_failures,
+            ));
+        }
     }
-
     Ok(())
+}
+
+fn disable_flip_gate_hooks_transactionally(
+    apis: MinHookApis,
+    hooks: &[RegisteredHook],
+) -> Result<(), MinHookError> {
+    let mut newly_disabled = Vec::new();
+    for hook in hooks.iter().rev() {
+        let status = unsafe { (apis.disable_hook)(hook.target_va.0 as *mut c_void) };
+        if status == MH_OK {
+            newly_disabled.push(*hook);
+        } else if status != MH_ERROR_DISABLED {
+            let cleanup_failures = enable_hooks_for_cleanup_with_apis(apis, &newly_disabled);
+            return Err(MinHookError::with_cleanup_failures(
+                MinHookOperation::DisableHook(hook.target),
+                Some(status),
+                cleanup_failures,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn enable_hooks_for_cleanup_with_apis(
+    apis: MinHookApis,
+    hooks: &[RegisteredHook],
+) -> Vec<MinHookCleanupFailure> {
+    let mut failures = Vec::new();
+    for hook in hooks.iter().rev() {
+        let status = unsafe { (apis.enable_hook)(hook.target_va.0 as *mut c_void) };
+        if status != MH_OK && status != MH_ERROR_ENABLED {
+            failures.push(MinHookCleanupFailure {
+                operation: MinHookCleanupOperation::EnableHook,
+                target: hook.target,
+                status,
+            });
+        }
+    }
+    failures
 }
 
 fn create_hooks_for_targets(
@@ -334,7 +419,7 @@ fn disable_registered_hooks_with_apis(
     let mut failures = Vec::new();
     for hook in hooks.iter().rev() {
         let status = unsafe { (apis.disable_hook)(hook.target_va.0 as *mut c_void) };
-        if status != MH_OK {
+        if status != MH_OK && status != MH_ERROR_DISABLED {
             failures.push(MinHookCleanupFailure {
                 operation: MinHookCleanupOperation::DisableHook,
                 target: hook.target,
@@ -397,8 +482,10 @@ struct TestMinHookBehavior {
     remove_calls: usize,
     create_fail_on: Option<usize>,
     enable_fail_on: Option<usize>,
+    enable_fail_from: Option<usize>,
     disable_fail_on: Option<usize>,
     remove_fail_on: Option<usize>,
+    enabled_targets: Vec<usize>,
 }
 
 #[cfg(test)]
@@ -448,6 +535,27 @@ fn set_test_minhook_cleanup_failures(
 }
 
 #[cfg(test)]
+pub(crate) fn set_test_minhook_enable_fail_on(enable_fail_on: Option<usize>) {
+    TEST_MINHOOK_BEHAVIOR.with(|behavior| {
+        behavior.borrow_mut().enable_fail_on = enable_fail_on;
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_minhook_enable_fail_from(enable_fail_from: Option<usize>) {
+    TEST_MINHOOK_BEHAVIOR.with(|behavior| {
+        behavior.borrow_mut().enable_fail_from = enable_fail_from;
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_minhook_disable_fail_on(disable_fail_on: Option<usize>) {
+    TEST_MINHOOK_BEHAVIOR.with(|behavior| {
+        behavior.borrow_mut().disable_fail_on = disable_fail_on;
+    });
+}
+
+#[cfg(test)]
 pub(crate) fn test_minhook_call_counts() -> TestMinHookCallCounts {
     TEST_MINHOOK_BEHAVIOR.with(|behavior| {
         let behavior = behavior.borrow();
@@ -459,6 +567,11 @@ pub(crate) fn test_minhook_call_counts() -> TestMinHookCallCounts {
             remove_calls: behavior.remove_calls,
         }
     })
+}
+
+#[cfg(test)]
+pub(crate) fn test_enabled_target_count() -> usize {
+    TEST_MINHOOK_BEHAVIOR.with(|behavior| behavior.borrow().enabled_targets.len())
 }
 
 #[cfg(test)]
@@ -514,37 +627,46 @@ unsafe extern "system" fn test_create_hook(
 }
 
 #[cfg(test)]
-unsafe extern "system" fn test_enable_hook(_target: *mut c_void) -> MhStatus {
-    let status = TEST_MINHOOK_BEHAVIOR.with(|behavior| {
+unsafe extern "system" fn test_enable_hook(target: *mut c_void) -> MhStatus {
+    TEST_MINHOOK_BEHAVIOR.with(|behavior| {
         let mut behavior = behavior.borrow_mut();
         behavior.enable_calls += 1;
-        if behavior.enable_fail_on == Some(behavior.enable_calls) {
-            -2
-        } else {
-            MH_OK
+        if behavior.enable_fail_on == Some(behavior.enable_calls)
+            || behavior
+                .enable_fail_from
+                .is_some_and(|from| behavior.enable_calls >= from)
+        {
+            return -2;
         }
-    });
-    if status != MH_OK {
-        return status;
-    }
-    MH_OK
+        let target = target as usize;
+        if behavior.enabled_targets.contains(&target) {
+            return MH_ERROR_ENABLED;
+        }
+        behavior.enabled_targets.push(target);
+        MH_OK
+    })
 }
 
 #[cfg(test)]
-unsafe extern "system" fn test_disable_hook(_target: *mut c_void) -> MhStatus {
-    let status = TEST_MINHOOK_BEHAVIOR.with(|behavior| {
+unsafe extern "system" fn test_disable_hook(target: *mut c_void) -> MhStatus {
+    TEST_MINHOOK_BEHAVIOR.with(|behavior| {
         let mut behavior = behavior.borrow_mut();
         behavior.disable_calls += 1;
         if behavior.disable_fail_on == Some(behavior.disable_calls) {
-            -3
-        } else {
-            MH_OK
+            return -3;
         }
-    });
-    if status != MH_OK {
-        return status;
-    }
-    MH_OK
+        let target = target as usize;
+        if let Some(index) = behavior
+            .enabled_targets
+            .iter()
+            .position(|enabled| *enabled == target)
+        {
+            behavior.enabled_targets.swap_remove(index);
+            MH_OK
+        } else {
+            MH_ERROR_DISABLED
+        }
+    })
 }
 
 #[cfg(test)]
@@ -575,8 +697,9 @@ mod tests {
 
     use super::{
         MinHookCleanupOperation, MinHookOperation, detours, disable_registered_hooks,
-        enable_registered_hooks, register_plan, test_minhook_call_counts,
-        unregister_registered_hooks, unregister_registered_hooks_with_apis,
+        enable_registered_hooks, register_plan, set_flip_gate_hooks_enabled,
+        test_enabled_target_count, test_minhook_call_counts, unregister_registered_hooks,
+        unregister_registered_hooks_with_apis,
     };
 
     fn targets(entries: &[(HookTarget, usize)]) -> Vec<ResolvedFunctionVa> {
@@ -586,8 +709,14 @@ mod tests {
             .collect()
     }
 
+    fn reset_original_slots() {
+        for &target in HookTarget::ALL {
+            detours::original_pointer_for_target(target)
+                .store(std::ptr::null_mut(), Ordering::Release);
+        }
+    }
+
     fn reset_controlled_behavior(create_fail_on: Option<usize>, enable_fail_on: Option<usize>) {
-        detours::reset_test_original_slots();
         super::reset_test_minhook_behavior(create_fail_on, enable_fail_on, None, None);
     }
 
@@ -632,10 +761,7 @@ mod tests {
             0x1800_2000
         );
         assert_eq!(test_minhook_call_counts().enable_calls, 0);
-        detours::original_pointer_for_target(HookTarget::Present)
-            .store(std::ptr::null_mut(), Ordering::Release);
-        detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
-            .store(std::ptr::null_mut(), Ordering::Release);
+        reset_original_slots();
     }
 
     #[test]
@@ -649,10 +775,79 @@ mod tests {
         assert_eq!(registered.len(), 1);
         assert_eq!(test_minhook_call_counts().enable_calls, 0);
 
-        enable_registered_hooks(&runtime).expect("hooks should enable after state is ready");
+        enable_registered_hooks(&runtime, &registered)
+            .expect("hooks should enable after state is ready");
         assert_eq!(test_minhook_call_counts().enable_calls, 1);
-        detours::original_pointer_for_target(HookTarget::Present)
-            .store(std::ptr::null_mut(), Ordering::Release);
+        reset_original_slots();
+    }
+
+    #[test]
+    fn set_flip_gate_hooks_enabled_is_idempotent() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        super::reset_test_minhook_behavior(None, None, None, None);
+        let targets = targets(&[
+            (HookTarget::Present, 0x1800_1000),
+            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
+        ]);
+        let (runtime, registered) = register_plan(&targets).expect("registration should succeed");
+        enable_registered_hooks(&runtime, &registered).expect("initial enable should succeed");
+
+        set_flip_gate_hooks_enabled(&runtime, &registered, true)
+            .expect("re-enabling already enabled flip hooks should succeed");
+        set_flip_gate_hooks_enabled(&runtime, &registered, false)
+            .expect("disabling flip hooks should succeed");
+        set_flip_gate_hooks_enabled(&runtime, &registered, false)
+            .expect("re-disabling already disabled flip hooks should succeed");
+        set_flip_gate_hooks_enabled(&runtime, &registered, true)
+            .expect("enabling flip hooks after disable should succeed");
+        reset_original_slots();
+    }
+
+    #[test]
+    fn enable_failure_disables_newly_enabled_hooks() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        reset_controlled_behavior(None, Some(2));
+        let targets = targets(&[
+            (HookTarget::Present, 0x1800_1000),
+            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
+        ]);
+        let (runtime, registered) = register_plan(&targets).expect("registration should succeed");
+
+        let error =
+            enable_registered_hooks(&runtime, &registered).expect_err("second enable should fail");
+        assert_eq!(
+            error.operation,
+            MinHookOperation::EnableHook(HookTarget::IsCandidateDirectFlipCompatible)
+        );
+        assert!(error.cleanup_failures.is_empty());
+        assert_eq!(test_minhook_call_counts().enable_calls, 2);
+        assert_eq!(test_minhook_call_counts().disable_calls, 1);
+        assert_eq!(test_enabled_target_count(), 0);
+        reset_original_slots();
+    }
+
+    #[test]
+    fn set_flip_gate_disable_failure_re_enables_newly_disabled_hooks() {
+        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
+        super::reset_test_minhook_behavior(None, None, Some(2), None);
+        let targets = targets(&[
+            (HookTarget::Present, 0x1800_1000),
+            (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
+            (HookTarget::IsCandidateOverlayCompatible, 0x1800_3000),
+        ]);
+        let (runtime, registered) = register_plan(&targets).expect("registration should succeed");
+        enable_registered_hooks(&runtime, &registered).expect("initial enable should succeed");
+        assert_eq!(test_enabled_target_count(), 3);
+
+        let error = set_flip_gate_hooks_enabled(&runtime, &registered, false)
+            .expect_err("second flip-gate disable should fail");
+        assert_eq!(
+            error.operation,
+            MinHookOperation::DisableHook(HookTarget::IsCandidateDirectFlipCompatible)
+        );
+        assert!(error.cleanup_failures.is_empty());
+        assert_eq!(test_enabled_target_count(), 3);
+        reset_original_slots();
     }
 
     #[test]
@@ -662,14 +857,14 @@ mod tests {
         let targets = targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
-            (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
+            (HookTarget::IsCandidateOverlayCompatible, 0x1800_3000),
         ]);
 
         let error = register_plan(&targets).expect_err("third create should fail");
 
         assert_eq!(
             error.operation,
-            MinHookOperation::CreateHook(HookTarget::IsDirectFlipSupportedOnTarget)
+            MinHookOperation::CreateHook(HookTarget::IsCandidateOverlayCompatible)
         );
         assert!(error.cleanup_failures.is_empty());
         let calls = test_minhook_call_counts();
@@ -687,14 +882,14 @@ mod tests {
         let targets = targets(&[
             (HookTarget::Present, 0x1800_1000),
             (HookTarget::IsCandidateDirectFlipCompatible, 0x1800_2000),
-            (HookTarget::IsDirectFlipSupportedOnTarget, 0x1800_3000),
+            (HookTarget::IsCandidateOverlayCompatible, 0x1800_3000),
         ]);
 
         let error = register_plan(&targets).expect_err("third create should fail");
 
         assert_eq!(
             error.operation,
-            MinHookOperation::CreateHook(HookTarget::IsDirectFlipSupportedOnTarget)
+            MinHookOperation::CreateHook(HookTarget::IsCandidateOverlayCompatible)
         );
         assert_eq!(error.cleanup_failures.len(), 1);
         assert_eq!(
@@ -716,8 +911,7 @@ mod tests {
                 .load(Ordering::Acquire) as usize,
             0x1800_2000
         );
-        detours::original_pointer_for_target(HookTarget::IsCandidateDirectFlipCompatible)
-            .store(std::ptr::null_mut(), Ordering::Release);
+        reset_original_slots();
     }
 
     #[test]
@@ -777,7 +971,7 @@ mod tests {
                 .load(Ordering::Acquire) as usize,
             0x1800_2000
         );
-        detours::reset_test_original_slots();
+        reset_original_slots();
     }
 
     #[test]
@@ -801,8 +995,7 @@ mod tests {
                 as usize,
             0x1800_1000
         );
-        detours::original_pointer_for_target(HookTarget::Present)
-            .store(std::ptr::null_mut(), Ordering::Release);
+        reset_original_slots();
     }
 
     #[test]
@@ -817,8 +1010,7 @@ mod tests {
 
         assert_eq!(cleanup_failures.len(), 1);
         assert_eq!(test_minhook_call_counts().uninitialize_calls, 0);
-        detours::original_pointer_for_target(HookTarget::Present)
-            .store(std::ptr::null_mut(), Ordering::Release);
+        reset_original_slots();
     }
 
     #[test]

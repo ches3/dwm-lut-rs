@@ -1,9 +1,7 @@
-use crate::present::DirtyRect;
+use crate::dwmcore::DirtyRect;
 use crate::state::LutAssignment;
 use dwm_lut_payload::MonitorIdentity;
 
-#[cfg(not(test))]
-mod back_buffer;
 #[cfg(not(test))]
 mod context_state;
 #[cfg(not(test))]
@@ -153,7 +151,7 @@ impl BackBufferId {
 
 pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
-    swap_chain_path: dwm_lut_profile::SwapChainVtablePath,
+    swap_chain_to_resource_path: dwm_lut_profile::SwapChainToResourcePath,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
     assignments: &[LutAssignment],
@@ -163,7 +161,7 @@ pub(crate) unsafe fn render_present_lut(
         unsafe {
             fake_renderer::render_present_lut(
                 overlay_swap_chain,
-                swap_chain_path,
+                swap_chain_to_resource_path,
                 monitor_identity,
                 dirty_rects,
                 assignments,
@@ -175,7 +173,7 @@ pub(crate) unsafe fn render_present_lut(
         unsafe {
             renderer::render_present_lut(
                 overlay_swap_chain,
-                swap_chain_path,
+                swap_chain_to_resource_path,
                 monitor_identity,
                 dirty_rects,
                 assignments,

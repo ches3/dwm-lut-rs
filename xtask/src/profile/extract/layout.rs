@@ -5,14 +5,15 @@ use crate::profile::pdb_publics::PdbPublics;
 use crate::profile::pe::PeImage;
 
 pub fn extract_layout(pe: &PeImage, pubs: &PdbPublics) -> LayoutReport {
-    let mut rows = Vec::with_capacity(6);
-    rows.extend(extract_swap_chain(pe, pubs));
+    let mut rows = Vec::with_capacity(8);
+    rows.extend(extract_swap_chain_to_resource(pe, pubs));
     rows.push(extract_hardware_protected(pe, pubs));
     rows.extend(extract_monitor_identity(pe, pubs));
+    rows.extend(extract_context_to_swap_chain(pe, pubs));
     LayoutReport { rows }
 }
 
-fn extract_swap_chain(pe: &PeImage, pubs: &PdbPublics) -> [LayoutRow; 2] {
+fn extract_swap_chain_to_resource(pe: &PeImage, pubs: &PdbPublics) -> [LayoutRow; 2] {
     let mut container = None;
     let mut resource = None;
 
@@ -132,6 +133,76 @@ fn extract_hardware_protected(pe: &PeImage, pubs: &PdbPublics) -> LayoutRow {
     }
 }
 
+fn extract_context_to_swap_chain(pe: &PeImage, pubs: &PdbPublics) -> [LayoutRow; 2] {
+    [
+        extract_monitor_target_offset(pe, pubs),
+        extract_swap_chain_vtable_index(pe, pubs),
+    ]
+}
+
+fn extract_monitor_target_offset(pe: &PeImage, pubs: &PdbPublics) -> LayoutRow {
+    let Some(symbol) = pubs
+        .find_by_prefix("??0COverlayContext@@")
+        .into_iter()
+        .next()
+    else {
+        return LayoutRow {
+            target: "monitor_target_offset".into(),
+            status: LayoutStatus::NoSymbol,
+            value: None,
+        };
+    };
+
+    match first_this_store_from_second_arg_disp(pe, symbol.rva, 0x200) {
+        Some(disp) => LayoutRow {
+            target: "monitor_target_offset".into(),
+            status: LayoutStatus::Ok,
+            value: Some(format_hex(disp)),
+        },
+        None => LayoutRow {
+            target: "monitor_target_offset".into(),
+            status: LayoutStatus::NoDisp,
+            value: None,
+        },
+    }
+}
+
+fn extract_swap_chain_vtable_index(pe: &PeImage, pubs: &PdbPublics) -> LayoutRow {
+    let mut index = None;
+
+    for symbol in &pubs.symbols {
+        if !symbol.name.starts_with("??_7") {
+            continue;
+        }
+        if !symbol
+            .name
+            .contains("6BIPixelFormat@@IOverlayMonitorTarget@@@")
+        {
+            continue;
+        }
+        let Ok(slots) = read_vftable_slots(pe, pubs, symbol.rva, 64) else {
+            continue;
+        };
+
+        let Some(found) = slots.iter().rev().find_map(|(slot, method_names)| {
+            method_names
+                .iter()
+                .any(|method| method.contains("GetOverlaySwapChain"))
+                .then_some(*slot)
+        }) else {
+            continue;
+        };
+
+        let prefer = symbol.name.starts_with("??_7CDDisplayRenderTarget@@")
+            || symbol.name.starts_with("??_7CLegacyRenderTarget@@");
+        if index.is_none() || prefer {
+            index = Some(found);
+        }
+    }
+
+    index_row("swap_chain_vtable_index", index)
+}
+
 fn extract_monitor_identity(pe: &PeImage, pubs: &PdbPublics) -> [LayoutRow; 3] {
     let luid_symbol = pubs
         .find_by_prefix("?GetDisplayAdapterLuid@COverlaySwapChain@@")
@@ -195,6 +266,83 @@ fn extract_monitor_identity(pe: &PeImage, pubs: &PdbPublics) -> [LayoutRow; 3] {
 
 fn first_memory_disp(pe: &PeImage, rva: u32, max_size: usize) -> Option<usize> {
     memory_disps(pe, rva, max_size).into_iter().next()
+}
+
+fn first_this_store_from_second_arg_disp(pe: &PeImage, rva: u32, max_size: usize) -> Option<usize> {
+    let Ok(bytes) = pe.bytes_at(rva, max_size) else {
+        return None;
+    };
+    let mut decoder = Decoder::with_ip(64, bytes, u64::from(rva), DecoderOptions::NONE);
+    let mut instruction = Instruction::default();
+    let mut this_derived = [false; 16];
+    let mut arg_derived = [false; 16];
+    this_derived[gpr64_index(Register::RCX).expect("rcx")] = true;
+    arg_derived[gpr64_index(Register::RDX).expect("rdx")] = true;
+
+    while decoder.can_decode() {
+        decoder.decode_out(&mut instruction);
+        if instruction.is_invalid() {
+            break;
+        }
+        if instruction.mnemonic() == iced_x86::Mnemonic::Ret {
+            break;
+        }
+        if instruction.mnemonic() == iced_x86::Mnemonic::Mov
+            && instruction.op_kind(0) == OpKind::Memory
+            && instruction.memory_index() == Register::None
+            && instruction.op_kind(1) == OpKind::Register
+        {
+            let base_ok =
+                gpr64_index(instruction.memory_base()).is_some_and(|base| this_derived[base]);
+            let src_ok =
+                gpr64_index(instruction.op1_register()).is_some_and(|src| arg_derived[src]);
+            if base_ok && src_ok {
+                let disp = instruction.memory_displacement64() as i64;
+                if (0..0x400).contains(&disp) {
+                    return Some(disp as usize);
+                }
+            }
+        }
+        update_this_derived(&instruction, &mut this_derived);
+        update_arg_derived(&instruction, &mut arg_derived);
+    }
+    None
+}
+
+fn update_arg_derived(instruction: &Instruction, arg_derived: &mut [bool; 16]) {
+    use iced_x86::Mnemonic;
+
+    match instruction.mnemonic() {
+        Mnemonic::Mov => {
+            if instruction.op_kind(0) != OpKind::Register {
+                return;
+            }
+            let Some(dst) = gpr64_index(instruction.op0_register()) else {
+                return;
+            };
+            if dst == 4 {
+                return;
+            }
+            arg_derived[dst] = match instruction.op_kind(1) {
+                OpKind::Register => gpr64_index(instruction.op1_register())
+                    .map(|src| arg_derived[src])
+                    .unwrap_or(false),
+                _ => false,
+            };
+        }
+        Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Push => {}
+        _ => {
+            if instruction.op_count() == 0 || instruction.op_kind(0) != OpKind::Register {
+                return;
+            }
+            let Some(dst) = gpr64_index(instruction.op0_register()) else {
+                return;
+            };
+            if dst != 4 {
+                arg_derived[dst] = false;
+            }
+        }
+    }
 }
 
 fn memory_disps(pe: &PeImage, rva: u32, max_size: usize) -> Vec<usize> {

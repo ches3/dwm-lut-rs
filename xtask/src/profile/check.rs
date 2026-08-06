@@ -12,7 +12,7 @@ use dwm_lut_profile::{
 use super::ensure;
 use super::extract::layout::extract_layout;
 use super::extract::report::{LayoutRow, LayoutStatus, format_hex};
-use super::extract::symbols::{SymbolResolveError, resolve_function_symbol, resolve_global_symbol};
+use super::extract::symbols::{SymbolResolveError, resolve_function_symbol};
 use super::pdb_publics::PdbPublics;
 use super::pe::PeImage;
 
@@ -169,15 +169,21 @@ fn print_layout_table(profile: &HookProfile, extracted: &[LayoutRow]) -> usize {
     failed
 }
 
-fn profile_layout_values(profile: &HookProfile) -> [(&'static str, String); 6] {
+fn profile_layout_values(profile: &HookProfile) -> [(&'static str, String); 8] {
     [
         (
             "container_vtable_index",
-            profile.swap_chain.container_vtable_index.to_string(),
+            profile
+                .swap_chain_to_resource_path
+                .container_vtable_index
+                .to_string(),
         ),
         (
             "resource_vtable_index",
-            profile.swap_chain.resource_vtable_index.to_string(),
+            profile
+                .swap_chain_to_resource_path
+                .resource_vtable_index
+                .to_string(),
         ),
         (
             "hardware_protected",
@@ -185,15 +191,26 @@ fn profile_layout_values(profile: &HookProfile) -> [(&'static str, String); 6] {
         ),
         (
             "adapter_luid_low_offset",
-            format_hex(profile.monitor_identity.adapter_luid_low_offset),
+            format_hex(profile.monitor_identity_offsets.adapter_luid_low_offset),
         ),
         (
             "adapter_luid_high_offset",
-            format_hex(profile.monitor_identity.adapter_luid_high_offset),
+            format_hex(profile.monitor_identity_offsets.adapter_luid_high_offset),
         ),
         (
             "target_id_offset",
-            format_hex(profile.monitor_identity.target_id_offset),
+            format_hex(profile.monitor_identity_offsets.target_id_offset),
+        ),
+        (
+            "monitor_target_offset",
+            format_hex(profile.context_to_swap_chain_path.monitor_target_offset),
+        ),
+        (
+            "swap_chain_vtable_index",
+            profile
+                .context_to_swap_chain_path
+                .swap_chain_vtable_index
+                .to_string(),
         ),
     ]
 }
@@ -248,14 +265,6 @@ fn print_signatures_table(profile: &HookProfile, pe: &PeImage, pubs: &PdbPublics
                 signature_failed += 1;
                 (status_cell("ambiguous", Color::Red), "-".into())
             }
-            Err(SignatureScanError::OutOfBounds { .. }) => {
-                signature_failed += 1;
-                (status_cell("out_of_bounds", Color::Red), "-".into())
-            }
-            Err(SignatureScanError::IncompatibleLocator { .. }) => {
-                signature_failed += 1;
-                (status_cell("incompatible_locator", Color::Red), "-".into())
-            }
         };
 
         table.add_row(vec![Cell::new(label), status, Cell::new(rva)]);
@@ -270,11 +279,7 @@ fn expected_symbol_rva(
     pe: &PeImage,
     pubs: &PdbPublics,
 ) -> Result<u32, SymbolResolveError> {
-    if target.is_function_hook_target() {
-        resolve_function_symbol(target, pubs, pe).map(|symbol| symbol.rva)
-    } else {
-        resolve_global_symbol(target, pubs).map(|symbol| symbol.rva)
-    }
+    resolve_function_symbol(target, pubs, pe).map(|symbol| symbol.rva)
 }
 
 fn status_cell(text: &str, color: Color) -> Cell {

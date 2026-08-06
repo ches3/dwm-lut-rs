@@ -6,8 +6,6 @@ mod dwmcore_26100_3912;
 mod dwmcore_26100_4484;
 mod dwmcore_26100_7309;
 mod dwmcore_26100_7705;
-mod dwmcore_26100_8737;
-mod dwmcore_26100_8972;
 
 use crate::version::{RevisionProfile, SupportedBuild};
 
@@ -45,14 +43,6 @@ pub const SUPPORTED_BUILDS: &[SupportedBuild] = &[SupportedBuild {
         RevisionProfile {
             min_revision: 7705,
             profile: dwmcore_26100_7705::profile,
-        },
-        RevisionProfile {
-            min_revision: 8737,
-            profile: dwmcore_26100_8737::profile,
-        },
-        RevisionProfile {
-            min_revision: 8972,
-            profile: dwmcore_26100_8972::profile,
         },
     ],
 }];
@@ -98,16 +88,19 @@ mod tests {
         for supported in SUPPORTED_BUILDS {
             for entry in supported.profiles {
                 let profile = (entry.profile)();
-                for target in [HookTarget::Present, HookTarget::OverlayTestMode] {
+                for &target in HookTarget::ALL {
+                    if !target.is_required_signature() {
+                        continue;
+                    }
                     assert!(
                         profile
                             .signatures
                             .iter()
                             .any(|signature| signature.target == target),
-                        "build {}.{} must include required target {:?}",
+                        "build {}.{} must include required target {}",
                         supported.build,
                         entry.min_revision,
-                        target
+                        target.label()
                     );
                 }
             }

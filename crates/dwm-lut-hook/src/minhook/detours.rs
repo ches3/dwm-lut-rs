@@ -1,77 +1,29 @@
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::DirtyRect;
-#[cfg(debug_assertions)]
-use crate::flip_gate::FlipGateKind;
-use crate::flip_gate::apply_flip_gate;
+use crate::flip_gate;
 use crate::lifecycle;
 use dwm_lut_profile::HookTarget;
 
-type PresentOriginal = unsafe extern "system" fn(usize, usize, u32, usize, i32, usize, u8) -> i64;
-type OverlayDirectFlipOriginal =
-    unsafe extern "system" fn(usize, usize, usize, usize, u32, u8) -> u8;
-type EnsureIndependentFlipStateOriginal = unsafe extern "system" fn(usize) -> i32;
-type IsDirectFlipSupportedOnTargetOriginal = unsafe extern "system" fn(usize, usize, usize) -> u8;
-type LegacyCheckDirectFlipSupportOriginal =
-    unsafe extern "system" fn(usize, usize, u32, usize, usize) -> u8;
-type IsAdvancedDirectFlipCompatibleOriginal = unsafe extern "system" fn(usize) -> u8;
-
 static PRESENT_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL: AtomicPtr<c_void> =
+static IS_CANDIDATE_DIRECT_FLIP_COMPATIBLE_ORIGINAL: AtomicPtr<c_void> =
     AtomicPtr::new(ptr::null_mut());
-static LEGACY_CHECK_DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static IS_ADVANCED_DIRECT_FLIP_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static OVERLAYS_ENABLED_ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-
-const OVERLAYS_ENABLED_ORIGINAL_BEHAVIOR: u8 = 0;
-const OVERLAYS_ENABLED_FORCE_FALSE: u8 = 1;
-const OVERLAYS_ENABLED_FORCE_TRUE: u8 = 2;
-
-static OVERLAYS_ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(OVERLAYS_ENABLED_ORIGINAL_BEHAVIOR);
+static IS_CANDIDATE_OVERLAY_COMPATIBLE_ORIGINAL: AtomicPtr<c_void> =
+    AtomicPtr::new(ptr::null_mut());
 
 pub(crate) fn present_original() -> *mut c_void {
     PRESENT_ORIGINAL.load(Ordering::Acquire)
 }
 
-#[cfg(test)]
-pub(super) fn reset_test_original_slots() {
-    PRESENT_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    LEGACY_CHECK_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    IS_ADVANCED_DIRECT_FLIP_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    OVERLAYS_ENABLED_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    set_overlays_enabled_override(None);
-}
-
-pub(super) fn set_overlays_enabled_override(value: Option<bool>) {
-    let value = match value {
-        None => OVERLAYS_ENABLED_ORIGINAL_BEHAVIOR,
-        Some(false) => OVERLAYS_ENABLED_FORCE_FALSE,
-        Some(true) => OVERLAYS_ENABLED_FORCE_TRUE,
-    };
-    OVERLAYS_ENABLED_OVERRIDE.store(value, Ordering::Release);
-}
-
 pub(crate) fn original_pointer_for_target(target: HookTarget) -> &'static AtomicPtr<c_void> {
     match target {
         HookTarget::Present => &PRESENT_ORIGINAL,
-        HookTarget::IsCandidateDirectFlipCompatible => &DIRECT_FLIP_ORIGINAL,
-        HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
-            &ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL
+        HookTarget::IsCandidateDirectFlipCompatible => {
+            &IS_CANDIDATE_DIRECT_FLIP_COMPATIBLE_ORIGINAL
         }
-        HookTarget::IsDirectFlipSupportedOnTarget => &IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL,
-        HookTarget::LegacySwapChainCheckDirectFlipSupport => &LEGACY_CHECK_DIRECT_FLIP_ORIGINAL,
-        HookTarget::IsAdvancedDirectFlipCompatible => &IS_ADVANCED_DIRECT_FLIP_ORIGINAL,
-        HookTarget::OverlaysEnabled => &OVERLAYS_ENABLED_ORIGINAL,
-        HookTarget::OverlayTestMode | HookTarget::DisableIndependentFlip => {
-            unreachable!("global patch target is not a function hook")
-        }
+        HookTarget::IsCandidateOverlayCompatible => &IS_CANDIDATE_OVERLAY_COMPATIBLE_ORIGINAL,
     }
 }
 
@@ -82,22 +34,11 @@ pub(super) fn original_slot_for_target(target: HookTarget) -> *mut *mut c_void {
 pub(super) fn detour_for_target(target: HookTarget) -> *mut c_void {
     match target {
         HookTarget::Present => present_detour as *mut c_void,
-        HookTarget::IsCandidateDirectFlipCompatible => direct_flip_detour as *mut c_void,
-        HookTarget::DirectFlipInfoEnsureIndependentFlipState => {
-            ensure_independent_flip_state_detour as *mut c_void
+        HookTarget::IsCandidateDirectFlipCompatible => {
+            is_candidate_direct_flip_compatible_detour as *mut c_void
         }
-        HookTarget::IsDirectFlipSupportedOnTarget => {
-            is_direct_flip_supported_on_target_detour as *mut c_void
-        }
-        HookTarget::LegacySwapChainCheckDirectFlipSupport => {
-            legacy_check_direct_flip_support_detour as *mut c_void
-        }
-        HookTarget::IsAdvancedDirectFlipCompatible => {
-            is_advanced_direct_flip_compatible_detour as *mut c_void
-        }
-        HookTarget::OverlaysEnabled => overlays_enabled_detour as *mut c_void,
-        HookTarget::OverlayTestMode | HookTarget::DisableIndependentFlip => {
-            unreachable!("global patch target is not a function hook")
+        HookTarget::IsCandidateOverlayCompatible => {
+            is_candidate_overlay_compatible_detour as *mut c_void
         }
     }
 }
@@ -111,6 +52,9 @@ unsafe extern "system" fn present_detour(
     a6: usize,
     a7: u8,
 ) -> i64 {
+    type PresentOriginal =
+        unsafe extern "system" fn(usize, usize, u32, usize, i32, usize, u8) -> i64;
+
     let original = present_original();
     if original.is_null() {
         return 0;
@@ -138,292 +82,93 @@ unsafe extern "system" fn present_detour(
     unsafe { original(this, overlay_swap_chain, a3, prepared.rect_vec, a5, a6, a7) }
 }
 
-unsafe extern "system" fn direct_flip_detour(
+fn apply_flip_gate<T: Default>(
+    target: HookTarget,
+    overlay_context: usize,
+    original_slot: &AtomicPtr<c_void>,
+    call_original: impl FnOnce(*mut c_void) -> T,
+) -> T {
+    if flip_gate::should_block(target, overlay_context) {
+        return T::default();
+    }
+    let original = original_slot.load(Ordering::Acquire);
+    if original.is_null() {
+        return T::default();
+    }
+    call_original(original)
+}
+
+unsafe extern "system" fn is_candidate_direct_flip_compatible_detour(
     this: usize,
+    a1: usize,
     a2: usize,
     a3: usize,
-    a4: usize,
-    a5: u32,
-    a6: u8,
-) -> u8 {
-    apply_flip_gate(
-        &DIRECT_FLIP_ORIGINAL,
-        #[cfg(debug_assertions)]
-        FlipGateKind::OverlayContextDirectFlip,
-        |original| {
-            let original: OverlayDirectFlipOriginal = unsafe { std::mem::transmute(original) };
-            unsafe { original(this, a2, a3, a4, a5, a6) }
-        },
-    )
-}
-
-unsafe extern "system" fn ensure_independent_flip_state_detour(this: usize) -> i32 {
-    apply_flip_gate(
-        &ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL,
-        #[cfg(debug_assertions)]
-        FlipGateKind::DirectFlipInfoEnsureIndependentFlip,
-        |original| {
-            let original: EnsureIndependentFlipStateOriginal =
-                unsafe { std::mem::transmute(original) };
-            unsafe { original(this) }
-        },
-    )
-}
-
-unsafe extern "system" fn is_direct_flip_supported_on_target_detour(
-    this: usize,
-    a2: usize,
-    a3: usize,
-) -> u8 {
-    apply_flip_gate(
-        &IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL,
-        #[cfg(debug_assertions)]
-        FlipGateKind::IsDirectFlipSupportedOnTarget,
-        |original| {
-            let original: IsDirectFlipSupportedOnTargetOriginal =
-                unsafe { std::mem::transmute(original) };
-            unsafe { original(this, a2, a3) }
-        },
-    )
-}
-
-unsafe extern "system" fn legacy_check_direct_flip_support_detour(
-    this: usize,
-    a2: usize,
-    a3: u32,
     a4: usize,
     a5: usize,
 ) -> u8 {
+    type IsCandidateDirectFlipCompatibleOriginal =
+        unsafe extern "system" fn(usize, usize, usize, usize, usize, usize) -> u8;
+
     apply_flip_gate(
-        &LEGACY_CHECK_DIRECT_FLIP_ORIGINAL,
-        #[cfg(debug_assertions)]
-        FlipGateKind::LegacySwapChainCheckDirectFlip,
+        HookTarget::IsCandidateDirectFlipCompatible,
+        this,
+        &IS_CANDIDATE_DIRECT_FLIP_COMPATIBLE_ORIGINAL,
         |original| {
-            let original: LegacyCheckDirectFlipSupportOriginal =
+            let original_fn: IsCandidateDirectFlipCompatibleOriginal =
                 unsafe { std::mem::transmute(original) };
-            unsafe { original(this, a2, a3, a4, a5) }
+            unsafe { original_fn(this, a1, a2, a3, a4, a5) }
         },
     )
 }
 
-unsafe extern "system" fn is_advanced_direct_flip_compatible_detour(this: usize) -> u8 {
+unsafe extern "system" fn is_candidate_overlay_compatible_detour(
+    this: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: usize,
+    a7: usize,
+    a8: usize,
+) -> u8 {
+    type IsCandidateOverlayCompatibleOriginal = unsafe extern "system" fn(
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    ) -> u8;
+
     apply_flip_gate(
-        &IS_ADVANCED_DIRECT_FLIP_ORIGINAL,
-        #[cfg(debug_assertions)]
-        FlipGateKind::IsAdvancedDirectFlipCompatible,
+        HookTarget::IsCandidateOverlayCompatible,
+        this,
+        &IS_CANDIDATE_OVERLAY_COMPATIBLE_ORIGINAL,
         |original| {
-            let original: IsAdvancedDirectFlipCompatibleOriginal =
+            let original_fn: IsCandidateOverlayCompatibleOriginal =
                 unsafe { std::mem::transmute(original) };
-            unsafe { original(this) }
+            unsafe { original_fn(this, a1, a2, a3, a4, a5, a6, a7, a8) }
         },
     )
-}
-
-// DWM callers retain volatile registers across this internal leaf function.
-// Keep the detour transparent except for the original AL result and flags.
-#[unsafe(naked)]
-unsafe extern "system" fn overlays_enabled_detour(_this: usize) -> u8 {
-    core::arch::naked_asm!(
-        "cmp byte ptr [rip + {override_state}], {original_behavior}",
-        "je 2f",
-        "cmp byte ptr [rip + {override_state}], {force_true}",
-        "sete al",
-        "ret",
-        "2:",
-        "jmp qword ptr [rip + {original_slot}]",
-        override_state = sym OVERLAYS_ENABLED_OVERRIDE,
-        original_slot = sym OVERLAYS_ENABLED_ORIGINAL,
-        original_behavior = const OVERLAYS_ENABLED_ORIGINAL_BEHAVIOR,
-        force_true = const OVERLAYS_ENABLED_FORCE_TRUE,
-    );
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::c_void;
     use std::ptr;
     use std::sync::atomic::Ordering;
 
-    use crate::state::{self, HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK};
+    use crate::present::test_support::initialize_test_state;
+    use crate::state::HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK;
+    use dwm_lut_profile::HookTarget;
 
-    unsafe extern "system" fn returns_true_overlay_direct_flip(
-        _a0: usize,
-        _a1: usize,
-        _a2: usize,
-        _a3: usize,
-        _a4: u32,
-        _a5: u8,
-    ) -> u8 {
-        1
-    }
-
-    unsafe extern "system" fn returns_true_1(_a0: usize) -> u8 {
-        1
-    }
-
-    unsafe extern "system" fn returns_hresult_fail(_a0: usize) -> i32 {
-        -1
-    }
-
-    unsafe extern "system" fn returns_true_this2(_a0: usize, _a1: usize, _a2: usize) -> u8 {
-        1
-    }
-
-    unsafe extern "system" fn returns_true_check_direct_flip(
-        _a0: usize,
-        _a1: usize,
-        _a2: u32,
-        _a3: usize,
-        _a4: usize,
-    ) -> u8 {
-        1
-    }
-
-    #[unsafe(naked)]
-    unsafe extern "system" fn returns_true_overlays_enabled_original(_this: usize) -> u8 {
-        core::arch::naked_asm!("mov al, 1", "ret");
-    }
-
-    #[unsafe(naked)]
-    unsafe extern "system" fn overlays_enabled_register_probe() -> u8 {
-        core::arch::naked_asm!(
-            "sub rsp, 40",
-            "mov rax, 0x1122334455667701",
-            "mov [rsp + 32], rax",
-            "mov rax, 0x1122334455667700",
-            "mov ecx, 0x11111111",
-            "mov edx, 0x22222222",
-            "mov r8d, 0x33333333",
-            "mov r9d, 0x44444444",
-            "mov r10d, 0x55555555",
-            "mov r11d, 0x66666666",
-            "pcmpeqb xmm0, xmm0",
-            "movdqa xmm1, xmm0",
-            "movdqa xmm2, xmm0",
-            "movdqa xmm3, xmm0",
-            "movdqa xmm4, xmm0",
-            "movdqa xmm5, xmm0",
-            "call {detour}",
-            "cmp rax, [rsp + 32]",
-            "jne 3f",
-            "cmp ecx, 0x11111111",
-            "jne 3f",
-            "cmp edx, 0x22222222",
-            "jne 3f",
-            "cmp r8d, 0x33333333",
-            "jne 3f",
-            "cmp r9d, 0x44444444",
-            "jne 3f",
-            "cmp r10d, 0x55555555",
-            "jne 3f",
-            "cmp r11d, 0x66666666",
-            "jne 3f",
-            "pmovmskb eax, xmm0",
-            "cmp eax, 0xffff",
-            "jne 3f",
-            "pmovmskb eax, xmm1",
-            "cmp eax, 0xffff",
-            "jne 3f",
-            "pmovmskb eax, xmm2",
-            "cmp eax, 0xffff",
-            "jne 3f",
-            "pmovmskb eax, xmm3",
-            "cmp eax, 0xffff",
-            "jne 3f",
-            "pmovmskb eax, xmm4",
-            "cmp eax, 0xffff",
-            "jne 3f",
-            "pmovmskb eax, xmm5",
-            "cmp eax, 0xffff",
-            "jne 3f",
-            "mov eax, 1",
-            "add rsp, 40",
-            "ret",
-            "3:",
-            "xor eax, eax",
-            "add rsp, 40",
-            "ret",
-            detour = sym super::overlays_enabled_detour,
-        );
-    }
-
-    #[test]
-    fn overlays_enabled_detour_forwards_or_returns_atomic_override() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        super::OVERLAYS_ENABLED_ORIGINAL.store(
-            returns_true_overlays_enabled_original as *mut c_void,
-            Ordering::Release,
-        );
-        super::set_overlays_enabled_override(None);
-
-        assert_eq!(unsafe { super::overlays_enabled_detour(0) }, 1);
-
-        super::set_overlays_enabled_override(Some(false));
-        assert_eq!(unsafe { super::overlays_enabled_detour(0) }, 0);
-
-        super::set_overlays_enabled_override(Some(true));
-        assert_eq!(unsafe { super::overlays_enabled_detour(0) }, 1);
-
-        super::set_overlays_enabled_override(None);
-        super::OVERLAYS_ENABLED_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    }
-
-    #[test]
-    fn overlays_enabled_override_preserves_original_volatile_registers() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        super::set_overlays_enabled_override(Some(true));
-
-        assert_eq!(unsafe { overlays_enabled_register_probe() }, 1);
-
-        super::OVERLAYS_ENABLED_ORIGINAL.store(
-            returns_true_overlays_enabled_original as *mut c_void,
-            Ordering::Release,
-        );
-        super::set_overlays_enabled_override(None);
-        assert_eq!(unsafe { overlays_enabled_register_probe() }, 1);
-
-        super::OVERLAYS_ENABLED_ORIGINAL.store(ptr::null_mut(), Ordering::Release);
-    }
-
-    #[test]
-    fn flip_gate_detours_wire_original_signatures() {
-        let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
-        state::reset_state_for_tests();
-        super::DIRECT_FLIP_ORIGINAL.store(
-            returns_true_overlay_direct_flip as *mut c_void,
-            Ordering::Release,
-        );
-        super::ENSURE_INDEPENDENT_FLIP_STATE_ORIGINAL
-            .store(returns_hresult_fail as *mut c_void, Ordering::Release);
-        super::IS_DIRECT_FLIP_SUPPORTED_ON_TARGET_ORIGINAL
-            .store(returns_true_this2 as *mut c_void, Ordering::Release);
-        super::LEGACY_CHECK_DIRECT_FLIP_ORIGINAL.store(
-            returns_true_check_direct_flip as *mut c_void,
-            Ordering::Release,
-        );
-        super::IS_ADVANCED_DIRECT_FLIP_ORIGINAL
-            .store(returns_true_1 as *mut c_void, Ordering::Release);
-
-        assert_eq!(
-            unsafe { super::direct_flip_detour(0x1234, 0, 0, 0, 0, 0) },
-            1
-        );
-        assert_eq!(
-            unsafe { super::ensure_independent_flip_state_detour(0) },
-            -1
-        );
-        assert_eq!(
-            unsafe { super::is_direct_flip_supported_on_target_detour(0, 0, 0) },
-            1
-        );
-        assert_eq!(
-            unsafe { super::legacy_check_direct_flip_support_detour(0, 0, 0, 0, 0) },
-            1
-        );
-        assert_eq!(
-            unsafe { super::is_advanced_direct_flip_compatible_detour(0) },
-            1
-        );
+    fn reset_original_slots() {
+        for &target in HookTarget::ALL {
+            super::original_pointer_for_target(target).store(ptr::null_mut(), Ordering::Release);
+        }
     }
 
     #[test]
@@ -431,8 +176,8 @@ mod tests {
         let _guard = CONTROLLED_TEST_LOCK.lock().expect("test mutex should lock");
         use crate::DirtyRect;
         use crate::present::test_support::{
-            FakePresentObjects, initialize_test_state, install_present_original,
-            last_original_present_rects, reset_last_original_present_rects,
+            FakePresentObjects, install_present_original, last_original_present_rects,
+            reset_last_original_present_rects,
         };
 
         reset_last_original_present_rects();
@@ -480,5 +225,6 @@ mod tests {
             0x55
         );
         assert_eq!(last_original_present_rects(), Some(vec![full_rect]));
+        reset_original_slots();
     }
 }

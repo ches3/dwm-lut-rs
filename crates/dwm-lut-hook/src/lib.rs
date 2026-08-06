@@ -9,7 +9,7 @@ compile_error!("dwm-lut-hook supports only x86_64-pc-windows-msvc");
 mod bootstrap;
 mod d3d11;
 mod desktop_redraw;
-mod dwmcore_version;
+mod dwmcore;
 mod flip_gate;
 mod lifecycle;
 mod log;
@@ -19,8 +19,8 @@ mod resolver;
 mod state;
 
 pub use bootstrap::HookError;
+pub use dwmcore::DirtyRect;
 pub use minhook::{MinHookError, MinHookRuntime, MinHookState, RegisteredHook};
-pub use present::DirtyRect;
 pub use resolver::{
     HookResolveError, LoadedModule, ResolvedFunctionVa, SignatureResolutionReport, Va,
     resolve_profile,

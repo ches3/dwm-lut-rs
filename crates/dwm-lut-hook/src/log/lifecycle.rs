@@ -186,18 +186,6 @@ pub(crate) fn signatures(report: &SignatureResolutionReport) {
                 super::quoted(target.target().label())
             ));
         }
-        if report.overlay_test_mode.is_some() {
-            super::write(format_args!(
-                "event=signature_resolved target={}",
-                super::quoted(dwm_lut_profile::HookTarget::OverlayTestMode.label())
-            ));
-        }
-        if report.disable_independent_flip.is_some() {
-            super::write(format_args!(
-                "event=signature_resolved target={}",
-                super::quoted(dwm_lut_profile::HookTarget::DisableIndependentFlip.label())
-            ));
-        }
         for skipped in &report.skipped {
             super::write(format_args!(
                 "event=signature_skipped target={} reason={:?}",

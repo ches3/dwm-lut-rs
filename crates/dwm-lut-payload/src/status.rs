@@ -34,8 +34,6 @@ pub enum ResolveFailureKind {
     NotFound = 1,
     Ambiguous = 2,
     PrologueConflict = 3,
-    OutOfBounds = 4,
-    IncompatibleLocator = 5,
 }
 
 impl ResolveFailureKind {
@@ -44,8 +42,6 @@ impl ResolveFailureKind {
             1 => Some(Self::NotFound),
             2 => Some(Self::Ambiguous),
             3 => Some(Self::PrologueConflict),
-            4 => Some(Self::OutOfBounds),
-            5 => Some(Self::IncompatibleLocator),
             _ => None,
         }
     }
@@ -56,13 +52,7 @@ impl ResolveFailureKind {
 pub enum HookTargetId {
     Present = 1,
     IsCandidateDirectFlipCompatible = 2,
-    DirectFlipInfoEnsureIndependentFlipState = 3,
-    IsDirectFlipSupportedOnTarget = 4,
-    LegacySwapChainCheckDirectFlipSupport = 5,
-    IsAdvancedDirectFlipCompatible = 6,
-    OverlayTestMode = 7,
-    DisableIndependentFlip = 8,
-    OverlaysEnabled = 9,
+    IsCandidateOverlayCompatible = 3,
 }
 
 impl HookTargetId {
@@ -70,13 +60,7 @@ impl HookTargetId {
         match value {
             1 => Some(Self::Present),
             2 => Some(Self::IsCandidateDirectFlipCompatible),
-            3 => Some(Self::DirectFlipInfoEnsureIndependentFlipState),
-            4 => Some(Self::IsDirectFlipSupportedOnTarget),
-            5 => Some(Self::LegacySwapChainCheckDirectFlipSupport),
-            6 => Some(Self::IsAdvancedDirectFlipCompatible),
-            7 => Some(Self::OverlayTestMode),
-            8 => Some(Self::DisableIndependentFlip),
-            9 => Some(Self::OverlaysEnabled),
+            3 => Some(Self::IsCandidateOverlayCompatible),
             _ => None,
         }
     }
@@ -85,19 +69,7 @@ impl HookTargetId {
         match self {
             Self::Present => "Present",
             Self::IsCandidateDirectFlipCompatible => "IsCandidateDirectFlipCompatible",
-            Self::DirectFlipInfoEnsureIndependentFlipState => {
-                "CDirectFlipInfo::EnsureIndependentFlipState"
-            }
-            Self::IsDirectFlipSupportedOnTarget => "COverlayContext::IsDirectFlipSupportedOnTarget",
-            Self::LegacySwapChainCheckDirectFlipSupport => {
-                "CLegacySwapChain::CheckDirectFlipSupport"
-            }
-            Self::IsAdvancedDirectFlipCompatible => {
-                "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible"
-            }
-            Self::OverlayTestMode => "OverlayTestMode",
-            Self::DisableIndependentFlip => "DisableIndependentFlip",
-            Self::OverlaysEnabled => "COverlayContext::OverlaysEnabled",
+            Self::IsCandidateOverlayCompatible => "IsCandidateOverlayCompatible",
         }
     }
 }
@@ -119,6 +91,7 @@ pub enum InitializeStatus {
     MinHookInitializeFailed,
     MinHookCreateHookFailed,
     MinHookEnableHookFailed,
+    MinHookDisableHookFailed,
     Resolve {
         kind: ResolveFailureKind,
         target: HookTargetId,
@@ -143,6 +116,7 @@ impl InitializeStatus {
             Self::MinHookInitializeFailed => 12,
             Self::MinHookCreateHookFailed => 13,
             Self::MinHookEnableHookFailed => 14,
+            Self::MinHookDisableHookFailed => 15,
             Self::Resolve { kind, target } => {
                 RESOLVE_CODE_BASE | ((kind as u32) << 8) | (target as u32)
             }
@@ -178,6 +152,7 @@ impl InitializeStatus {
             12 => Some(Self::MinHookInitializeFailed),
             13 => Some(Self::MinHookCreateHookFailed),
             14 => Some(Self::MinHookEnableHookFailed),
+            15 => Some(Self::MinHookDisableHookFailed),
             _ => None,
         }
     }
@@ -211,6 +186,7 @@ impl fmt::Display for InitializeStatus {
             Self::MinHookInitializeFailed => write!(f, "MH_Initialize failed"),
             Self::MinHookCreateHookFailed => write!(f, "MH_CreateHook failed"),
             Self::MinHookEnableHookFailed => write!(f, "MH_EnableHook failed"),
+            Self::MinHookDisableHookFailed => write!(f, "MH_DisableHook failed"),
             Self::Resolve { kind, target } => {
                 let label = target.label();
                 match kind {
@@ -220,12 +196,6 @@ impl fmt::Display for InitializeStatus {
                     }
                     ResolveFailureKind::PrologueConflict => {
                         write!(f, "{label} prologue is modified by a conflicting hook")
-                    }
-                    ResolveFailureKind::OutOfBounds => {
-                        write!(f, "{label} RIP-relative target was out of bounds")
-                    }
-                    ResolveFailureKind::IncompatibleLocator => {
-                        write!(f, "{label} locator is incompatible with the target")
                     }
                 }
             }
@@ -243,6 +213,8 @@ pub enum ReplaceAssignmentsStatus {
     AlreadyInProgress = 4,
     PayloadDecodeFailed = 5,
     PayloadHasNoAssignments = 6,
+    MinHookFailed = 7,
+    MinHookCleanupFailed = 8,
 }
 
 impl ReplaceAssignmentsStatus {
@@ -255,6 +227,8 @@ impl ReplaceAssignmentsStatus {
             4 => Self::AlreadyInProgress,
             5 => Self::PayloadDecodeFailed,
             6 => Self::PayloadHasNoAssignments,
+            7 => Self::MinHookFailed,
+            8 => Self::MinHookCleanupFailed,
             _ => return None,
         })
     }
@@ -278,6 +252,13 @@ impl fmt::Display for ReplaceAssignmentsStatus {
             Self::PayloadDecodeFailed => write!(f, "payload could not be decoded"),
             Self::PayloadHasNoAssignments => {
                 write!(f, "payload does not contain any LUT assignments")
+            }
+            Self::MinHookFailed => write!(f, "MinHook enable or disable failed"),
+            Self::MinHookCleanupFailed => {
+                write!(
+                    f,
+                    "MinHook enable or disable failed and flip-gate cleanup could not restore prior state"
+                )
             }
         }
     }
@@ -356,8 +337,30 @@ impl fmt::Display for ShutdownStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        HookStatus, HookTargetId, InitializeStatus, RESOLVE_CODE_BASE, ResolveFailureKind,
+        HookStatus, HookTargetId, InitializeStatus, RESOLVE_CODE_BASE, ReplaceAssignmentsStatus,
+        ResolveFailureKind,
     };
+
+    #[test]
+    fn replace_assignments_status_codes_round_trip() {
+        for status in [
+            ReplaceAssignmentsStatus::Success,
+            ReplaceAssignmentsStatus::NullPayload,
+            ReplaceAssignmentsStatus::InvalidPayload,
+            ReplaceAssignmentsStatus::NotInitialized,
+            ReplaceAssignmentsStatus::AlreadyInProgress,
+            ReplaceAssignmentsStatus::PayloadDecodeFailed,
+            ReplaceAssignmentsStatus::PayloadHasNoAssignments,
+            ReplaceAssignmentsStatus::MinHookFailed,
+            ReplaceAssignmentsStatus::MinHookCleanupFailed,
+        ] {
+            assert_eq!(
+                ReplaceAssignmentsStatus::from_code(status as u32),
+                Some(status)
+            );
+        }
+        assert_eq!(ReplaceAssignmentsStatus::from_code(9), None);
+    }
 
     #[test]
     fn hook_status_codes_round_trip() {
@@ -393,34 +396,14 @@ mod tests {
             Some(present_not_found)
         );
 
-        let overlays_prologue = InitializeStatus::Resolve {
+        let candidate_overlay_prologue = InitializeStatus::Resolve {
             kind: ResolveFailureKind::PrologueConflict,
-            target: HookTargetId::OverlaysEnabled,
+            target: HookTargetId::IsCandidateOverlayCompatible,
         };
-        assert_eq!(overlays_prologue.to_code(), 0x0001_0309);
+        assert_eq!(candidate_overlay_prologue.to_code(), 0x0001_0303);
         assert_eq!(
-            InitializeStatus::from_code(0x0001_0309),
-            Some(overlays_prologue)
-        );
-
-        let present_out_of_bounds = InitializeStatus::Resolve {
-            kind: ResolveFailureKind::OutOfBounds,
-            target: HookTargetId::Present,
-        };
-        assert_eq!(present_out_of_bounds.to_code(), 0x0001_0401);
-        assert_eq!(
-            InitializeStatus::from_code(0x0001_0401),
-            Some(present_out_of_bounds)
-        );
-
-        let present_incompatible = InitializeStatus::Resolve {
-            kind: ResolveFailureKind::IncompatibleLocator,
-            target: HookTargetId::Present,
-        };
-        assert_eq!(present_incompatible.to_code(), 0x0001_0501);
-        assert_eq!(
-            InitializeStatus::from_code(0x0001_0501),
-            Some(present_incompatible)
+            InitializeStatus::from_code(0x0001_0303),
+            Some(candidate_overlay_prologue)
         );
     }
 
@@ -430,7 +413,7 @@ mod tests {
         assert_eq!(InitializeStatus::from_code(0x0001_0001), None);
         assert_eq!(InitializeStatus::from_code(0x0001_0100), None);
         assert_eq!(InitializeStatus::from_code(0x0002_0101), None);
-        assert_eq!(InitializeStatus::from_code(15), None);
+        assert_eq!(InitializeStatus::from_code(16), None);
         assert_eq!(InitializeStatus::from_code(u32::MAX), None);
     }
 }

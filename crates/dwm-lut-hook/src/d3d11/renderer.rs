@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 #[cfg(debug_assertions)]
 use std::collections::BTreeSet;
 use std::ffi::c_void;
-use std::mem::size_of;
+use std::mem::{size_of, transmute_copy};
+use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::RECT;
@@ -28,10 +29,10 @@ use super::{
     BackBufferId, PresentDrawFailReason, PresentDrawStatus, PresentLutOutcome, RenderAcquireError,
 };
 
-use crate::present::DirtyRect;
+use crate::dwmcore::DirtyRect;
 use crate::state::LutAssignment;
 use dwm_lut_payload::MonitorIdentity;
-use dwm_lut_profile::SwapChainVtablePath;
+use dwm_lut_profile::SwapChainToResourcePath;
 
 static RENDERER: OnceLock<Mutex<D3D11Renderer>> = OnceLock::new();
 
@@ -47,7 +48,7 @@ struct D3D11Renderer {
 #[derive(Clone, Copy)]
 struct PresentRenderContext {
     overlay_swap_chain: usize,
-    swap_chain_path: SwapChainVtablePath,
+    swap_chain_to_resource_path: SwapChainToResourcePath,
     monitor_identity: Option<MonitorIdentity>,
 }
 
@@ -78,7 +79,7 @@ impl D3D11Renderer {
         let back_buffer = (unsafe {
             self.overlay_swap_chain_to_back_buffer(
                 present_context.overlay_swap_chain,
-                present_context.swap_chain_path,
+                present_context.swap_chain_to_resource_path,
             )
         })
         .ok_or(RenderAcquireError::BackBuffer)?;
@@ -134,16 +135,15 @@ impl D3D11Renderer {
     unsafe fn overlay_swap_chain_to_back_buffer(
         &mut self,
         overlay_swap_chain: usize,
-        swap_chain_path: SwapChainVtablePath,
+        swap_chain_to_resource_path: SwapChainToResourcePath,
     ) -> Option<ID3D11Texture2D> {
-        let texture = unsafe {
-            super::back_buffer::get_back_buffer(
-                overlay_swap_chain as *mut c_void,
-                swap_chain_path.container_vtable_index,
-                swap_chain_path.resource_vtable_index,
-            )
-        }?;
-        unsafe { take_owned_interface(texture) }
+        let resource = crate::dwmcore::resolve_swap_chain_resource(
+            overlay_swap_chain,
+            swap_chain_to_resource_path,
+        )?;
+        let texture = microseh::try_seh(|| unsafe { query_interface_texture2d(resource) })
+            .unwrap_or_default()?;
+        Some(unsafe { ID3D11Texture2D::from_raw(texture) })
     }
 
     fn render_with_device(
@@ -297,6 +297,38 @@ impl D3D11Renderer {
             }
         }
     }
+}
+
+const IUNKNOWN_QUERY_INTERFACE: usize = 0;
+
+unsafe fn query_interface_texture2d(resource: usize) -> Option<*mut c_void> {
+    type QueryInterface =
+        unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> i32;
+
+    if resource == 0 {
+        return None;
+    }
+
+    let vtable = unsafe { (resource as *const usize).read_unaligned() };
+    if vtable == 0 {
+        return None;
+    }
+    let method_offset = IUNKNOWN_QUERY_INTERFACE
+        .checked_mul(size_of::<usize>())
+        .and_then(|offset| vtable.checked_add(offset))?;
+    let method = unsafe { (method_offset as *const usize).read_unaligned() };
+    if method == 0 {
+        return None;
+    }
+    let query_interface: QueryInterface = unsafe { transmute_copy(&method) };
+
+    let mut texture = ptr::null_mut();
+    let hr =
+        unsafe { query_interface(resource as *mut c_void, &ID3D11Texture2D::IID, &mut texture) };
+    if hr < 0 || texture.is_null() {
+        return None;
+    }
+    Some(texture)
 }
 
 fn private_data_back_buffer_id(back_buffer: &ID3D11Texture2D) -> Result<u128, &'static str> {
@@ -601,7 +633,7 @@ fn outcome_draw_failed(
 
 pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
-    swap_chain_path: SwapChainVtablePath,
+    swap_chain_to_resource_path: SwapChainToResourcePath,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
     assignments: &[LutAssignment],
@@ -614,7 +646,7 @@ pub(crate) unsafe fn render_present_lut(
         renderer.render_present_lut(
             PresentRenderContext {
                 overlay_swap_chain,
-                swap_chain_path,
+                swap_chain_to_resource_path,
                 monitor_identity,
             },
             dirty_rects,

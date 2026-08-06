@@ -1,50 +1,34 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HookTarget {
     Present,
     IsCandidateDirectFlipCompatible,
-    DirectFlipInfoEnsureIndependentFlipState,
-    IsDirectFlipSupportedOnTarget,
-    LegacySwapChainCheckDirectFlipSupport,
-    IsAdvancedDirectFlipCompatible,
-    OverlayTestMode,
-    DisableIndependentFlip,
-    OverlaysEnabled,
+    IsCandidateOverlayCompatible,
 }
 
 impl HookTarget {
+    pub const ALL: &[Self] = &[
+        Self::Present,
+        Self::IsCandidateDirectFlipCompatible,
+        Self::IsCandidateOverlayCompatible,
+    ];
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Present => "Present",
             Self::IsCandidateDirectFlipCompatible => "IsCandidateDirectFlipCompatible",
-            Self::DirectFlipInfoEnsureIndependentFlipState => {
-                "CDirectFlipInfo::EnsureIndependentFlipState"
-            }
-            Self::IsDirectFlipSupportedOnTarget => "COverlayContext::IsDirectFlipSupportedOnTarget",
-            Self::LegacySwapChainCheckDirectFlipSupport => {
-                "CLegacySwapChain::CheckDirectFlipSupport"
-            }
-            Self::IsAdvancedDirectFlipCompatible => {
-                "CGlobalCompositionSurfaceInfo::IsAdvancedDirectFlipCompatible"
-            }
-            Self::OverlayTestMode => "OverlayTestMode",
-            Self::DisableIndependentFlip => "DisableIndependentFlip",
-            Self::OverlaysEnabled => "COverlayContext::OverlaysEnabled",
-        }
-    }
-
-    pub const fn is_function_hook_target(self) -> bool {
-        !matches!(self, Self::OverlayTestMode | Self::DisableIndependentFlip)
-    }
-
-    pub const fn global_value_size(self) -> Option<usize> {
-        match self {
-            Self::OverlayTestMode | Self::DisableIndependentFlip => Some(4),
-            _ => None,
+            Self::IsCandidateOverlayCompatible => "IsCandidateOverlayCompatible",
         }
     }
 
     pub const fn is_required_signature(self) -> bool {
-        matches!(self, Self::Present | Self::OverlayTestMode)
+        matches!(self, Self::Present)
+    }
+
+    pub const fn is_flip_gate(self) -> bool {
+        match self {
+            Self::Present => false,
+            Self::IsCandidateDirectFlipCompatible | Self::IsCandidateOverlayCompatible => true,
+        }
     }
 
     #[cfg(feature = "xtask")]
@@ -54,21 +38,26 @@ impl HookTarget {
             Self::IsCandidateDirectFlipCompatible => {
                 "?IsCandidateDirectFlipCompatible@COverlayContext@@"
             }
-            Self::DirectFlipInfoEnsureIndependentFlipState => {
-                "?EnsureIndependentFlipState@CDirectFlipInfo@@"
-            }
-            Self::IsDirectFlipSupportedOnTarget => {
-                "?IsDirectFlipSupportedOnTarget@COverlayContext@@"
-            }
-            Self::LegacySwapChainCheckDirectFlipSupport => {
-                "?CheckDirectFlipSupport@CLegacySwapChain@@"
-            }
-            Self::IsAdvancedDirectFlipCompatible => {
-                "?IsAdvancedDirectFlipCompatible@CGlobalCompositionSurfaceInfo@@"
-            }
-            Self::OverlayTestMode => "?m_dwOverlayTestMode@CCommonRegistryData@@",
-            Self::DisableIndependentFlip => "?m_fDisableIndependentFlip@CCommonRegistryData@@",
-            Self::OverlaysEnabled => "?OverlaysEnabled@COverlayContext@@",
+            Self::IsCandidateOverlayCompatible => "?IsCandidateOverlayCompatible@COverlayContext@@",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HookTarget;
+
+    #[test]
+    fn all_covers_every_variant() {
+        let mut seen = 0u8;
+        for &target in HookTarget::ALL {
+            match target {
+                HookTarget::Present => seen |= 1 << 0,
+                HookTarget::IsCandidateDirectFlipCompatible => seen |= 1 << 1,
+                HookTarget::IsCandidateOverlayCompatible => seen |= 1 << 2,
+            }
+        }
+        assert_eq!(seen.count_ones() as usize, HookTarget::ALL.len());
+        assert_eq!(seen, (1 << HookTarget::ALL.len()) - 1);
     }
 }

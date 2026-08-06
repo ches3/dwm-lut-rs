@@ -11,21 +11,12 @@ pub struct InspectReport {
     pub signatures: Vec<SignatureReport>,
 }
 
-#[derive(Debug, Clone)]
-pub enum LocatorKind {
-    Aob,
-    RipRelativeGlobalAob,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureStatus {
     Ok,
     NoSymbol,
     IcfStub,
     AmbiguousSymbol,
-    NoRefSite,
-    NoSharedAob,
-    RipVerifyFailed,
     UniquifyFailed,
 }
 
@@ -36,9 +27,6 @@ impl SignatureStatus {
             Self::NoSymbol => "no_symbol",
             Self::IcfStub => "icf_stub",
             Self::AmbiguousSymbol => "ambiguous_symbol",
-            Self::NoRefSite => "no_ref_site",
-            Self::NoSharedAob => "no_shared_aob",
-            Self::RipVerifyFailed => "rip_verify_failed",
             Self::UniquifyFailed => "uniquify_failed",
         }
     }
@@ -54,10 +42,7 @@ pub struct SignatureReport {
     pub hook_target: HookTarget,
     pub status: SignatureStatus,
     pub rva: Option<String>,
-    pub locator_kind: Option<LocatorKind>,
     pub aob: Option<String>,
-    pub displacement_offset: Option<usize>,
-    pub instruction_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,37 +125,16 @@ pub fn print_report(report: &InspectReport) {
         Cell::new("Status"),
         Cell::new("Required"),
         Cell::new("RVA"),
-        Cell::new("Locator"),
-        Cell::new("Disp"),
-        Cell::new("Insn"),
     ]);
 
     for signature in &report.signatures {
         let required = signature.hook_target.is_required_signature();
         let required_label = if required { "yes" } else { "no" };
-        let locator = match signature.locator_kind {
-            Some(LocatorKind::Aob) => "aob",
-            Some(LocatorKind::RipRelativeGlobalAob) => "rip",
-            None => "",
-        };
         table.add_row(vec![
             Cell::new(&signature.target),
             status_cell(signature.status, required),
             Cell::new(required_label),
             Cell::new(signature.rva.as_deref().unwrap_or("-")),
-            Cell::new(locator),
-            Cell::new(
-                signature
-                    .displacement_offset
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
-            ),
-            Cell::new(
-                signature
-                    .instruction_size
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
-            ),
         ]);
     }
 

@@ -79,20 +79,26 @@ mod tests {
     use super::{
         DwmcoreVersion, ProfileSelectError, RevisionProfile, SupportedBuild, select_profile,
     };
-    use crate::profile::{HookProfile, MonitorIdentityOffsets, SwapChainVtablePath};
+    use crate::profile::{
+        ContextToSwapChainPath, HookProfile, MonitorIdentityOffsets, SwapChainToResourcePath,
+    };
 
     fn marked_profile(build: u32, revision: u32) -> HookProfile {
         HookProfile {
             signatures: &[],
-            swap_chain: SwapChainVtablePath {
+            swap_chain_to_resource_path: SwapChainToResourcePath {
                 container_vtable_index: build as usize,
                 resource_vtable_index: revision as usize,
             },
             hardware_protected_offset: 0,
-            monitor_identity: MonitorIdentityOffsets {
+            monitor_identity_offsets: MonitorIdentityOffsets {
                 adapter_luid_low_offset: 0,
                 adapter_luid_high_offset: 0,
                 target_id_offset: 0,
+            },
+            context_to_swap_chain_path: ContextToSwapChainPath {
+                monitor_target_offset: 0,
+                swap_chain_vtable_index: 0,
             },
         }
     }
@@ -147,11 +153,11 @@ mod tests {
         assert_eq!(selected.min_version, expected_min);
         let profile = (selected.profile)();
         assert_eq!(
-            profile.swap_chain.container_vtable_index,
+            profile.swap_chain_to_resource_path.container_vtable_index,
             expected_min.build as usize
         );
         assert_eq!(
-            profile.swap_chain.resource_vtable_index,
+            profile.swap_chain_to_resource_path.resource_vtable_index,
             expected_min.revision as usize
         );
     }

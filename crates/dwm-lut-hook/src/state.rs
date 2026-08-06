@@ -2,7 +2,6 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 
 use dwm_lut_payload::{ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadLut};
 
-use crate::flip_gate::FlipGateEffects;
 use crate::minhook::{MinHookRuntime, RegisteredHook};
 use dwm_lut_profile::HookProfile;
 
@@ -73,7 +72,6 @@ pub(crate) fn find_assignment(
 pub struct HookRuntime {
     pub minhook: MinHookRuntime,
     pub hooks: Vec<RegisteredHook>,
-    pub flip_gate_effects: FlipGateEffects,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,6 +79,7 @@ pub struct HookState {
     pub profile_name: String,
     pub profile: HookProfile,
     pub assignments: Arc<Vec<LutAssignment>>,
+    pub flip_gate_enabled: bool,
     pub runtime: HookRuntime,
 }
 
@@ -143,7 +142,6 @@ pub(crate) fn try_lock_present_runtime() -> Option<MutexGuard<'static, ()>> {
 }
 
 pub(crate) fn clear_state_after_shutdown() {
-    set_flip_gate(false);
     if let Some(state) = STATE.get()
         && let Ok(mut guard) = state.lock()
     {
@@ -151,14 +149,12 @@ pub(crate) fn clear_state_after_shutdown() {
     }
     if let Some(state) = RETAINED_STATE.get()
         && let Ok(mut guard) = state.lock()
-        && let Some(mut state) = guard.take()
     {
-        state.runtime.flip_gate_effects.set_enabled(false);
+        let _ = guard.take();
     }
 }
 
 pub(crate) fn retain_state_after_shutdown() {
-    set_flip_gate(false);
     let active = STATE.get_or_init(|| Mutex::new(None));
     let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
     if let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock())
@@ -170,7 +166,7 @@ pub(crate) fn retain_state_after_shutdown() {
 
 pub(crate) fn reactivate_retained_state(
     profile_name: String,
-    assignments: Vec<LutAssignment>,
+    assignments: Arc<Vec<LutAssignment>>,
 ) -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
     let active = STATE.get_or_init(|| Mutex::new(None));
     let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
@@ -181,17 +177,11 @@ pub(crate) fn reactivate_retained_state(
         return None;
     }
     let mut state = retained.take()?;
-    update_lut_assignments(&mut state, profile_name, assignments);
+    state.profile_name = profile_name;
+    state.assignments = assignments;
     let plan = (state.runtime.minhook, state.runtime.hooks.clone());
     *active = Some(state);
     Some(plan)
-}
-
-pub(crate) fn set_flip_gate(enabled: bool) {
-    crate::flip_gate::set_enabled(enabled);
-    let _ = with_state_mut(|state| {
-        state.runtime.flip_gate_effects.set_enabled(enabled);
-    });
 }
 
 pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
@@ -199,31 +189,34 @@ pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHo
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplaceLutAssignmentsError {
+pub enum HookStateError {
     NotInitialized,
 }
 
-pub fn replace_lut_assignments(
+pub(crate) fn swap_lut_assignments(
     profile_name: String,
-    assignments: Vec<LutAssignment>,
-) -> Result<(), ReplaceLutAssignmentsError> {
+    assignments: Arc<Vec<LutAssignment>>,
+) -> Result<(String, Arc<Vec<LutAssignment>>), HookStateError> {
     with_state_mut(|state| {
-        update_lut_assignments(state, profile_name, assignments);
+        let previous_name = std::mem::replace(&mut state.profile_name, profile_name);
+        let previous_assignments = std::mem::replace(&mut state.assignments, assignments);
+        (previous_name, previous_assignments)
     })
-    .ok_or(ReplaceLutAssignmentsError::NotInitialized)?;
-    Ok(())
+    .ok_or(HookStateError::NotInitialized)
 }
 
-fn update_lut_assignments(
-    state: &mut HookState,
-    profile_name: String,
-    assignments: Vec<LutAssignment>,
-) {
-    state.profile_name = profile_name;
-    state.assignments = Arc::new(assignments);
+pub(crate) fn flip_gate_enabled() -> Option<bool> {
+    with_state(|state| state.flip_gate_enabled)
 }
 
-fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
+pub(crate) fn store_flip_gate_enabled(enabled: bool) -> Result<(), HookStateError> {
+    with_state_mut(|state| {
+        state.flip_gate_enabled = enabled;
+    })
+    .ok_or(HookStateError::NotInitialized)
+}
+
+pub(crate) fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
     let state = STATE.get()?;
     let guard = state.lock().ok()?;
     guard.as_ref().map(f)
@@ -241,7 +234,6 @@ pub(crate) fn reset_state_for_tests() {
     crate::lifecycle::reset_for_tests();
     crate::d3d11::reset_fake_render_result();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
-    crate::minhook::reset_test_original_slots();
 }
 
 #[cfg(test)]

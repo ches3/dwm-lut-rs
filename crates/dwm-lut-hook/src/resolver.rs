@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 
 use dwm_lut_profile::{
-    AobToken, DWMCORE_MODULE_NAME, HookProfile, HookTarget, Rva, SignatureLocator,
-    SignatureScanError, SignatureScanReport, SkippedSignature, scan_profile,
+    AobToken, DWMCORE_MODULE_NAME, HookProfile, HookTarget, Rva, SignatureScanError,
+    SignatureScanReport, SkippedSignature, scan_profile,
 };
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
@@ -120,10 +120,6 @@ pub struct ResolvedFunctionVa {
 
 impl ResolvedFunctionVa {
     pub(crate) fn new(target: HookTarget, va: Va) -> Self {
-        debug_assert!(
-            target.is_function_hook_target(),
-            "ResolvedFunctionVa requires a function hook target"
-        );
         Self { target, va }
     }
 
@@ -140,8 +136,6 @@ impl ResolvedFunctionVa {
 pub struct SignatureResolutionReport {
     pub module: LoadedModule,
     pub function_targets: Vec<ResolvedFunctionVa>,
-    pub overlay_test_mode: Option<Va>,
-    pub disable_independent_flip: Option<Va>,
     pub skipped: Vec<SkippedSignature>,
 }
 
@@ -153,7 +147,6 @@ impl SignatureResolutionReport {
             .signatures
             .iter()
             .enumerate()
-            .filter(|(_, signature)| signature.target.is_function_hook_target())
             .map(|(index, signature)| {
                 ResolvedFunctionVa::new(signature.target, Va(base_address + 0x1000 + index * 0x100))
             })
@@ -166,8 +159,6 @@ impl SignatureResolutionReport {
                 size: 0x20_0000,
             },
             function_targets,
-            overlay_test_mode: None,
-            disable_independent_flip: None,
             skipped: Vec::new(),
         }
     }
@@ -299,23 +290,15 @@ fn report_with_vas(
     let base = module.base_address;
     let module_name = module.module_name;
     let mut function_targets = Vec::new();
-    let mut overlay_test_mode = None;
-    let mut disable_independent_flip = None;
 
     for hit in scan.resolved {
         let va = va_from_rva(base, hit.rva, module_name)?;
-        match hit.target {
-            HookTarget::OverlayTestMode => overlay_test_mode = Some(va),
-            HookTarget::DisableIndependentFlip => disable_independent_flip = Some(va),
-            target => function_targets.push(ResolvedFunctionVa::new(target, va)),
-        }
+        function_targets.push(ResolvedFunctionVa::new(hit.target, va));
     }
 
     Ok(SignatureResolutionReport {
         module,
         function_targets,
-        overlay_test_mode,
-        disable_independent_flip,
         skipped: scan.skipped,
     })
 }
@@ -343,12 +326,7 @@ fn validate_live_prologues(
                 module_name: resolution.module.module_name,
                 detail: "resolved target had no matching profile signature",
             })?;
-        let SignatureLocator::Aob { tokens, .. } = signature.locator else {
-            return Err(HookResolveError::InvalidModuleImage {
-                module_name: resolution.module.module_name,
-                detail: "function hook target did not use an AOB locator",
-            });
-        };
+        let tokens = signature.aob;
         let rva = target
             .va()
             .0
@@ -516,22 +494,26 @@ mod tests {
         HookResolveError, LoadedModule, ResolvedFunctionVa, Va, resolve_profile_from_clean_image,
     };
     use dwm_lut_profile::{
-        AobToken, DWMCORE_MODULE_NAME, HookProfile, HookSignature, HookTarget,
-        MonitorIdentityOffsets, SignatureLocator, SignatureScanError, SwapChainVtablePath,
+        AobToken, ContextToSwapChainPath, DWMCORE_MODULE_NAME, HookProfile, HookSignature,
+        HookTarget, MonitorIdentityOffsets, SignatureScanError, SwapChainToResourcePath,
     };
 
     fn test_profile(signatures: &'static [HookSignature]) -> HookProfile {
         HookProfile {
             signatures,
-            swap_chain: SwapChainVtablePath {
+            swap_chain_to_resource_path: SwapChainToResourcePath {
                 container_vtable_index: 0,
                 resource_vtable_index: 0,
             },
             hardware_protected_offset: 0,
-            monitor_identity: MonitorIdentityOffsets {
+            monitor_identity_offsets: MonitorIdentityOffsets {
                 adapter_luid_low_offset: 0,
                 adapter_luid_high_offset: 0,
                 target_id_offset: 0,
+            },
+            context_to_swap_chain_path: ContextToSwapChainPath {
+                monitor_target_offset: 0,
+                swap_chain_vtable_index: 0,
             },
         }
     }
@@ -539,14 +521,12 @@ mod tests {
     fn prologue_test_profile() -> HookProfile {
         test_profile(&[HookSignature {
             target: HookTarget::Present,
-            locator: SignatureLocator::Aob {
-                tokens: &[
-                    AobToken::Exact(0x40),
-                    AobToken::Exact(0x55),
-                    AobToken::Wildcard,
-                    AobToken::Exact(0x57),
-                ],
-            },
+            aob: &[
+                AobToken::Exact(0x40),
+                AobToken::Exact(0x55),
+                AobToken::Wildcard,
+                AobToken::Exact(0x57),
+            ],
         }])
     }
 
@@ -613,8 +593,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_profile_from_clean_image_maps_global_targets_to_vas() {
-        let image = [0xAA, 0xBB, 0xCC];
+    fn resolve_profile_from_clean_image_maps_function_targets_to_vas() {
+        let image = [0xAA, 0xBB];
         let module = LoadedModule {
             module_name: DWMCORE_MODULE_NAME,
             base_address: 0x2000_0000,
@@ -623,21 +603,11 @@ mod tests {
         const SIGNATURES: &[HookSignature] = &[
             HookSignature {
                 target: HookTarget::Present,
-                locator: SignatureLocator::Aob {
-                    tokens: &[AobToken::Exact(0xAA)],
-                },
+                aob: &[AobToken::Exact(0xAA)],
             },
             HookSignature {
-                target: HookTarget::OverlayTestMode,
-                locator: SignatureLocator::Aob {
-                    tokens: &[AobToken::Exact(0xBB)],
-                },
-            },
-            HookSignature {
-                target: HookTarget::DisableIndependentFlip,
-                locator: SignatureLocator::Aob {
-                    tokens: &[AobToken::Exact(0xCC)],
-                },
+                target: HookTarget::IsCandidateOverlayCompatible,
+                aob: &[AobToken::Exact(0xBB)],
             },
         ];
         let profile = test_profile(SIGNATURES);
@@ -647,15 +617,13 @@ mod tests {
 
         assert_eq!(
             report.function_targets,
-            vec![ResolvedFunctionVa::new(
-                HookTarget::Present,
-                Va(module.base_address),
-            )]
-        );
-        assert_eq!(report.overlay_test_mode, Some(Va(module.base_address + 1)));
-        assert_eq!(
-            report.disable_independent_flip,
-            Some(Va(module.base_address + 2))
+            vec![
+                ResolvedFunctionVa::new(HookTarget::Present, Va(module.base_address)),
+                ResolvedFunctionVa::new(
+                    HookTarget::IsCandidateOverlayCompatible,
+                    Va(module.base_address + 1),
+                ),
+            ]
         );
         assert!(report.skipped.is_empty());
     }

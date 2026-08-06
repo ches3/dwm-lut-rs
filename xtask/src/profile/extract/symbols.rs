@@ -6,17 +6,7 @@ use crate::profile::pe::PeImage;
 pub const MIN_INSNS: usize = 4;
 pub const MAX_LEN: usize = 128;
 
-pub const EXTRACT_TARGETS: &[HookTarget] = &[
-    HookTarget::Present,
-    HookTarget::IsCandidateDirectFlipCompatible,
-    HookTarget::DirectFlipInfoEnsureIndependentFlipState,
-    HookTarget::IsDirectFlipSupportedOnTarget,
-    HookTarget::LegacySwapChainCheckDirectFlipSupport,
-    HookTarget::IsAdvancedDirectFlipCompatible,
-    HookTarget::OverlayTestMode,
-    HookTarget::DisableIndependentFlip,
-    HookTarget::OverlaysEnabled,
-];
+pub const EXTRACT_TARGETS: &[HookTarget] = HookTarget::ALL;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedSymbol {
@@ -28,7 +18,6 @@ pub enum SymbolResolveError {
     Missing,
     IcfStub,
     Ambiguous,
-    UnsupportedTarget,
 }
 
 pub fn resolve_function_symbol(
@@ -36,25 +25,7 @@ pub fn resolve_function_symbol(
     pubs: &PdbPublics,
     pe: &PeImage,
 ) -> Result<ResolvedSymbol, SymbolResolveError> {
-    if !target.is_function_hook_target() {
-        return Err(SymbolResolveError::UnsupportedTarget);
-    }
-
     pick_function(&pubs.find_by_prefix(target.pdb_symbol_prefix()), pe)
-}
-
-pub fn resolve_global_symbol(
-    target: HookTarget,
-    pubs: &PdbPublics,
-) -> Result<&PublicSymbol, SymbolResolveError> {
-    if target.is_function_hook_target() {
-        return Err(SymbolResolveError::UnsupportedTarget);
-    }
-
-    pubs.find_by_prefix(target.pdb_symbol_prefix())
-        .into_iter()
-        .next()
-        .ok_or(SymbolResolveError::Missing)
 }
 
 fn pick_function(
