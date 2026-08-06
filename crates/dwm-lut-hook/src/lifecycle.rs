@@ -1,11 +1,11 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
-use std::sync::{Mutex, MutexGuard};
 
 use dwm_lut_payload::{DwmLutStatusSnapshot, HookStatus, MAX_PROFILE_NAME_BYTES};
+use parking_lot::{Mutex, MutexGuard};
 
 use crate::DWM_LUT_STATUS;
-use crate::state::active_profile_name;
+use crate::state::lut_profile_name;
 
 static LIFECYCLE_TRANSITION_LOCK: Mutex<()> = Mutex::new(());
 static LIFECYCLE: AtomicU8 = AtomicU8::new(LIFECYCLE_IDLE);
@@ -47,9 +47,7 @@ impl ExportedStatusSnapshot {
     }
 
     fn publish(&self, snapshot: &DwmLutStatusSnapshot) {
-        let _writer = STATUS_PUBLISH_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _writer = STATUS_PUBLISH_LOCK.lock();
         self.sequence().fetch_add(1, Ordering::AcqRel);
         let source = std::ptr::addr_of!(snapshot.abi_version);
         let content_size = std::mem::size_of::<DwmLutStatusSnapshot>() - std::mem::size_of::<u32>();
@@ -68,9 +66,7 @@ impl ExportedStatusSnapshot {
 
     #[cfg(test)]
     pub(crate) fn load_for_test(&self) -> DwmLutStatusSnapshot {
-        let _reader = STATUS_PUBLISH_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _reader = STATUS_PUBLISH_LOCK.lock();
         // SAFETY: The writer lock prevents concurrent mutation, and the
         // snapshot was fully initialized before it became shared.
         unsafe { *self.snapshot.get() }
@@ -108,6 +104,7 @@ impl Drop for InitializationTransition {
 
 #[derive(Debug)]
 pub(crate) struct ReplaceAssignmentsTransition {
+    restore_lut_profile_name: Option<String>,
     completed: bool,
 }
 
@@ -117,8 +114,7 @@ impl ReplaceAssignmentsTransition {
     }
 
     fn restore_current_status(&mut self) {
-        let profile_name = active_profile_name();
-        match profile_name {
+        match self.restore_lut_profile_name.take() {
             Some(profile_name) => {
                 self.complete(LIFECYCLE_RUNNING, HookStatus::Active, Some(&profile_name));
             }
@@ -155,8 +151,7 @@ impl ShutdownTransition {
     }
 
     fn restore_current_status(&mut self) {
-        let profile_name = active_profile_name();
-        match profile_name {
+        match lut_profile_name() {
             Some(profile_name) => {
                 self.complete(LIFECYCLE_RUNNING, HookStatus::Active, Some(&profile_name));
             }
@@ -213,9 +208,7 @@ fn publish_status(status: HookStatus, profile_name: Option<&str>) {
 }
 
 fn lifecycle_transition_lock() -> MutexGuard<'static, ()> {
-    LIFECYCLE_TRANSITION_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    LIFECYCLE_TRANSITION_LOCK.lock()
 }
 
 fn set_lifecycle_and_status(lifecycle: u8, status: HookStatus, profile_name: Option<&str>) {
@@ -268,9 +261,10 @@ pub(crate) fn begin_replace_assignments() -> ReplaceAssignmentsStart {
         HookStatus::Transitioning,
         None,
     ) {
-        Ok(()) => {
-            ReplaceAssignmentsStart::Started(ReplaceAssignmentsTransition { completed: false })
-        }
+        Ok(()) => ReplaceAssignmentsStart::Started(ReplaceAssignmentsTransition {
+            restore_lut_profile_name: lut_profile_name(),
+            completed: false,
+        }),
         Err(LIFECYCLE_IDLE | LIFECYCLE_SHUT_DOWN) => ReplaceAssignmentsStart::NotInitialized,
         Err(LIFECYCLE_INITIALIZING | LIFECYCLE_REPLACING_ASSIGNMENTS | LIFECYCLE_SHUTTING_DOWN) => {
             ReplaceAssignmentsStart::AlreadyInProgress
@@ -419,6 +413,99 @@ mod tests {
             begin_initialization().expect("reinitialization transition should start");
         drop(reinitialization);
         assert!(matches!(begin_shutdown(), ShutdownStart::AlreadyShutDown));
+
+        reset_state_for_tests();
+    }
+
+    #[test]
+    fn replace_transition_drop_restores_snapshotted_profile() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        reset_state_for_tests();
+
+        begin_initialization()
+            .expect("initialization transition should start")
+            .commit_active("gaming");
+        crate::state::store_lut_config(crate::state::LutConfig {
+            profile_name: "gaming".to_string(),
+            assignments: std::sync::Arc::new(Vec::new()),
+        });
+
+        let replacement = match begin_replace_assignments() {
+            ReplaceAssignmentsStart::Started(transition) => transition,
+            other => panic!("unexpected replace start: {other:?}"),
+        };
+        crate::state::store_lut_config(crate::state::LutConfig {
+            profile_name: "updated".to_string(),
+            assignments: std::sync::Arc::new(Vec::new()),
+        });
+        drop(replacement);
+
+        let restored = DWM_LUT_STATUS.load_for_test();
+        assert_eq!(restored.hook_status, HookStatus::Active as u32);
+        assert_eq!(&restored.profile_name[..6], b"gaming");
+        assert!(is_runtime_active());
+
+        reset_state_for_tests();
+    }
+
+    #[test]
+    fn shutdown_drop_after_clear_lut_config_falls_idle() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        reset_state_for_tests();
+
+        begin_initialization()
+            .expect("initialization transition should start")
+            .commit_active("gaming");
+        crate::state::store_lut_config(crate::state::LutConfig {
+            profile_name: "gaming".to_string(),
+            assignments: std::sync::Arc::new(Vec::new()),
+        });
+
+        let shutdown = match begin_shutdown() {
+            ShutdownStart::Started(transition) => transition,
+            other => panic!("unexpected shutdown start: {other:?}"),
+        };
+        crate::state::clear_lut_config();
+        drop(shutdown);
+
+        let restored = DWM_LUT_STATUS.load_for_test();
+        assert_eq!(restored.hook_status, HookStatus::Inactive as u32);
+        assert_eq!(restored.profile_name_len, 0);
+        assert!(!is_runtime_active());
+        assert!(matches!(begin_shutdown(), ShutdownStart::NotInitialized));
+
+        reset_state_for_tests();
+    }
+
+    #[test]
+    fn shutdown_drop_with_live_lut_config_restores_active() {
+        let _guard = HOOK_GLOBAL_TEST_LOCK
+            .lock()
+            .expect("test mutex should lock");
+        reset_state_for_tests();
+
+        begin_initialization()
+            .expect("initialization transition should start")
+            .commit_active("gaming");
+        crate::state::store_lut_config(crate::state::LutConfig {
+            profile_name: "gaming".to_string(),
+            assignments: std::sync::Arc::new(Vec::new()),
+        });
+
+        let shutdown = match begin_shutdown() {
+            ShutdownStart::Started(transition) => transition,
+            other => panic!("unexpected shutdown start: {other:?}"),
+        };
+        drop(shutdown);
+
+        let restored = DWM_LUT_STATUS.load_for_test();
+        assert_eq!(restored.hook_status, HookStatus::Active as u32);
+        assert_eq!(&restored.profile_name[..6], b"gaming");
+        assert!(is_runtime_active());
 
         reset_state_for_tests();
     }

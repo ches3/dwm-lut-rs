@@ -13,7 +13,7 @@ pub(crate) enum ShutdownFinished {
     AssignmentReplacementInProgress,
     ShutdownInProgress,
     AlreadyShutDown,
-    StateMissing,
+    HookRuntimeMissing,
     Success,
     MinHookCleanupFailed,
 }
@@ -27,7 +27,7 @@ impl ShutdownFinished {
             Self::AssignmentReplacementInProgress => "assignment_replacement_in_progress",
             Self::ShutdownInProgress => "shutdown_in_progress",
             Self::AlreadyShutDown => "already_shutdown",
-            Self::StateMissing => "state_missing",
+            Self::HookRuntimeMissing => "hook_runtime_missing",
             Self::Success => "success",
             Self::MinHookCleanupFailed => "minhook_cleanup_failed",
         }
@@ -41,7 +41,7 @@ impl ShutdownFinished {
             | Self::AssignmentReplacementInProgress
             | Self::ShutdownInProgress => ShutdownStatus::AlreadyInProgress,
             Self::AlreadyShutDown => ShutdownStatus::AlreadyShutDown,
-            Self::StateMissing | Self::Success => ShutdownStatus::Success,
+            Self::HookRuntimeMissing | Self::Success => ShutdownStatus::Success,
             Self::MinHookCleanupFailed => ShutdownStatus::MinHookCleanupFailed,
         }
     }

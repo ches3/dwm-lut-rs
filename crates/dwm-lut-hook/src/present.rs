@@ -20,7 +20,6 @@ struct PresentInputs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PresentInputError {
-    MissingProfile,
     NullOverlaySwapChain,
     InvalidDirtyRectVector,
     UnreadableMemory,
@@ -45,6 +44,9 @@ pub(crate) fn present(
     if !lifecycle::is_runtime_active() {
         return call_original(rect_vec);
     }
+    let Some(profile) = state::hook_profile() else {
+        return call_original(rect_vec);
+    };
 
     let mut present_rect_storage = [DirtyRect {
         left: 0,
@@ -54,33 +56,21 @@ pub(crate) fn present(
     }];
     let mut present_rect_vec_storage = empty_rect_vec_storage();
 
-    let prepared_rect_vec = match state::hook_profile() {
-        None => {
-            log::present_input_collect_error(
-                this,
-                overlay_swap_chain,
-                rect_vec,
-                PresentInputError::MissingProfile,
-            );
-            rect_vec
-        }
-        Some(profile) => {
-            match unsafe { collect_present_inputs(&profile, overlay_swap_chain, rect_vec) } {
-                Ok(inputs) => match apply_lut(overlay_swap_chain, &profile, &inputs) {
-                    Some(rect) => full_present_rect_vec(
-                        rect,
-                        &mut present_rect_storage,
-                        &mut present_rect_vec_storage,
-                    ),
-                    None => rect_vec,
-                },
-                Err(error) => {
-                    log::present_input_collect_error(this, overlay_swap_chain, rect_vec, error);
-                    rect_vec
-                }
+    let prepared_rect_vec =
+        match unsafe { collect_present_inputs(&profile, overlay_swap_chain, rect_vec) } {
+            Ok(inputs) => match apply_lut(overlay_swap_chain, &profile, &inputs) {
+                Some(rect) => full_present_rect_vec(
+                    rect,
+                    &mut present_rect_storage,
+                    &mut present_rect_vec_storage,
+                ),
+                None => rect_vec,
+            },
+            Err(error) => {
+                log::present_input_collect_error(this, overlay_swap_chain, rect_vec, error);
+                rect_vec
             }
-        }
-    };
+        };
     call_original(prepared_rect_vec)
 }
 

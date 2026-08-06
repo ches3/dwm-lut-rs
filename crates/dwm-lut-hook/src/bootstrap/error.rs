@@ -8,7 +8,6 @@ use dwm_lut_profile::{HookTarget, ProfileSelectError, SignatureScanError};
 use crate::dwmcore::DwmcoreVersionError;
 use crate::minhook::MinHookError;
 use crate::resolver::HookResolveError;
-use crate::state::HookStateError;
 
 #[derive(Debug)]
 pub enum HookError {
@@ -70,7 +69,6 @@ pub enum ReplaceAssignmentsError {
     NotInitialized,
     AlreadyInProgress,
     Payload(PayloadError),
-    State(HookStateError),
     MinHook(MinHookError),
     MinHookCleanupFailed,
 }
@@ -84,9 +82,6 @@ impl fmt::Display for ReplaceAssignmentsError {
                 "hook initialization, assignment replacement, or shutdown is in progress"
             ),
             Self::Payload(error) => write!(f, "{error}"),
-            Self::State(HookStateError::NotInitialized) => {
-                write!(f, "hook is not initialized")
-            }
             Self::MinHook(error) => write!(f, "{error}"),
             Self::MinHookCleanupFailed => write!(
                 f,
@@ -101,12 +96,6 @@ impl std::error::Error for ReplaceAssignmentsError {}
 impl From<PayloadError> for ReplaceAssignmentsError {
     fn from(value: PayloadError) -> Self {
         Self::Payload(value)
-    }
-}
-
-impl From<HookStateError> for ReplaceAssignmentsError {
-    fn from(value: HookStateError) -> Self {
-        Self::State(value)
     }
 }
 
@@ -177,10 +166,7 @@ impl From<HookError> for InitializeStatus {
 impl From<&ReplaceAssignmentsError> for ReplaceAssignmentsStatus {
     fn from(error: &ReplaceAssignmentsError) -> Self {
         match error {
-            ReplaceAssignmentsError::NotInitialized
-            | ReplaceAssignmentsError::State(HookStateError::NotInitialized) => {
-                Self::NotInitialized
-            }
+            ReplaceAssignmentsError::NotInitialized => Self::NotInitialized,
             ReplaceAssignmentsError::AlreadyInProgress => Self::AlreadyInProgress,
             ReplaceAssignmentsError::Payload(error) => Self::from(error),
             ReplaceAssignmentsError::MinHook(_) => Self::MinHookFailed,

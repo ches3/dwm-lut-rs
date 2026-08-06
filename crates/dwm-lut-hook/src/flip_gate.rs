@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use dwm_lut_profile::HookTarget;
 
 use crate::dwmcore;
@@ -30,20 +28,25 @@ pub(crate) fn should_block(target: HookTarget, overlay_context: usize) -> bool {
     if !lifecycle::is_runtime_active() {
         return false;
     }
-    let blocked = match state::with_state(|state| (state.profile, Arc::clone(&state.assignments))) {
-        Some((profile, assignments)) if !assignments.is_empty() => {
-            dwmcore::resolve_overlay_swap_chain(overlay_context, profile.context_to_swap_chain_path)
-                .and_then(|swap_chain| {
-                    dwmcore::read_monitor_identity(swap_chain, profile.monitor_identity_offsets)
-                })
-                .is_some_and(|identity| {
-                    assignments
-                        .iter()
-                        .any(|assignment| assignment.target.identity == identity)
-                })
-        }
-        _ => false,
+    let Some(profile) = state::hook_profile() else {
+        return false;
     };
+    let Some(assignments) = state::assignments() else {
+        return false;
+    };
+    if assignments.is_empty() {
+        return false;
+    }
+    let blocked =
+        dwmcore::resolve_overlay_swap_chain(overlay_context, profile.context_to_swap_chain_path)
+            .and_then(|swap_chain| {
+                dwmcore::read_monitor_identity(swap_chain, profile.monitor_identity_offsets)
+            })
+            .is_some_and(|identity| {
+                assignments
+                    .iter()
+                    .any(|assignment| assignment.target.identity == identity)
+            });
     if blocked {
         record_flip_gate_denied(target);
     }

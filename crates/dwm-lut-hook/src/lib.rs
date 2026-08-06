@@ -26,7 +26,7 @@ pub use resolver::{
     resolve_profile,
 };
 pub use state::{
-    HookRuntime, HookState, LutAssignment, LutMetadata, ShaderTexture3D, assignments_from_payload,
+    HookRuntime, LutAssignment, LutConfig, LutMetadata, ShaderTexture3D, assignments_from_payload,
     cube_to_texture, hook_profile,
 };
 

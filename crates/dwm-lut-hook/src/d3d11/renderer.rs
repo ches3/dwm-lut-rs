@@ -4,7 +4,9 @@ use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::mem::{size_of, transmute_copy};
 use std::ptr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+
+use parking_lot::Mutex;
 
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
@@ -639,9 +641,7 @@ pub(crate) unsafe fn render_present_lut(
     assignments: &[LutAssignment],
 ) -> Result<PresentLutOutcome, RenderAcquireError> {
     let renderer = RENDERER.get_or_init(|| Mutex::new(D3D11Renderer::new()));
-    let Ok(mut renderer) = renderer.lock() else {
-        return Err(RenderAcquireError::Unavailable);
-    };
+    let mut renderer = renderer.lock();
     unsafe {
         renderer.render_present_lut(
             PresentRenderContext {
@@ -659,10 +659,7 @@ pub(crate) fn shutdown_renderer_resources() -> usize {
     let Some(renderer) = RENDERER.get() else {
         return 0;
     };
-    let Ok(mut renderer) = renderer.lock() else {
-        return 0;
-    };
-    renderer.clear_resources()
+    renderer.lock().clear_resources()
 }
 
 struct PipelineBindings {

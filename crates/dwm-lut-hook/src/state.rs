@@ -1,6 +1,9 @@
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
+use arc_swap::ArcSwapOption;
 use dwm_lut_payload::{ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadLut};
+use parking_lot::{Mutex, MutexGuard};
 
 use crate::minhook::{MinHookRuntime, RegisteredHook};
 use dwm_lut_profile::HookProfile;
@@ -25,6 +28,12 @@ pub struct LutAssignment {
     pub target: MonitorTarget,
     pub metadata: LutMetadata,
     pub texture: ShaderTexture3D,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LutConfig {
+    pub profile_name: String,
+    pub assignments: Arc<Vec<LutAssignment>>,
 }
 
 pub fn assignments_from_payload(payload: &HookPayload) -> Vec<LutAssignment> {
@@ -74,163 +83,104 @@ pub struct HookRuntime {
     pub hooks: Vec<RegisteredHook>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct HookState {
-    pub profile_name: String,
-    pub profile: HookProfile,
-    pub assignments: Arc<Vec<LutAssignment>>,
-    pub flip_gate_enabled: bool,
-    pub runtime: HookRuntime,
-}
-
-static STATE: OnceLock<Mutex<Option<HookState>>> = OnceLock::new();
-
-static RETAINED_STATE: OnceLock<Mutex<Option<HookState>>> = OnceLock::new();
-
-static PRESENT_RUNTIME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static HOOK_RUNTIME: Mutex<Option<HookRuntime>> = Mutex::new(None);
+static FLIP_GATE_ENABLED: AtomicBool = AtomicBool::new(false);
+static LUT_CONFIG: ArcSwapOption<LutConfig> = ArcSwapOption::const_empty();
+static PROFILE: OnceLock<HookProfile> = OnceLock::new();
+static PRESENT_RUNTIME_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
-pub(crate) static HOOK_GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static HOOK_GLOBAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub(crate) fn install_state(state: HookState) -> Result<(), Box<HookState>> {
-    let slot = STATE.get_or_init(|| Mutex::new(None));
-    let Ok(mut slot) = slot.lock() else {
-        return Err(Box::new(state));
-    };
-    if slot.is_some() {
-        return Err(Box::new(state));
+fn lock_hook_runtime() -> MutexGuard<'static, Option<HookRuntime>> {
+    HOOK_RUNTIME.lock()
+}
+
+pub(crate) fn has_hook_runtime() -> bool {
+    lock_hook_runtime().is_some()
+}
+
+pub(crate) fn store_hook_runtime(runtime: HookRuntime) -> Result<(), HookRuntime> {
+    let mut stored = lock_hook_runtime();
+    if stored.is_some() {
+        return Err(runtime);
     }
-    *slot = Some(state);
+    *stored = Some(runtime);
     Ok(())
 }
 
-pub(crate) fn has_retained_state() -> bool {
-    RETAINED_STATE
-        .get()
-        .and_then(|state| state.lock().ok().map(|guard| guard.is_some()))
-        .unwrap_or(false)
+pub(crate) fn clear_hook_runtime() {
+    let _ = lock_hook_runtime().take();
 }
 
-pub fn hook_profile() -> Option<HookProfile> {
-    with_state(|state| state.profile)
+pub(crate) fn clone_hook_runtime() -> Option<HookRuntime> {
+    lock_hook_runtime().clone()
 }
 
-pub(crate) fn active_profile_name() -> Option<String> {
-    with_state(|state| state.profile_name.clone())
+pub(crate) fn store_lut_config(config: LutConfig) {
+    LUT_CONFIG.store(Some(Arc::new(config)));
+}
+
+pub(crate) fn lut_config() -> Option<Arc<LutConfig>> {
+    LUT_CONFIG.load_full()
 }
 
 pub(crate) fn assignments() -> Option<Arc<Vec<LutAssignment>>> {
-    with_state(|state| state.assignments.clone())
+    lut_config().map(|config| Arc::clone(&config.assignments))
 }
 
-fn present_runtime_lock() -> &'static Mutex<()> {
-    PRESENT_RUNTIME_LOCK.get_or_init(|| Mutex::new(()))
+pub(crate) fn lut_profile_name() -> Option<String> {
+    lut_config().map(|config| config.profile_name.clone())
+}
+
+pub(crate) fn clear_lut_config() {
+    LUT_CONFIG.store(None::<Arc<LutConfig>>);
+}
+
+pub(crate) fn flip_gate_enabled() -> bool {
+    FLIP_GATE_ENABLED.load(Ordering::Acquire)
+}
+
+pub(crate) fn store_flip_gate_enabled(enabled: bool) {
+    FLIP_GATE_ENABLED.store(enabled, Ordering::Release);
+}
+
+pub(crate) fn store_hook_profile(profile: HookProfile) -> Result<(), HookProfile> {
+    PROFILE.set(profile)
+}
+
+pub fn hook_profile() -> Option<HookProfile> {
+    PROFILE.get().copied()
 }
 
 pub(crate) fn lock_present_runtime() -> MutexGuard<'static, ()> {
-    present_runtime_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    PRESENT_RUNTIME_LOCK.lock()
 }
 
 pub(crate) fn try_lock_present_runtime() -> Option<MutexGuard<'static, ()>> {
-    match present_runtime_lock().try_lock() {
-        Ok(guard) => Some(guard),
-        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-        Err(TryLockError::WouldBlock) => None,
-    }
-}
-
-pub(crate) fn clear_state_after_shutdown() {
-    if let Some(state) = STATE.get()
-        && let Ok(mut guard) = state.lock()
-    {
-        let _ = guard.take();
-    }
-    if let Some(state) = RETAINED_STATE.get()
-        && let Ok(mut guard) = state.lock()
-    {
-        let _ = guard.take();
-    }
-}
-
-pub(crate) fn retain_state_after_shutdown() {
-    let active = STATE.get_or_init(|| Mutex::new(None));
-    let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
-    if let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock())
-        && let Some(state) = active.take()
-    {
-        *retained = Some(state);
-    }
-}
-
-pub(crate) fn reactivate_retained_state(
-    profile_name: String,
-    assignments: Arc<Vec<LutAssignment>>,
-) -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
-    let active = STATE.get_or_init(|| Mutex::new(None));
-    let retained = RETAINED_STATE.get_or_init(|| Mutex::new(None));
-    let (Ok(mut active), Ok(mut retained)) = (active.lock(), retained.lock()) else {
-        return None;
-    };
-    if active.is_some() {
-        return None;
-    }
-    let mut state = retained.take()?;
-    state.profile_name = profile_name;
-    state.assignments = assignments;
-    let plan = (state.runtime.minhook, state.runtime.hooks.clone());
-    *active = Some(state);
-    Some(plan)
-}
-
-pub(crate) fn minhook_cleanup_plan() -> Option<(MinHookRuntime, Vec<RegisteredHook>)> {
-    with_state(|state| (state.runtime.minhook, state.runtime.hooks.clone()))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HookStateError {
-    NotInitialized,
-}
-
-pub(crate) fn swap_lut_assignments(
-    profile_name: String,
-    assignments: Arc<Vec<LutAssignment>>,
-) -> Result<(String, Arc<Vec<LutAssignment>>), HookStateError> {
-    with_state_mut(|state| {
-        let previous_name = std::mem::replace(&mut state.profile_name, profile_name);
-        let previous_assignments = std::mem::replace(&mut state.assignments, assignments);
-        (previous_name, previous_assignments)
-    })
-    .ok_or(HookStateError::NotInitialized)
-}
-
-pub(crate) fn flip_gate_enabled() -> Option<bool> {
-    with_state(|state| state.flip_gate_enabled)
-}
-
-pub(crate) fn store_flip_gate_enabled(enabled: bool) -> Result<(), HookStateError> {
-    with_state_mut(|state| {
-        state.flip_gate_enabled = enabled;
-    })
-    .ok_or(HookStateError::NotInitialized)
-}
-
-pub(crate) fn with_state<R>(f: impl FnOnce(&HookState) -> R) -> Option<R> {
-    let state = STATE.get()?;
-    let guard = state.lock().ok()?;
-    guard.as_ref().map(f)
-}
-
-fn with_state_mut<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
-    let state = STATE.get()?;
-    let mut guard = state.lock().ok()?;
-    guard.as_mut().map(f)
+    PRESENT_RUNTIME_LOCK.try_lock()
 }
 
 #[cfg(test)]
 pub(crate) fn reset_state_for_tests() {
-    clear_state_after_shutdown();
+    let test_profile = (dwm_lut_profile::SUPPORTED_BUILDS
+        .first()
+        .expect("SUPPORTED_BUILDS is non-empty")
+        .profiles
+        .last()
+        .expect("supported build must include profiles")
+        .profile)();
+    if PROFILE.set(test_profile).is_err() {
+        assert_eq!(
+            PROFILE.get().copied(),
+            Some(test_profile),
+            "all tests must use the same process-wide hook profile",
+        );
+    }
+
+    clear_lut_config();
+    store_flip_gate_enabled(false);
+    clear_hook_runtime();
     crate::lifecycle::reset_for_tests();
     crate::d3d11::reset_fake_render_result();
     crate::minhook::reset_test_minhook_behavior(None, None, None, None);
