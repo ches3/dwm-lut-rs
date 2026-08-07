@@ -1,11 +1,10 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwapOption;
 use dwm_lut_payload::{ColorMode, HookPayload, MonitorIdentity, MonitorTarget, PayloadLut};
 use parking_lot::{Mutex, MutexGuard};
 
-use crate::minhook::{MinHookRuntime, RegisteredHook};
+use crate::minhook::{MinHookRuntime, RegisteredHooks};
 use dwm_lut_profile::HookProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,12 +27,6 @@ pub struct LutAssignment {
     pub target: MonitorTarget,
     pub metadata: LutMetadata,
     pub texture: ShaderTexture3D,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct LutConfig {
-    pub profile_name: String,
-    pub assignments: Arc<Vec<LutAssignment>>,
 }
 
 pub fn assignments_from_payload(payload: &HookPayload) -> Vec<LutAssignment> {
@@ -77,15 +70,14 @@ pub(crate) fn find_assignment(
     })
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct HookRuntime {
     pub minhook: MinHookRuntime,
-    pub hooks: Vec<RegisteredHook>,
+    pub hooks: RegisteredHooks,
 }
 
 static HOOK_RUNTIME: Mutex<Option<HookRuntime>> = Mutex::new(None);
-static FLIP_GATE_ENABLED: AtomicBool = AtomicBool::new(false);
-static LUT_CONFIG: ArcSwapOption<LutConfig> = ArcSwapOption::const_empty();
+static ASSIGNMENTS: ArcSwapOption<Vec<LutAssignment>> = ArcSwapOption::const_empty();
 static PROFILE: OnceLock<HookProfile> = OnceLock::new();
 static PRESENT_RUNTIME_LOCK: Mutex<()> = Mutex::new(());
 
@@ -117,32 +109,16 @@ pub(crate) fn clone_hook_runtime() -> Option<HookRuntime> {
     lock_hook_runtime().clone()
 }
 
-pub(crate) fn store_lut_config(config: LutConfig) {
-    LUT_CONFIG.store(Some(Arc::new(config)));
-}
-
-pub(crate) fn lut_config() -> Option<Arc<LutConfig>> {
-    LUT_CONFIG.load_full()
+pub(crate) fn store_assignments(assignments: Arc<Vec<LutAssignment>>) {
+    ASSIGNMENTS.store(Some(assignments));
 }
 
 pub(crate) fn assignments() -> Option<Arc<Vec<LutAssignment>>> {
-    lut_config().map(|config| Arc::clone(&config.assignments))
+    ASSIGNMENTS.load_full()
 }
 
-pub(crate) fn lut_profile_name() -> Option<String> {
-    lut_config().map(|config| config.profile_name.clone())
-}
-
-pub(crate) fn clear_lut_config() {
-    LUT_CONFIG.store(None::<Arc<LutConfig>>);
-}
-
-pub(crate) fn flip_gate_enabled() -> bool {
-    FLIP_GATE_ENABLED.load(Ordering::Acquire)
-}
-
-pub(crate) fn store_flip_gate_enabled(enabled: bool) {
-    FLIP_GATE_ENABLED.store(enabled, Ordering::Release);
+pub(crate) fn clear_assignments() {
+    ASSIGNMENTS.store(None::<Arc<Vec<LutAssignment>>>);
 }
 
 pub(crate) fn store_hook_profile(profile: HookProfile) -> Result<(), HookProfile> {
@@ -178,12 +154,11 @@ pub(crate) fn reset_state_for_tests() {
         );
     }
 
-    clear_lut_config();
-    store_flip_gate_enabled(false);
+    clear_assignments();
     clear_hook_runtime();
     crate::lifecycle::reset_for_tests();
     crate::d3d11::reset_fake_render_result();
-    crate::minhook::reset_test_minhook_behavior(None, None, None, None);
+    crate::minhook::reset_test_minhook_behavior(None);
 }
 
 #[cfg(test)]

@@ -209,12 +209,10 @@ pub enum ReplaceAssignmentsStatus {
     Success = 0,
     NullPayload = 1,
     InvalidPayload = 2,
-    NotInitialized = 3,
+    RuntimeInactive = 3,
     AlreadyInProgress = 4,
     PayloadDecodeFailed = 5,
     PayloadHasNoAssignments = 6,
-    MinHookFailed = 7,
-    MinHookCleanupFailed = 8,
 }
 
 impl ReplaceAssignmentsStatus {
@@ -223,18 +221,12 @@ impl ReplaceAssignmentsStatus {
             0 => Self::Success,
             1 => Self::NullPayload,
             2 => Self::InvalidPayload,
-            3 => Self::NotInitialized,
+            3 => Self::RuntimeInactive,
             4 => Self::AlreadyInProgress,
             5 => Self::PayloadDecodeFailed,
             6 => Self::PayloadHasNoAssignments,
-            7 => Self::MinHookFailed,
-            8 => Self::MinHookCleanupFailed,
             _ => return None,
         })
-    }
-
-    pub const fn should_fallback(self) -> bool {
-        matches!(self, Self::NotInitialized)
     }
 }
 
@@ -244,7 +236,9 @@ impl fmt::Display for ReplaceAssignmentsStatus {
             Self::Success => write!(f, "success"),
             Self::NullPayload => write!(f, "payload buffer pointer was null"),
             Self::InvalidPayload => write!(f, "payload buffer was invalid"),
-            Self::NotInitialized => write!(f, "hook DLL is loaded but not initialized"),
+            Self::RuntimeInactive => {
+                write!(f, "hook DLL is loaded but its runtime is inactive")
+            }
             Self::AlreadyInProgress => write!(
                 f,
                 "hook initialization, assignment replacement, or shutdown is in progress"
@@ -252,13 +246,6 @@ impl fmt::Display for ReplaceAssignmentsStatus {
             Self::PayloadDecodeFailed => write!(f, "payload could not be decoded"),
             Self::PayloadHasNoAssignments => {
                 write!(f, "payload does not contain any LUT assignments")
-            }
-            Self::MinHookFailed => write!(f, "MinHook enable or disable failed"),
-            Self::MinHookCleanupFailed => {
-                write!(
-                    f,
-                    "MinHook enable or disable failed and flip-gate cleanup could not restore prior state"
-                )
             }
         }
     }
@@ -303,7 +290,7 @@ pub enum ShutdownStatus {
     NotInitialized = 1,
     AlreadyInProgress = 2,
     AlreadyShutDown = 3,
-    MinHookCleanupFailed = 4,
+    MinHookDisableAllFailed = 4,
 }
 
 impl ShutdownStatus {
@@ -313,7 +300,7 @@ impl ShutdownStatus {
             1 => Self::NotInitialized,
             2 => Self::AlreadyInProgress,
             3 => Self::AlreadyShutDown,
-            4 => Self::MinHookCleanupFailed,
+            4 => Self::MinHookDisableAllFailed,
             _ => return None,
         })
     }
@@ -329,7 +316,7 @@ impl fmt::Display for ShutdownStatus {
                 "hook initialization, assignment replacement, or shutdown is in progress"
             ),
             Self::AlreadyShutDown => write!(f, "hook DLL is already shut down"),
-            Self::MinHookCleanupFailed => write!(f, "MinHook cleanup failed"),
+            Self::MinHookDisableAllFailed => write!(f, "MinHook disable-all failed"),
         }
     }
 }
@@ -347,19 +334,17 @@ mod tests {
             ReplaceAssignmentsStatus::Success,
             ReplaceAssignmentsStatus::NullPayload,
             ReplaceAssignmentsStatus::InvalidPayload,
-            ReplaceAssignmentsStatus::NotInitialized,
+            ReplaceAssignmentsStatus::RuntimeInactive,
             ReplaceAssignmentsStatus::AlreadyInProgress,
             ReplaceAssignmentsStatus::PayloadDecodeFailed,
             ReplaceAssignmentsStatus::PayloadHasNoAssignments,
-            ReplaceAssignmentsStatus::MinHookFailed,
-            ReplaceAssignmentsStatus::MinHookCleanupFailed,
         ] {
             assert_eq!(
                 ReplaceAssignmentsStatus::from_code(status as u32),
                 Some(status)
             );
         }
-        assert_eq!(ReplaceAssignmentsStatus::from_code(9), None);
+        assert_eq!(ReplaceAssignmentsStatus::from_code(7), None);
     }
 
     #[test]

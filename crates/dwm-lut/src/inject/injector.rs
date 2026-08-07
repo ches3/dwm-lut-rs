@@ -41,7 +41,7 @@ pub(crate) enum ApplyOutcome {
 
 enum ReplaceAssignmentsOutcome {
     Replaced,
-    Fallback,
+    ReinitializeRequired,
     Failed(ReplaceAssignmentsStatus),
 }
 
@@ -99,7 +99,7 @@ fn try_remote_replace_assignments(
     ) {
         Ok(address) => address,
         Err(InjectError::ExportNotFound { .. }) => {
-            return Ok(ReplaceAssignmentsOutcome::Fallback);
+            return Ok(ReplaceAssignmentsOutcome::ReinitializeRequired);
         }
         Err(error) => return Err(error),
     };
@@ -115,7 +115,9 @@ fn try_remote_replace_assignments(
 
     match ReplaceAssignmentsStatus::from_code(replace_assignments_status) {
         Some(ReplaceAssignmentsStatus::Success) => Ok(ReplaceAssignmentsOutcome::Replaced),
-        Some(status) if status.should_fallback() => Ok(ReplaceAssignmentsOutcome::Fallback),
+        Some(ReplaceAssignmentsStatus::RuntimeInactive) => {
+            Ok(ReplaceAssignmentsOutcome::ReinitializeRequired)
+        }
         Some(status) => Ok(ReplaceAssignmentsOutcome::Failed(status)),
         None => Err(InjectError::UnknownReplaceAssignmentsStatus(
             replace_assignments_status,
@@ -166,13 +168,13 @@ pub(crate) fn apply_config(
     if let Some(module) = find_matching_staged_dll(staged_dll_path, &loaded_hooks) {
         match try_remote_replace_assignments(&process, module, payload_bytes)? {
             ReplaceAssignmentsOutcome::Replaced => return Ok(ApplyOutcome::Replaced),
-            ReplaceAssignmentsOutcome::Fallback => {
+            ReplaceAssignmentsOutcome::ReinitializeRequired => {
                 shutdown_for_reinject(pid)?;
                 inject_and_initialize(
                     pid,
                     staged_dll_path,
                     payload_bytes,
-                    InitializeContext::AfterReplaceFallback,
+                    InitializeContext::AfterReplaceRecovery,
                 )?;
                 return Ok(ApplyOutcome::Reinitialized);
             }
@@ -375,7 +377,7 @@ fn evaluate_shutdown_status(status: ShutdownStatus) -> ShutdownDecision {
         ShutdownStatus::NotInitialized | ShutdownStatus::AlreadyShutDown => {
             ShutdownDecision::Inactive
         }
-        ShutdownStatus::AlreadyInProgress | ShutdownStatus::MinHookCleanupFailed => {
+        ShutdownStatus::AlreadyInProgress | ShutdownStatus::MinHookDisableAllFailed => {
             ShutdownDecision::Fail
         }
     }
@@ -444,7 +446,7 @@ fn deferred_shutdown_status_rank(status: ShutdownStatus) -> u8 {
         ShutdownStatus::NotInitialized => 1,
         ShutdownStatus::Success
         | ShutdownStatus::AlreadyInProgress
-        | ShutdownStatus::MinHookCleanupFailed => 0,
+        | ShutdownStatus::MinHookDisableAllFailed => 0,
     }
 }
 
@@ -577,7 +579,7 @@ mod tests {
             ShutdownDecision::Fail
         );
         assert_eq!(
-            evaluate_shutdown_status(ShutdownStatus::MinHookCleanupFailed),
+            evaluate_shutdown_status(ShutdownStatus::MinHookDisableAllFailed),
             ShutdownDecision::Fail
         );
     }
@@ -618,7 +620,7 @@ mod tests {
         );
         aggregation.record_status(
             PathBuf::from("second.dll"),
-            ShutdownStatus::MinHookCleanupFailed,
+            ShutdownStatus::MinHookDisableAllFailed,
         );
 
         let error = aggregation
@@ -632,7 +634,7 @@ mod tests {
                 assert_eq!(failures[1].0, PathBuf::from("second.dll"));
                 assert!(matches!(
                     failures[1].1,
-                    InjectError::HookShutdownFailed(ShutdownStatus::MinHookCleanupFailed)
+                    InjectError::HookShutdownFailed(ShutdownStatus::MinHookDisableAllFailed)
                 ));
             }
             error => panic!("unexpected error: {error}"),

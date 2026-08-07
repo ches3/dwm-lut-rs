@@ -427,13 +427,13 @@ mod tests {
     }
 
     #[test]
-    fn disable_outcome_validation_rejects_cleanup_failure() {
+    fn disable_outcome_validation_rejects_disable_all_failure() {
         assert!(matches!(
             validate_disable_outcome(DisableOutcome::ShutDown(
-                ShutdownStatus::MinHookCleanupFailed
+                ShutdownStatus::MinHookDisableAllFailed
             )),
             Err(HostCommandError::Inject(InjectError::HookShutdownFailed(
-                ShutdownStatus::MinHookCleanupFailed
+                ShutdownStatus::MinHookDisableAllFailed
             )))
         ));
     }

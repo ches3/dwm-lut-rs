@@ -66,27 +66,36 @@ impl From<DwmcoreVersionError> for HookError {
 
 #[derive(Debug)]
 pub enum ReplaceAssignmentsError {
-    NotInitialized,
+    RuntimeInactive,
     AlreadyInProgress,
     Payload(PayloadError),
-    MinHook(MinHookError),
-    MinHookCleanupFailed,
+    Inactive(MinHookError),
 }
 
 impl fmt::Display for ReplaceAssignmentsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotInitialized => write!(f, "hook is not initialized"),
+            Self::RuntimeInactive => {
+                write!(f, "hook DLL is loaded but its runtime is inactive")
+            }
             Self::AlreadyInProgress => write!(
                 f,
                 "hook initialization, assignment replacement, or shutdown is in progress"
             ),
             Self::Payload(error) => write!(f, "{error}"),
-            Self::MinHook(error) => write!(f, "{error}"),
-            Self::MinHookCleanupFailed => write!(
-                f,
-                "flip-gate hooks could not be restored and were force-disabled"
-            ),
+            Self::Inactive(error) => {
+                if error.fail_safe_succeeded {
+                    write!(
+                        f,
+                        "{error}; fail-safe disable-all succeeded and the hook runtime was shut down"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{error}; fail-safe disable-all failed; the hook runtime was marked inactive"
+                    )
+                }
+            }
         }
     }
 }
@@ -96,12 +105,6 @@ impl std::error::Error for ReplaceAssignmentsError {}
 impl From<PayloadError> for ReplaceAssignmentsError {
     fn from(value: PayloadError) -> Self {
         Self::Payload(value)
-    }
-}
-
-impl From<MinHookError> for ReplaceAssignmentsError {
-    fn from(value: MinHookError) -> Self {
-        Self::MinHook(value)
     }
 }
 
@@ -157,7 +160,8 @@ impl From<HookError> for InitializeStatus {
                 crate::minhook::MinHookOperation::Initialize => Self::MinHookInitializeFailed,
                 crate::minhook::MinHookOperation::CreateHook(_) => Self::MinHookCreateHookFailed,
                 crate::minhook::MinHookOperation::EnableHook(_) => Self::MinHookEnableHookFailed,
-                crate::minhook::MinHookOperation::DisableHook(_) => Self::MinHookDisableHookFailed,
+                crate::minhook::MinHookOperation::DisableHook(_)
+                | crate::minhook::MinHookOperation::DisableAll => Self::MinHookDisableHookFailed,
             },
         }
     }
@@ -166,11 +170,11 @@ impl From<HookError> for InitializeStatus {
 impl From<&ReplaceAssignmentsError> for ReplaceAssignmentsStatus {
     fn from(error: &ReplaceAssignmentsError) -> Self {
         match error {
-            ReplaceAssignmentsError::NotInitialized => Self::NotInitialized,
+            ReplaceAssignmentsError::RuntimeInactive | ReplaceAssignmentsError::Inactive(_) => {
+                Self::RuntimeInactive
+            }
             ReplaceAssignmentsError::AlreadyInProgress => Self::AlreadyInProgress,
             ReplaceAssignmentsError::Payload(error) => Self::from(error),
-            ReplaceAssignmentsError::MinHook(_) => Self::MinHookFailed,
-            ReplaceAssignmentsError::MinHookCleanupFailed => Self::MinHookCleanupFailed,
         }
     }
 }

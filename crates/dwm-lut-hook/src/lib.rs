@@ -20,13 +20,13 @@ mod state;
 
 pub use bootstrap::HookError;
 pub use dwmcore::DirtyRect;
-pub use minhook::{MinHookError, MinHookRuntime, MinHookState, RegisteredHook};
+pub use minhook::{MinHookError, MinHookRuntime, RegisteredHook, RegisteredHooks};
 pub use resolver::{
     HookResolveError, LoadedModule, ResolvedFunctionVa, SignatureResolutionReport, Va,
     resolve_profile,
 };
 pub use state::{
-    HookRuntime, LutAssignment, LutConfig, LutMetadata, ShaderTexture3D, assignments_from_payload,
+    HookRuntime, LutAssignment, LutMetadata, ShaderTexture3D, assignments_from_payload,
     cube_to_texture, hook_profile,
 };
 

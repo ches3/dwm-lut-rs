@@ -469,7 +469,7 @@ mod tests {
             let _ = apply_lut(0x1234, &test_profile(), &sample_inputs(Vec::new()));
 
             assert!(crate::d3d11::fake_render_present_lut_call().is_none());
-            shutdown.finish_shut_down();
+            shutdown.finish_inactive();
             state::reset_state_for_tests();
         }
     }

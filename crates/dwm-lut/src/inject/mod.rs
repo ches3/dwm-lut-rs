@@ -13,7 +13,7 @@ pub use dwm_lut_payload::{HookStatus, InitializeStatus, ReplaceAssignmentsStatus
 pub enum InitializeContext {
     FreshInstall,
     AfterShutdown,
-    AfterReplaceFallback,
+    AfterReplaceRecovery,
 }
 
 pub fn format_hook_initialize_failure(
@@ -25,9 +25,9 @@ pub fn format_hook_initialize_failure(
         InitializeContext::AfterShutdown => {
             format!("existing hook was shut down, but initialize failed: {status}")
         }
-        InitializeContext::AfterReplaceFallback => format!(
-            "replace assignments was unavailable, existing hook was shut down, but initialize failed: {status}"
-        ),
+        InitializeContext::AfterReplaceRecovery => {
+            format!("initialize after replace-assignment recovery failed: {status}")
+        }
     }
 }
 
