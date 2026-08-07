@@ -23,8 +23,8 @@ use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profi
 use crate::state::assignments_from_payload;
 use crate::state::{
     HookRuntime, LutAssignment, assignments, clear_assignments, clear_hook_runtime,
-    clone_hook_runtime, has_hook_runtime, lock_present_runtime, store_assignments,
-    store_hook_profile, store_hook_runtime,
+    clone_hook_runtime, has_hook_runtime, store_assignments, store_hook_profile,
+    store_hook_runtime,
 };
 use dwm_lut_profile::{HookProfile, select_profile};
 
@@ -180,36 +180,30 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
         return Err(ReplaceAssignmentsError::RuntimeInactive);
     }
 
-    let flip_error = {
-        let _present_guard = lock_present_runtime();
+    let result = {
+        let mut renderer = crate::d3d11::lock_renderer();
         match set_flip_gate_enabled(&runtime.minhook, &runtime.hooks, next_flip_gate_enabled) {
             Ok(()) => {
                 store_assignments(next_assignments);
-                let _ = crate::d3d11::shutdown_renderer_resources();
-                None
+                let _ = renderer.clear_resources();
+                transition.commit_active(&profile_name);
+                Ok(())
             }
-            Err(error) => Some(error),
+            Err(error) => {
+                clear_assignments();
+                let _ = renderer.clear_resources();
+                transition.finish_inactive();
+                Err(ReplaceAssignmentsError::Inactive(error))
+            }
         }
     };
-    if let Some(error) = flip_error {
-        {
-            let _present_guard = lock_present_runtime();
-            let _ = crate::d3d11::shutdown_renderer_resources();
-            crate::desktop_redraw::request_desktop_redraw();
-        }
-        clear_assignments();
-        transition.finish_inactive();
-        Err(ReplaceAssignmentsError::Inactive(error))
-    } else {
-        crate::desktop_redraw::request_desktop_redraw();
-        transition.commit_active(&profile_name);
-        Ok(())
-    }
+    crate::desktop_redraw::request_desktop_redraw();
+    result
 }
 
 fn deactivate_hook_runtime(runtime: &HookRuntime) -> Result<(), MinHookError> {
-    let _present_guard = lock_present_runtime();
-    let _ = crate::d3d11::shutdown_renderer_resources();
+    let mut renderer = crate::d3d11::lock_renderer();
+    let _ = renderer.clear_resources();
     crate::desktop_redraw::request_desktop_redraw();
     disable_all_hooks(&runtime.minhook)
 }

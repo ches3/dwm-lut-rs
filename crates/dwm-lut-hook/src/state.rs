@@ -79,7 +79,6 @@ pub struct HookRuntime {
 static HOOK_RUNTIME: Mutex<Option<HookRuntime>> = Mutex::new(None);
 static ASSIGNMENTS: ArcSwapOption<Vec<LutAssignment>> = ArcSwapOption::const_empty();
 static PROFILE: OnceLock<HookProfile> = OnceLock::new();
-static PRESENT_RUNTIME_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 pub(crate) static HOOK_GLOBAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -127,14 +126,6 @@ pub(crate) fn store_hook_profile(profile: HookProfile) -> Result<(), HookProfile
 
 pub fn hook_profile() -> Option<HookProfile> {
     PROFILE.get().copied()
-}
-
-pub(crate) fn lock_present_runtime() -> MutexGuard<'static, ()> {
-    PRESENT_RUNTIME_LOCK.lock()
-}
-
-pub(crate) fn try_lock_present_runtime() -> Option<MutexGuard<'static, ()>> {
-    PRESENT_RUNTIME_LOCK.try_lock()
 }
 
 #[cfg(test)]

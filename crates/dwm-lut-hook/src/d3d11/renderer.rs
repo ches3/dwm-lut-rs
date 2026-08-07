@@ -4,9 +4,9 @@ use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::mem::{size_of, transmute_copy};
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
@@ -36,7 +36,12 @@ use crate::state::LutAssignment;
 use dwm_lut_payload::MonitorIdentity;
 use dwm_lut_profile::D3D11ResourcePath;
 
-static RENDERER: OnceLock<Mutex<D3D11Renderer>> = OnceLock::new();
+static RENDERER: LazyLock<Mutex<D3D11Renderer>> =
+    LazyLock::new(|| Mutex::new(D3D11Renderer::new()));
+
+pub(crate) struct RendererGuard {
+    renderer: MutexGuard<'static, D3D11Renderer>,
+}
 
 const BACK_BUFFER_ID_PRIVATE_DATA_GUID: GUID =
     GUID::from_u128(0x6ca95369_322a_4ee3_8515_fec2020a7416);
@@ -631,33 +636,43 @@ fn outcome_draw_failed(
     }
 }
 
-pub(crate) unsafe fn render_present_lut(
-    overlay_swap_chain: usize,
-    d3d11_resource_path: D3D11ResourcePath,
-    monitor_identity: Option<MonitorIdentity>,
-    dirty_rects: &[DirtyRect],
-    assignments: &[LutAssignment],
-) -> Result<PresentLutOutcome, RenderAcquireError> {
-    let renderer = RENDERER.get_or_init(|| Mutex::new(D3D11Renderer::new()));
-    let mut renderer = renderer.lock();
-    unsafe {
-        renderer.render_present_lut(
-            PresentRenderContext {
-                overlay_swap_chain,
-                d3d11_resource_path,
-                monitor_identity,
-            },
-            dirty_rects,
-            assignments,
-        )
+impl RendererGuard {
+    pub(crate) unsafe fn render_present_lut(
+        &mut self,
+        overlay_swap_chain: usize,
+        d3d11_resource_path: D3D11ResourcePath,
+        monitor_identity: Option<MonitorIdentity>,
+        dirty_rects: &[DirtyRect],
+        assignments: &[LutAssignment],
+    ) -> Result<PresentLutOutcome, RenderAcquireError> {
+        unsafe {
+            self.renderer.render_present_lut(
+                PresentRenderContext {
+                    overlay_swap_chain,
+                    d3d11_resource_path,
+                    monitor_identity,
+                },
+                dirty_rects,
+                assignments,
+            )
+        }
+    }
+
+    pub(crate) fn clear_resources(&mut self) -> usize {
+        self.renderer.clear_resources()
     }
 }
 
-pub(crate) fn shutdown_renderer_resources() -> usize {
-    let Some(renderer) = RENDERER.get() else {
-        return 0;
-    };
-    renderer.lock().clear_resources()
+pub(crate) fn try_lock_renderer() -> Option<RendererGuard> {
+    RENDERER
+        .try_lock()
+        .map(|renderer| RendererGuard { renderer })
+}
+
+pub(crate) fn lock_renderer() -> RendererGuard {
+    RendererGuard {
+        renderer: RENDERER.lock(),
+    }
 }
 
 struct PipelineBindings {

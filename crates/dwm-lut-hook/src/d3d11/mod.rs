@@ -1,6 +1,4 @@
 use crate::dwmcore::DirtyRect;
-use crate::state::LutAssignment;
-use dwm_lut_payload::MonitorIdentity;
 
 #[cfg(not(test))]
 mod context_state;
@@ -153,50 +151,11 @@ impl BackBufferId {
     }
 }
 
-pub(crate) unsafe fn render_present_lut(
-    overlay_swap_chain: usize,
-    d3d11_resource_path: dwm_lut_profile::D3D11ResourcePath,
-    monitor_identity: Option<MonitorIdentity>,
-    dirty_rects: &[DirtyRect],
-    assignments: &[LutAssignment],
-) -> Result<PresentLutOutcome, RenderAcquireError> {
-    #[cfg(test)]
-    {
-        unsafe {
-            fake_renderer::render_present_lut(
-                overlay_swap_chain,
-                d3d11_resource_path,
-                monitor_identity,
-                dirty_rects,
-                assignments,
-            )
-        }
-    }
-    #[cfg(not(test))]
-    {
-        unsafe {
-            renderer::render_present_lut(
-                overlay_swap_chain,
-                d3d11_resource_path,
-                monitor_identity,
-                dirty_rects,
-                assignments,
-            )
-        }
-    }
-}
-
 #[cfg(not(test))]
-pub(crate) fn shutdown_renderer_resources() -> usize {
-    renderer::shutdown_renderer_resources()
-}
-
-#[cfg(test)]
-pub(crate) fn shutdown_renderer_resources() -> usize {
-    0
-}
+pub(crate) use renderer::{lock_renderer, try_lock_renderer};
 
 #[cfg(test)]
 pub(crate) use fake_renderer::{
-    fake_render_present_lut_call, reset_fake_render_result, set_fake_render_result,
+    fake_render_present_lut_call, lock_renderer, reset_fake_render_result, set_fake_render_result,
+    try_lock_renderer,
 };

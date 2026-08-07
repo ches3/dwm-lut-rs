@@ -107,32 +107,34 @@ fn apply_lut(
     profile: &HookProfile,
     inputs: &PresentInputs,
 ) -> Option<DirtyRect> {
-    let Some(_present_guard) = state::try_lock_present_runtime() else {
-        log::present_lut_acquire_failed(overlay_swap_chain, PresentLutAcquireFailReason::LockMiss);
-        return None;
+    let render_result = {
+        let Some(mut renderer) = crate::d3d11::try_lock_renderer() else {
+            log::present_lut_acquire_failed(
+                overlay_swap_chain,
+                PresentLutAcquireFailReason::LockMiss,
+            );
+            return None;
+        };
+
+        if !lifecycle::is_runtime_active() {
+            return None;
+        }
+
+        match state::assignments() {
+            Some(assignments) => unsafe {
+                renderer.render_present_lut(
+                    overlay_swap_chain,
+                    profile.d3d11_resource_path(),
+                    inputs.monitor_identity,
+                    &inputs.dirty_rects,
+                    &assignments,
+                )
+            },
+            None => Err(crate::d3d11::RenderAcquireError::Unavailable),
+        }
     };
 
-    if !lifecycle::is_runtime_active() {
-        return None;
-    }
-
-    let Some(assignments) = state::assignments() else {
-        log::present_lut_acquire_failed(
-            overlay_swap_chain,
-            PresentLutAcquireFailReason::from(crate::d3d11::RenderAcquireError::Unavailable),
-        );
-        return None;
-    };
-
-    match unsafe {
-        crate::d3d11::render_present_lut(
-            overlay_swap_chain,
-            profile.d3d11_resource_path(),
-            inputs.monitor_identity,
-            &inputs.dirty_rects,
-            &assignments,
-        )
-    } {
+    match render_result {
         Err(error) => {
             log::present_lut_acquire_failed(
                 overlay_swap_chain,
