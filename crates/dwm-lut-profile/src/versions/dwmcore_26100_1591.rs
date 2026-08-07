@@ -1,7 +1,4 @@
-use crate::profile::{
-    AobToken, ContextToSwapChainPath, HookProfile, HookSignature, MonitorIdentityOffsets,
-    SwapChainToResourcePath,
-};
+use crate::profile::{AobToken, FieldOffsets, HookProfile, HookSignature, VtableIndices};
 use crate::target::HookTarget;
 use AobToken::{Exact, Wildcard};
 
@@ -135,22 +132,24 @@ const SIGNATURES: &[HookSignature] = &[
     },
 ];
 
+static VTABLE_INDICES: VtableIndices = VtableIndices {
+    get_physical_back_buffer: 24,
+    get_d3d11_resource: 14,
+    get_overlay_swap_chain: 34,
+};
+
+static FIELD_OFFSETS: FieldOffsets = FieldOffsets {
+    hardware_protected: 0x64,
+    adapter_luid_low_part: 0x34,
+    adapter_luid_high_part: 0x38,
+    vid_pn_target_id: 0x3c,
+    overlay_monitor_target_pointer: 0,
+};
+
 pub(super) fn profile() -> HookProfile {
     HookProfile {
         signatures: SIGNATURES,
-        swap_chain_to_resource_path: SwapChainToResourcePath {
-            container_vtable_index: 24,
-            resource_vtable_index: 14,
-        },
-        hardware_protected_offset: 0x64,
-        monitor_identity_offsets: MonitorIdentityOffsets {
-            adapter_luid_low_offset: 0x34,
-            adapter_luid_high_offset: 0x38,
-            target_id_offset: 0x3c,
-        },
-        context_to_swap_chain_path: ContextToSwapChainPath {
-            monitor_target_offset: 0,
-            swap_chain_vtable_index: 34,
-        },
+        vtable_indices: &VTABLE_INDICES,
+        field_offsets: &FIELD_OFFSETS,
     }
 }

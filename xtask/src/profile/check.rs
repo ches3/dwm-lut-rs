@@ -5,14 +5,15 @@ use std::path::PathBuf;
 use comfy_table::presets::NOTHING;
 use comfy_table::{Cell, Color, Table, TableComponent};
 use dwm_lut_profile::{
-    DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError, SignatureScanError,
-    resolve_signature_rva, select_profile,
+    DwmcoreVersion, FieldOffsetTarget, HookProfile, HookTarget, ProfileSelectError,
+    SignatureScanError, VtableIndexTarget, resolve_signature_rva, select_profile,
 };
 
 use super::ensure;
-use super::extract::layout::extract_layout;
-use super::extract::report::{LayoutRow, LayoutStatus, format_hex};
+use super::extract::field_offsets::extract_field_offsets;
+use super::extract::report::{ExtractionRow, ExtractionStatus};
 use super::extract::symbols::{SymbolResolveError, resolve_function_symbol};
+use super::extract::vtable_indices::extract_vtable_indices;
 use super::pdb_publics::PdbPublics;
 use super::pe::PeImage;
 
@@ -87,7 +88,8 @@ pub(super) fn run(args: Args) -> Result<(), CheckError> {
 
     let pubs = PdbPublics::load(&pdb_path)?;
     pubs.verify_against_pe(&pe.codeview)?;
-    let layout = extract_layout(&pe, &pubs);
+    let vtable_indices = extract_vtable_indices(&pe, &pubs);
+    let field_offsets = extract_field_offsets(&pe, &pubs);
 
     println!();
     println!("version  10.0.{version}");
@@ -96,55 +98,80 @@ pub(super) fn run(args: Args) -> Result<(), CheckError> {
     println!("pdb      {}", pdb_path.display());
     println!();
 
-    let layout_failed = print_layout_table(&profile, &layout.rows);
+    let vtable_index_failed = print_vtable_index_table(&profile, &vtable_indices);
+    let field_offset_failed = print_field_offset_table(&profile, &field_offsets);
     let signature_failed = print_signatures_table(&profile, &pe, &pubs);
-    mismatch_result(layout_failed, signature_failed)
+    mismatch_result(vtable_index_failed, field_offset_failed, signature_failed)
 }
 
-fn mismatch_result(layout_failed: usize, signature_failed: usize) -> Result<(), CheckError> {
-    match (layout_failed, signature_failed) {
-        (0, 0) => Ok(()),
-        (layouts, 0) => Err(CheckError::Mismatch(format!(
-            "{layouts} layout value{} failed",
-            if layouts == 1 { "" } else { "s" }
-        ))),
-        (0, signatures) => Err(CheckError::Mismatch(format!(
-            "{signatures} signature{} failed",
-            if signatures == 1 { "" } else { "s" }
-        ))),
-        (layouts, signatures) => Err(CheckError::Mismatch(format!(
-            "{layouts} layout value{} failed, {signatures} signature{} failed",
-            if layouts == 1 { "" } else { "s" },
-            if signatures == 1 { "" } else { "s" }
-        ))),
+fn mismatch_result(
+    vtable_index_failed: usize,
+    field_offset_failed: usize,
+    signature_failed: usize,
+) -> Result<(), CheckError> {
+    let mut failures = Vec::new();
+
+    if vtable_index_failed != 0 {
+        failures.push(format!(
+            "{vtable_index_failed} vtable {} failed",
+            if vtable_index_failed == 1 {
+                "index"
+            } else {
+                "indices"
+            }
+        ));
+    }
+    if field_offset_failed != 0 {
+        failures.push(format!(
+            "{field_offset_failed} field offset{} failed",
+            if field_offset_failed == 1 { "" } else { "s" }
+        ));
+    }
+    if signature_failed != 0 {
+        failures.push(format!(
+            "{signature_failed} signature{} failed",
+            if signature_failed == 1 { "" } else { "s" }
+        ));
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(CheckError::Mismatch(failures.join(", ")))
     }
 }
 
-fn print_layout_table(profile: &HookProfile, extracted: &[LayoutRow]) -> usize {
-    let expected = profile_layout_values(profile);
+fn print_vtable_index_table(
+    profile: &HookProfile,
+    extracted: &[ExtractionRow<VtableIndexTarget>],
+) -> usize {
     let mut table = Table::new();
     table
         .load_preset(NOTHING)
         .set_style(TableComponent::HeaderLines, '─');
     table.set_header(vec![
-        Cell::new("Layout"),
+        Cell::new("Vtable index"),
         Cell::new("Status"),
         Cell::new("Extracted"),
         Cell::new("Profile"),
     ]);
 
     let mut failed = 0usize;
-    for (name, profile_value) in &expected {
-        let row = extracted.iter().find(|row| row.target == *name);
+    for &target in VtableIndexTarget::ALL {
+        let profile_value = profile.vtable_index(target);
+        let row = extracted.iter().find(|row| row.target == target);
         let (status, extracted_value) = match row {
-            Some(row) if row.status == LayoutStatus::Ok => {
-                let value = row.value.as_deref().unwrap_or("-");
-                if value == profile_value {
-                    (status_cell("ok", Color::Green), value.to_string())
-                } else {
-                    failed += 1;
-                    (status_cell("mismatch", Color::Red), value.to_string())
-                }
+            Some(row) if row.status == ExtractionStatus::Ok && row.value == Some(profile_value) => {
+                (status_cell("ok", Color::Green), profile_value.to_string())
+            }
+            Some(row) if row.status == ExtractionStatus::Ok => {
+                failed += 1;
+                (
+                    status_cell("mismatch", Color::Red),
+                    row.value
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".into()),
+                )
             }
             Some(row) => {
                 failed += 1;
@@ -157,7 +184,7 @@ fn print_layout_table(profile: &HookProfile, extracted: &[LayoutRow]) -> usize {
         };
 
         table.add_row(vec![
-            Cell::new(*name),
+            Cell::new(target.label()),
             status,
             Cell::new(extracted_value),
             Cell::new(profile_value),
@@ -169,50 +196,62 @@ fn print_layout_table(profile: &HookProfile, extracted: &[LayoutRow]) -> usize {
     failed
 }
 
-fn profile_layout_values(profile: &HookProfile) -> [(&'static str, String); 8] {
-    [
-        (
-            "container_vtable_index",
-            profile
-                .swap_chain_to_resource_path
-                .container_vtable_index
-                .to_string(),
-        ),
-        (
-            "resource_vtable_index",
-            profile
-                .swap_chain_to_resource_path
-                .resource_vtable_index
-                .to_string(),
-        ),
-        (
-            "hardware_protected",
-            format_hex(profile.hardware_protected_offset),
-        ),
-        (
-            "adapter_luid_low_offset",
-            format_hex(profile.monitor_identity_offsets.adapter_luid_low_offset),
-        ),
-        (
-            "adapter_luid_high_offset",
-            format_hex(profile.monitor_identity_offsets.adapter_luid_high_offset),
-        ),
-        (
-            "target_id_offset",
-            format_hex(profile.monitor_identity_offsets.target_id_offset),
-        ),
-        (
-            "monitor_target_offset",
-            format_hex(profile.context_to_swap_chain_path.monitor_target_offset),
-        ),
-        (
-            "swap_chain_vtable_index",
-            profile
-                .context_to_swap_chain_path
-                .swap_chain_vtable_index
-                .to_string(),
-        ),
-    ]
+fn print_field_offset_table(
+    profile: &HookProfile,
+    extracted: &[ExtractionRow<FieldOffsetTarget>],
+) -> usize {
+    let mut table = Table::new();
+    table
+        .load_preset(NOTHING)
+        .set_style(TableComponent::HeaderLines, '─');
+    table.set_header(vec![
+        Cell::new("Field offset"),
+        Cell::new("Status"),
+        Cell::new("Extracted"),
+        Cell::new("Profile"),
+    ]);
+
+    let mut failed = 0usize;
+    for &target in FieldOffsetTarget::ALL {
+        let profile_value = profile.field_offset(target);
+        let row = extracted.iter().find(|row| row.target == target);
+        let (status, extracted_value) = match row {
+            Some(row) if row.status == ExtractionStatus::Ok && row.value == Some(profile_value) => {
+                (
+                    status_cell("ok", Color::Green),
+                    format!("{profile_value:#x}"),
+                )
+            }
+            Some(row) if row.status == ExtractionStatus::Ok => {
+                failed += 1;
+                (
+                    status_cell("mismatch", Color::Red),
+                    row.value
+                        .map(|value| format!("{value:#x}"))
+                        .unwrap_or_else(|| "-".into()),
+                )
+            }
+            Some(row) => {
+                failed += 1;
+                (status_cell(row.status.as_str(), Color::Red), "-".into())
+            }
+            None => {
+                failed += 1;
+                (status_cell("missing", Color::Red), "-".into())
+            }
+        };
+
+        table.add_row(vec![
+            Cell::new(target.label()),
+            status,
+            Cell::new(extracted_value),
+            Cell::new(format!("{profile_value:#x}")),
+        ]);
+    }
+
+    println!("{table}");
+    println!();
+    failed
 }
 
 fn print_signatures_table(profile: &HookProfile, pe: &PeImage, pubs: &PdbPublics) -> usize {
@@ -301,21 +340,21 @@ mod tests {
 
     #[test]
     fn zero_failures_succeed() {
-        assert!(mismatch_result(0, 0).is_ok());
+        assert!(mismatch_result(0, 0, 0).is_ok());
     }
 
     #[test]
-    fn layout_failures_are_mismatch() {
-        let error = mismatch_result(2, 0).expect_err("mismatch");
+    fn vtable_index_failures_are_mismatch() {
+        let error = mismatch_result(2, 0, 0).expect_err("mismatch");
         assert!(matches!(
             error,
-            CheckError::Mismatch(message) if message == "2 layout values failed"
+            CheckError::Mismatch(message) if message == "2 vtable indices failed"
         ));
     }
 
     #[test]
     fn signature_failures_are_mismatch() {
-        let error = mismatch_result(0, 1).expect_err("mismatch");
+        let error = mismatch_result(0, 0, 1).expect_err("mismatch");
         assert!(matches!(
             error,
             CheckError::Mismatch(message) if message == "1 signature failed"
@@ -324,11 +363,12 @@ mod tests {
 
     #[test]
     fn combined_failures_are_mismatch() {
-        let error = mismatch_result(1, 2).expect_err("mismatch");
+        let error = mismatch_result(1, 2, 3).expect_err("mismatch");
         assert!(matches!(
             error,
             CheckError::Mismatch(message)
-                if message == "1 layout value failed, 2 signatures failed"
+                if message
+                    == "1 vtable index failed, 2 field offsets failed, 3 signatures failed"
         ));
     }
 }

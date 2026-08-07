@@ -34,7 +34,7 @@ use super::{
 use crate::dwmcore::DirtyRect;
 use crate::state::LutAssignment;
 use dwm_lut_payload::MonitorIdentity;
-use dwm_lut_profile::SwapChainToResourcePath;
+use dwm_lut_profile::D3D11ResourcePath;
 
 static RENDERER: OnceLock<Mutex<D3D11Renderer>> = OnceLock::new();
 
@@ -50,7 +50,7 @@ struct D3D11Renderer {
 #[derive(Clone, Copy)]
 struct PresentRenderContext {
     overlay_swap_chain: usize,
-    swap_chain_to_resource_path: SwapChainToResourcePath,
+    d3d11_resource_path: D3D11ResourcePath,
     monitor_identity: Option<MonitorIdentity>,
 }
 
@@ -81,7 +81,7 @@ impl D3D11Renderer {
         let back_buffer = (unsafe {
             self.overlay_swap_chain_to_back_buffer(
                 present_context.overlay_swap_chain,
-                present_context.swap_chain_to_resource_path,
+                present_context.d3d11_resource_path,
             )
         })
         .ok_or(RenderAcquireError::BackBuffer)?;
@@ -137,12 +137,10 @@ impl D3D11Renderer {
     unsafe fn overlay_swap_chain_to_back_buffer(
         &mut self,
         overlay_swap_chain: usize,
-        swap_chain_to_resource_path: SwapChainToResourcePath,
+        d3d11_resource_path: D3D11ResourcePath,
     ) -> Option<ID3D11Texture2D> {
-        let resource = crate::dwmcore::resolve_swap_chain_resource(
-            overlay_swap_chain,
-            swap_chain_to_resource_path,
-        )?;
+        let resource =
+            crate::dwmcore::resolve_d3d11_resource(overlay_swap_chain, d3d11_resource_path)?;
         let texture = microseh::try_seh(|| unsafe { query_interface_texture2d(resource) })
             .unwrap_or_default()?;
         Some(unsafe { ID3D11Texture2D::from_raw(texture) })
@@ -635,7 +633,7 @@ fn outcome_draw_failed(
 
 pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
-    swap_chain_to_resource_path: SwapChainToResourcePath,
+    d3d11_resource_path: D3D11ResourcePath,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
     assignments: &[LutAssignment],
@@ -646,7 +644,7 @@ pub(crate) unsafe fn render_present_lut(
         renderer.render_present_lut(
             PresentRenderContext {
                 overlay_swap_chain,
-                swap_chain_to_resource_path,
+                d3d11_resource_path,
                 monitor_identity,
             },
             dirty_rects,

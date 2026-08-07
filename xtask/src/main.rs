@@ -27,7 +27,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ProfileCommand {
-    /// Check whether the registered profile supports a dwmcore.dll (signatures + layout)
+    /// Check whether the registered profile supports a dwmcore.dll (signatures + vtable indices + field offsets)
     Check {
         /// Use %SystemRoot%\\System32\\dwmcore.dll
         #[arg(long, conflicts_with_all = ["dll", "pdb", "version", "build_latest"])]
@@ -56,7 +56,7 @@ enum ProfileCommand {
         #[arg(short = 'y', long = "yes")]
         yes: bool,
     },
-    /// Extract signature/layout materials from DLL + PDB
+    /// Extract signature / vtable index / field offset materials from DLL + PDB
     Extract {
         /// Use %SystemRoot%\\System32\\dwmcore.dll
         #[arg(long, conflicts_with_all = ["dll", "pdb", "version", "build_latest"])]
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn profile_mismatch_exits_with_code_2() {
-        let code = exit_code(RunError::ProfileMismatch("layout failed".into()));
+        let code = exit_code(RunError::ProfileMismatch("1 vtable index failed".into()));
         assert_eq!(code, ExitCode::from(2));
     }
 
@@ -258,9 +258,9 @@ mod tests {
 
     #[test]
     fn check_mismatch_maps_to_profile_mismatch() {
-        let error = RunError::from(CheckError::Mismatch("1 layout value failed".into()));
+        let error = RunError::from(CheckError::Mismatch("1 vtable index failed".into()));
         assert!(
-            matches!(error, RunError::ProfileMismatch(ref message) if message == "1 layout value failed")
+            matches!(error, RunError::ProfileMismatch(ref message) if message == "1 vtable index failed")
         );
         assert_eq!(exit_code(error), ExitCode::from(2));
     }

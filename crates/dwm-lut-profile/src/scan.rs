@@ -151,11 +151,21 @@ mod tests {
         AobMatch, ResolvedRva, Rva, SignatureScanError, SkippedSignature, SkippedSignatureReason,
         match_aob, scan_profile,
     };
-    use crate::profile::{
-        AobToken, ContextToSwapChainPath, HookProfile, HookSignature, MonitorIdentityOffsets,
-        SwapChainToResourcePath,
-    };
+    use crate::profile::{AobToken, FieldOffsets, HookProfile, HookSignature, VtableIndices};
     use crate::target::HookTarget;
+
+    static EMPTY_VTABLE_INDICES: VtableIndices = VtableIndices {
+        get_physical_back_buffer: 0,
+        get_d3d11_resource: 0,
+        get_overlay_swap_chain: 0,
+    };
+    static EMPTY_FIELD_OFFSETS: FieldOffsets = FieldOffsets {
+        hardware_protected: 0,
+        adapter_luid_low_part: 0,
+        adapter_luid_high_part: 0,
+        vid_pn_target_id: 0,
+        overlay_monitor_target_pointer: 0,
+    };
 
     #[test]
     fn match_aob_honors_wildcards() {
@@ -181,20 +191,8 @@ mod tests {
     fn test_profile(signatures: &'static [HookSignature]) -> HookProfile {
         HookProfile {
             signatures,
-            swap_chain_to_resource_path: SwapChainToResourcePath {
-                container_vtable_index: 0,
-                resource_vtable_index: 0,
-            },
-            hardware_protected_offset: 0,
-            monitor_identity_offsets: MonitorIdentityOffsets {
-                adapter_luid_low_offset: 0,
-                adapter_luid_high_offset: 0,
-                target_id_offset: 0,
-            },
-            context_to_swap_chain_path: ContextToSwapChainPath {
-                monitor_target_offset: 0,
-                swap_chain_vtable_index: 0,
-            },
+            vtable_indices: &EMPTY_VTABLE_INDICES,
+            field_offsets: &EMPTY_FIELD_OFFSETS,
         }
     }
 

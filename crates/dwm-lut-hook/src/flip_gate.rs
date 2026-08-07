@@ -38,9 +38,12 @@ pub(crate) fn should_block(target: HookTarget, overlay_context: usize) -> bool {
         return false;
     }
     let blocked =
-        dwmcore::resolve_overlay_swap_chain(overlay_context, profile.context_to_swap_chain_path)
+        dwmcore::resolve_overlay_swap_chain(overlay_context, profile.overlay_swap_chain_path())
             .and_then(|swap_chain| {
-                dwmcore::read_monitor_identity(swap_chain, profile.monitor_identity_offsets)
+                dwmcore::read_monitor_identity(
+                    swap_chain,
+                    profile.overlay_swap_chain_identity_offsets(),
+                )
             })
             .is_some_and(|identity| {
                 assignments

@@ -1,13 +1,14 @@
 use comfy_table::presets::NOTHING;
 use comfy_table::{Cell, Color, Table, TableComponent};
-use dwm_lut_profile::HookTarget;
+use dwm_lut_profile::{FieldOffsetTarget, HookTarget, VtableIndexTarget};
 
 #[derive(Debug, Clone)]
 pub struct InspectReport {
     pub file_version: String,
     pub dll: String,
     pub pdb: String,
-    pub layout: LayoutReport,
+    pub vtable_indices: Vec<ExtractionRow<VtableIndexTarget>>,
+    pub field_offsets: Vec<ExtractionRow<FieldOffsetTarget>>,
     pub signatures: Vec<SignatureReport>,
 }
 
@@ -46,20 +47,22 @@ pub struct SignatureReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LayoutStatus {
+pub enum ExtractionStatus {
     Ok,
     NoSymbol,
     NoVftable,
     NoDisp,
+    Ambiguous,
 }
 
-impl LayoutStatus {
+impl ExtractionStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",
             Self::NoSymbol => "no_symbol",
             Self::NoVftable => "no_vftable",
             Self::NoDisp => "no_disp",
+            Self::Ambiguous => "ambiguous",
         }
     }
 
@@ -69,23 +72,14 @@ impl LayoutStatus {
 }
 
 #[derive(Debug, Clone)]
-pub struct LayoutRow {
-    pub target: String,
-    pub status: LayoutStatus,
-    pub value: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct LayoutReport {
-    pub rows: Vec<LayoutRow>,
+pub struct ExtractionRow<T> {
+    pub target: T,
+    pub status: ExtractionStatus,
+    pub value: Option<usize>,
 }
 
 pub fn format_rva(rva: u32) -> String {
     format!("{rva:#x}")
-}
-
-pub fn format_hex(value: usize) -> String {
-    format!("{value:#x}")
 }
 
 const AOB_BYTES_PER_LINE: usize = 16;
@@ -97,23 +91,50 @@ pub fn print_report(report: &InspectReport) {
     println!("pdb      {}", report.pdb);
     println!();
 
-    let mut layout_table = Table::new();
-    layout_table
+    let mut vtable_index_table = Table::new();
+    vtable_index_table
         .load_preset(NOTHING)
         .set_style(TableComponent::HeaderLines, '─');
-    layout_table.set_header(vec![
-        Cell::new("Layout"),
+    vtable_index_table.set_header(vec![
+        Cell::new("Vtable index"),
         Cell::new("Status"),
         Cell::new("Value"),
     ]);
-    for row in &report.layout.rows {
-        layout_table.add_row(vec![
-            Cell::new(&row.target),
-            layout_status_cell(row.status),
-            Cell::new(row.value.as_deref().unwrap_or("-")),
+    for row in &report.vtable_indices {
+        let value = row
+            .value
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        vtable_index_table.add_row(vec![
+            Cell::new(row.target.label()),
+            extraction_status_cell(row.status),
+            Cell::new(value),
         ]);
     }
-    println!("{layout_table}");
+    println!("{vtable_index_table}");
+    println!();
+
+    let mut field_offset_table = Table::new();
+    field_offset_table
+        .load_preset(NOTHING)
+        .set_style(TableComponent::HeaderLines, '─');
+    field_offset_table.set_header(vec![
+        Cell::new("Field offset"),
+        Cell::new("Status"),
+        Cell::new("Value"),
+    ]);
+    for row in &report.field_offsets {
+        let value = row
+            .value
+            .map(|value| format!("{value:#x}"))
+            .unwrap_or_else(|| "-".into());
+        field_offset_table.add_row(vec![
+            Cell::new(row.target.label()),
+            extraction_status_cell(row.status),
+            Cell::new(value),
+        ]);
+    }
+    println!("{field_offset_table}");
     println!();
 
     let mut table = Table::new();
@@ -160,7 +181,7 @@ pub fn print_report(report: &InspectReport) {
     }
 }
 
-fn layout_status_cell(status: LayoutStatus) -> Cell {
+fn extraction_status_cell(status: ExtractionStatus) -> Cell {
     let cell = Cell::new(status.as_str());
     if !stdout_supports_color() {
         return cell;

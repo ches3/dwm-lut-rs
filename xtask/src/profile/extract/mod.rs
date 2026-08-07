@@ -1,14 +1,16 @@
-pub(super) mod layout;
+pub(super) mod field_offsets;
 pub(super) mod report;
 mod signatures;
 pub(super) mod symbols;
+pub(super) mod vtable_indices;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use layout::extract_layout;
+use field_offsets::extract_field_offsets;
 use report::{InspectReport, print_report};
 use signatures::extract_signatures;
+use vtable_indices::extract_vtable_indices;
 
 use super::ensure;
 use super::pdb_publics::PdbPublics;
@@ -42,13 +44,15 @@ fn extract(dll_path: &Path, pdb_path: &Path) -> Result<InspectReport, Box<dyn Er
     let pubs = PdbPublics::load(pdb_path)?;
     pubs.verify_against_pe(&pe.codeview)?;
     let signatures = extract_signatures(&pe, &pubs)?;
-    let layout = extract_layout(&pe, &pubs);
+    let vtable_indices = extract_vtable_indices(&pe, &pubs);
+    let field_offsets = extract_field_offsets(&pe, &pubs);
 
     Ok(InspectReport {
         file_version: pe.file_version.label(),
         dll: dll_path.display().to_string(),
         pdb: pdb_path.display().to_string(),
         signatures,
-        layout,
+        vtable_indices,
+        field_offsets,
     })
 }

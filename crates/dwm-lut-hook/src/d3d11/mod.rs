@@ -155,7 +155,7 @@ impl BackBufferId {
 
 pub(crate) unsafe fn render_present_lut(
     overlay_swap_chain: usize,
-    swap_chain_to_resource_path: dwm_lut_profile::SwapChainToResourcePath,
+    d3d11_resource_path: dwm_lut_profile::D3D11ResourcePath,
     monitor_identity: Option<MonitorIdentity>,
     dirty_rects: &[DirtyRect],
     assignments: &[LutAssignment],
@@ -165,7 +165,7 @@ pub(crate) unsafe fn render_present_lut(
         unsafe {
             fake_renderer::render_present_lut(
                 overlay_swap_chain,
-                swap_chain_to_resource_path,
+                d3d11_resource_path,
                 monitor_identity,
                 dirty_rects,
                 assignments,
@@ -177,7 +177,7 @@ pub(crate) unsafe fn render_present_lut(
         unsafe {
             renderer::render_present_lut(
                 overlay_swap_chain,
-                swap_chain_to_resource_path,
+                d3d11_resource_path,
                 monitor_identity,
                 dirty_rects,
                 assignments,

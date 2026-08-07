@@ -84,10 +84,12 @@ unsafe fn collect_present_inputs(
     }
 
     let hardware_protected =
-        dwmcore::read_hardware_protected(overlay_swap_chain, profile.hardware_protected_offset)
+        dwmcore::read_hardware_protected(overlay_swap_chain, profile.hardware_protected_offset())
             .ok_or(PresentInputError::UnreadableMemory)?;
-    let monitor_identity =
-        dwmcore::read_monitor_identity(overlay_swap_chain, profile.monitor_identity_offsets);
+    let monitor_identity = dwmcore::read_monitor_identity(
+        overlay_swap_chain,
+        profile.overlay_swap_chain_identity_offsets(),
+    );
     let dirty_rects =
         unsafe { dwmcore::read_dirty_rects(rect_vec) }.map_err(|error| match error {
             DirtyRectReadError::InvalidVector => PresentInputError::InvalidDirtyRectVector,
@@ -125,7 +127,7 @@ fn apply_lut(
     match unsafe {
         crate::d3d11::render_present_lut(
             overlay_swap_chain,
-            profile.swap_chain_to_resource_path,
+            profile.d3d11_resource_path(),
             inputs.monitor_identity,
             &inputs.dirty_rects,
             &assignments,
@@ -290,8 +292,8 @@ pub(crate) mod test_support {
             let profile = test_profile();
             let overlay_swap_chain =
                 dwmcore::test_support::overlay_swap_chain_bytes_with_hardware_protected(
-                    profile.monitor_identity_offsets,
-                    profile.hardware_protected_offset,
+                    profile.overlay_swap_chain_identity_offsets(),
+                    profile.hardware_protected_offset(),
                     test_monitor_identity(),
                     hardware_protected,
                 );

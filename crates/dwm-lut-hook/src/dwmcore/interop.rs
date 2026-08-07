@@ -2,7 +2,7 @@ use std::mem::{align_of, size_of, transmute_copy};
 use std::ptr;
 
 use dwm_lut_payload::{AdapterLuid, MonitorIdentity};
-use dwm_lut_profile::{ContextToSwapChainPath, MonitorIdentityOffsets, SwapChainToResourcePath};
+use dwm_lut_profile::{D3D11ResourcePath, OverlaySwapChainIdentityOffsets, OverlaySwapChainPath};
 
 const MAX_DIRTY_RECTS: usize = 4096;
 
@@ -31,11 +31,11 @@ pub(crate) enum DirtyRectReadError {
 
 pub(crate) fn read_monitor_identity(
     overlay_swap_chain: usize,
-    offsets: MonitorIdentityOffsets,
+    offsets: OverlaySwapChainIdentityOffsets,
 ) -> Option<MonitorIdentity> {
-    let low_addr = overlay_swap_chain.checked_add(offsets.adapter_luid_low_offset)?;
-    let high_addr = overlay_swap_chain.checked_add(offsets.adapter_luid_high_offset)?;
-    let target_addr = overlay_swap_chain.checked_add(offsets.target_id_offset)?;
+    let low_addr = overlay_swap_chain.checked_add(offsets.adapter_luid_low_part_offset)?;
+    let high_addr = overlay_swap_chain.checked_add(offsets.adapter_luid_high_part_offset)?;
+    let target_addr = overlay_swap_chain.checked_add(offsets.vid_pn_target_id_offset)?;
     microseh::try_seh(|| unsafe {
         let low_part = read::<u32>(low_addr)?;
         let high_part = read::<i32>(high_addr)?;
@@ -58,7 +58,7 @@ pub(crate) fn read_hardware_protected(overlay_swap_chain: usize, offset: usize) 
 
 pub(crate) fn resolve_overlay_swap_chain(
     overlay_context: usize,
-    path: ContextToSwapChainPath,
+    path: OverlaySwapChainPath,
 ) -> Option<usize> {
     if overlay_context == 0 {
         return None;
@@ -68,15 +68,15 @@ pub(crate) fn resolve_overlay_swap_chain(
         .unwrap_or_default()
 }
 
-pub(crate) fn resolve_swap_chain_resource(
+pub(crate) fn resolve_d3d11_resource(
     overlay_swap_chain: usize,
-    path: SwapChainToResourcePath,
+    path: D3D11ResourcePath,
 ) -> Option<usize> {
     if overlay_swap_chain == 0 {
         return None;
     }
 
-    microseh::try_seh(|| unsafe { resolve_swap_chain_resource_unguarded(overlay_swap_chain, path) })
+    microseh::try_seh(|| unsafe { resolve_d3d11_resource_unguarded(overlay_swap_chain, path) })
         .unwrap_or_default()
 }
 
@@ -133,40 +133,49 @@ pub(crate) unsafe fn read_dirty_rects(
 
 unsafe fn resolve_overlay_swap_chain_unguarded(
     overlay_context: usize,
-    path: ContextToSwapChainPath,
+    path: OverlaySwapChainPath,
 ) -> Option<usize> {
-    let monitor =
-        unsafe { read::<usize>(overlay_context.checked_add(path.monitor_target_offset)?)? };
+    let monitor = unsafe {
+        read::<usize>(overlay_context.checked_add(path.overlay_monitor_target_pointer_offset)?)?
+    };
     if monitor == 0 {
         return None;
     }
 
     type GetOverlaySwapChain = unsafe extern "system" fn(usize) -> usize;
-    let get_overlay_swap_chain =
-        unsafe { object_vtable_fn::<GetOverlaySwapChain>(monitor, path.swap_chain_vtable_index)? };
+    let get_overlay_swap_chain = unsafe {
+        object_vtable_fn::<GetOverlaySwapChain>(monitor, path.get_overlay_swap_chain_vtable_index)?
+    };
     let swap_chain = unsafe { get_overlay_swap_chain(monitor) };
     (swap_chain != 0).then_some(swap_chain)
 }
 
-unsafe fn resolve_swap_chain_resource_unguarded(
+unsafe fn resolve_d3d11_resource_unguarded(
     overlay_swap_chain: usize,
-    path: SwapChainToResourcePath,
+    path: D3D11ResourcePath,
 ) -> Option<usize> {
-    type GetContainer = unsafe extern "system" fn(usize) -> usize;
-    type GetResource = unsafe extern "system" fn(usize) -> usize;
+    type GetPhysicalBackBuffer = unsafe extern "system" fn(usize) -> usize;
+    type GetD3D11Resource = unsafe extern "system" fn(usize) -> usize;
 
-    let get_container = unsafe {
-        object_vtable_fn::<GetContainer>(overlay_swap_chain, path.container_vtable_index)?
+    let get_physical_back_buffer = unsafe {
+        object_vtable_fn::<GetPhysicalBackBuffer>(
+            overlay_swap_chain,
+            path.get_physical_back_buffer_vtable_index,
+        )?
     };
-    let container = unsafe { get_container(overlay_swap_chain) };
-    if container == 0 {
+    let physical_back_buffer = unsafe { get_physical_back_buffer(overlay_swap_chain) };
+    if physical_back_buffer == 0 {
         return None;
     }
 
-    let get_resource =
-        unsafe { object_vtable_fn::<GetResource>(container, path.resource_vtable_index)? };
-    let resource = unsafe { get_resource(container) };
-    (resource != 0).then_some(resource)
+    let get_d3d11_resource = unsafe {
+        object_vtable_fn::<GetD3D11Resource>(
+            physical_back_buffer,
+            path.get_d3d11_resource_vtable_index,
+        )?
+    };
+    let d3d11_resource = unsafe { get_d3d11_resource(physical_back_buffer) };
+    (d3d11_resource != 0).then_some(d3d11_resource)
 }
 
 unsafe fn object_vtable_fn<T>(object: usize, index: usize) -> Option<T> {
@@ -198,7 +207,7 @@ mod tests {
 
     use super::{
         DirtyRect, DirtyRectReadError, RectVec, read_dirty_rects, read_hardware_protected,
-        read_monitor_identity, resolve_overlay_swap_chain, resolve_swap_chain_resource,
+        read_monitor_identity, resolve_d3d11_resource, resolve_overlay_swap_chain,
     };
     use crate::dwmcore::test_support::{
         FakeOverlayContext, overlay_path_profile, overlay_swap_chain_bytes,
@@ -218,7 +227,7 @@ mod tests {
     #[test]
     fn resolve_overlay_swap_chain_rejects_null_overlay_context() {
         assert_eq!(
-            resolve_overlay_swap_chain(0, overlay_path_profile().context_to_swap_chain_path),
+            resolve_overlay_swap_chain(0, overlay_path_profile().overlay_swap_chain_path()),
             None
         );
     }
@@ -228,7 +237,7 @@ mod tests {
         let profile = overlay_path_profile();
         let context = FakeOverlayContext::with_method(&profile, test_identity(), 0);
         assert_eq!(
-            resolve_overlay_swap_chain(context.address(), profile.context_to_swap_chain_path),
+            resolve_overlay_swap_chain(context.address(), profile.overlay_swap_chain_path()),
             None
         );
     }
@@ -236,9 +245,15 @@ mod tests {
     #[test]
     fn read_monitor_identity_reads_profile_offsets() {
         let profile = overlay_path_profile();
-        let bytes = overlay_swap_chain_bytes(profile.monitor_identity_offsets, test_identity());
+        let bytes = overlay_swap_chain_bytes(
+            profile.overlay_swap_chain_identity_offsets(),
+            test_identity(),
+        );
         assert_eq!(
-            read_monitor_identity(bytes.as_ptr() as usize, profile.monitor_identity_offsets),
+            read_monitor_identity(
+                bytes.as_ptr() as usize,
+                profile.overlay_swap_chain_identity_offsets()
+            ),
             Some(test_identity())
         );
     }
@@ -247,23 +262,23 @@ mod tests {
     fn read_hardware_protected_reads_profile_offset() {
         let profile = overlay_path_profile();
         let bytes = overlay_swap_chain_bytes_with_hardware_protected(
-            profile.monitor_identity_offsets,
-            profile.hardware_protected_offset,
+            profile.overlay_swap_chain_identity_offsets(),
+            profile.hardware_protected_offset(),
             test_identity(),
             true,
         );
         assert_eq!(
-            read_hardware_protected(bytes.as_ptr() as usize, profile.hardware_protected_offset),
+            read_hardware_protected(bytes.as_ptr() as usize, profile.hardware_protected_offset()),
             Some(true)
         );
     }
 
     #[test]
     fn read_monitor_identity_rejects_offset_overflow() {
-        let offsets = dwm_lut_profile::MonitorIdentityOffsets {
-            adapter_luid_low_offset: usize::MAX,
-            adapter_luid_high_offset: 0,
-            target_id_offset: 0,
+        let offsets = dwm_lut_profile::OverlaySwapChainIdentityOffsets {
+            adapter_luid_low_part_offset: usize::MAX,
+            adapter_luid_high_part_offset: 0,
+            vid_pn_target_id_offset: 0,
         };
         assert_eq!(read_monitor_identity(1, offsets), None);
     }
@@ -325,12 +340,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_swap_chain_resource_reports_unreadable_swap_chain() {
+    fn resolve_d3d11_resource_reports_unreadable_swap_chain() {
         let invalid_address = align_of::<usize>();
         assert!(
-            resolve_swap_chain_resource(
+            resolve_d3d11_resource(
                 invalid_address,
-                overlay_path_profile().swap_chain_to_resource_path,
+                overlay_path_profile().d3d11_resource_path(),
             )
             .is_none()
         );

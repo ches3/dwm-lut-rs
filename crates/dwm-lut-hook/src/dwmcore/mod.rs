@@ -3,7 +3,7 @@ mod version;
 
 pub use interop::DirtyRect;
 #[cfg(not(test))]
-pub(crate) use interop::resolve_swap_chain_resource;
+pub(crate) use interop::resolve_d3d11_resource;
 pub(crate) use interop::{
     DirtyRectReadError, RectVec, read_dirty_rects, read_hardware_protected, read_monitor_identity,
     resolve_overlay_swap_chain,
@@ -16,40 +16,41 @@ pub(crate) mod test_support {
 
     use dwm_lut_payload::MonitorIdentity;
     use dwm_lut_profile::{
-        ContextToSwapChainPath, HookProfile, MonitorIdentityOffsets, SwapChainToResourcePath,
+        FieldOffsets, HookProfile, OverlaySwapChainIdentityOffsets, VtableIndices,
     };
 
     const CHAIN_OFFSET_IN_TARGET: usize = size_of::<usize>();
 
+    static OVERLAY_PATH_VTABLE_INDICES: VtableIndices = VtableIndices {
+        get_physical_back_buffer: 0,
+        get_d3d11_resource: 0,
+        get_overlay_swap_chain: 3,
+    };
+    static OVERLAY_PATH_FIELD_OFFSETS: FieldOffsets = FieldOffsets {
+        hardware_protected: 0x10,
+        adapter_luid_low_part: 0x20,
+        adapter_luid_high_part: 0x24,
+        vid_pn_target_id: 0x28,
+        overlay_monitor_target_pointer: 0,
+    };
+
     pub(crate) fn overlay_path_profile() -> HookProfile {
         HookProfile {
             signatures: &[],
-            swap_chain_to_resource_path: SwapChainToResourcePath {
-                container_vtable_index: 0,
-                resource_vtable_index: 0,
-            },
-            hardware_protected_offset: 0x10,
-            monitor_identity_offsets: MonitorIdentityOffsets {
-                adapter_luid_low_offset: 0x20,
-                adapter_luid_high_offset: 0x24,
-                target_id_offset: 0x28,
-            },
-            context_to_swap_chain_path: ContextToSwapChainPath {
-                monitor_target_offset: 0,
-                swap_chain_vtable_index: 3,
-            },
+            vtable_indices: &OVERLAY_PATH_VTABLE_INDICES,
+            field_offsets: &OVERLAY_PATH_FIELD_OFFSETS,
         }
     }
 
     pub(crate) fn overlay_swap_chain_bytes(
-        offsets: MonitorIdentityOffsets,
+        offsets: OverlaySwapChainIdentityOffsets,
         identity: MonitorIdentity,
     ) -> Vec<u8> {
         overlay_swap_chain_bytes_with_hardware_protected(offsets, 0, identity, false)
     }
 
     pub(crate) fn overlay_swap_chain_bytes_with_hardware_protected(
-        offsets: MonitorIdentityOffsets,
+        offsets: OverlaySwapChainIdentityOffsets,
         hardware_protected_offset: usize,
         identity: MonitorIdentity,
         hardware_protected: bool,
@@ -58,15 +59,19 @@ pub(crate) mod test_support {
         let mut bytes = vec![0u8; len];
         write_at(
             &mut bytes,
-            offsets.adapter_luid_low_offset,
+            offsets.adapter_luid_low_part_offset,
             identity.adapter_luid.low_part,
         );
         write_at(
             &mut bytes,
-            offsets.adapter_luid_high_offset,
+            offsets.adapter_luid_high_part_offset,
             identity.adapter_luid.high_part,
         );
-        write_at(&mut bytes, offsets.target_id_offset, identity.target_id);
+        write_at(
+            &mut bytes,
+            offsets.vid_pn_target_id_offset,
+            identity.target_id,
+        );
         write_at(
             &mut bytes,
             hardware_protected_offset,
@@ -100,20 +105,23 @@ pub(crate) mod test_support {
             identity: MonitorIdentity,
             method: usize,
         ) -> Self {
-            let path = profile.context_to_swap_chain_path;
-            let mut vtable = vec![0usize; path.swap_chain_vtable_index + 1].into_boxed_slice();
-            vtable[path.swap_chain_vtable_index] = method;
+            let path = profile.overlay_swap_chain_path();
+            let mut vtable =
+                vec![0usize; path.get_overlay_swap_chain_vtable_index + 1].into_boxed_slice();
+            vtable[path.get_overlay_swap_chain_vtable_index] = method;
 
-            let chain = overlay_swap_chain_bytes(profile.monitor_identity_offsets, identity);
+            let chain =
+                overlay_swap_chain_bytes(profile.overlay_swap_chain_identity_offsets(), identity);
             let mut monitor = vec![0u8; CHAIN_OFFSET_IN_TARGET + chain.len()];
             let vtable_ptr = vtable.as_ptr() as usize;
             monitor[..size_of::<usize>()].copy_from_slice(&vtable_ptr.to_ne_bytes());
             monitor[CHAIN_OFFSET_IN_TARGET..].copy_from_slice(&chain);
 
             let monitor_addr = monitor.as_ptr() as usize;
-            let mut context_storage = vec![0u8; path.monitor_target_offset + size_of::<usize>()];
-            context_storage
-                [path.monitor_target_offset..path.monitor_target_offset + size_of::<usize>()]
+            let mut context_storage =
+                vec![0u8; path.overlay_monitor_target_pointer_offset + size_of::<usize>()];
+            context_storage[path.overlay_monitor_target_pointer_offset
+                ..path.overlay_monitor_target_pointer_offset + size_of::<usize>()]
                 .copy_from_slice(&monitor_addr.to_ne_bytes());
             let context_address = context_storage.as_ptr() as usize;
 
@@ -131,13 +139,13 @@ pub(crate) mod test_support {
     }
 
     fn chain_buffer_len(
-        offsets: MonitorIdentityOffsets,
+        offsets: OverlaySwapChainIdentityOffsets,
         hardware_protected_offset: usize,
     ) -> usize {
         offsets
-            .adapter_luid_low_offset
-            .max(offsets.adapter_luid_high_offset)
-            .max(offsets.target_id_offset)
+            .adapter_luid_low_part_offset
+            .max(offsets.adapter_luid_high_part_offset)
+            .max(offsets.vid_pn_target_id_offset)
             .max(hardware_protected_offset)
             + size_of::<u32>()
     }
