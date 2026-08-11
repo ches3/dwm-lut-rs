@@ -1,14 +1,10 @@
 use std::ptr;
 
-#[cfg(debug_assertions)]
-use crate::d3d11::{BackBufferId, PresentDrawStatus};
 use crate::dwmcore::{
     self, DirtyRect, DirtyRectReadError, HardwareProtectedReadError, MonitorIdentityReadError,
     RectVec,
 };
 use crate::lifecycle;
-#[cfg(debug_assertions)]
-use crate::log::SharedLimiter;
 use crate::log::{self, PresentLutAcquireFailReason};
 use crate::state;
 use dwm_lut_payload::MonitorIdentity;
@@ -18,7 +14,12 @@ use dwm_lut_profile::HookProfile;
 struct PresentInputs {
     monitor_identity: MonitorIdentity,
     dirty_rects: Vec<DirtyRect>,
-    hardware_protected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum PresentInputOutcome {
+    HardwareProtected,
+    Ready(PresentInputs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,16 +29,6 @@ pub(crate) enum PresentInputError {
     MonitorIdentity(MonitorIdentityReadError),
     DirtyRects(DirtyRectReadError),
 }
-
-#[cfg(debug_assertions)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PresentLutLogKey {
-    overlay_swap_chain: usize,
-    back_buffer: Option<BackBufferId>,
-}
-
-#[cfg(debug_assertions)]
-static PRESENT_LUT_LOG_LIMITER: SharedLimiter<PresentLutLogKey> = SharedLimiter::new(300);
 
 pub(crate) fn present(
     this: usize,
@@ -62,14 +53,21 @@ pub(crate) fn present(
 
     let prepared_rect_vec =
         match unsafe { collect_present_inputs(&profile, overlay_swap_chain, rect_vec) } {
-            Ok(inputs) => match apply_lut(overlay_swap_chain, &profile, &inputs) {
-                Some(rect) => full_present_rect_vec(
-                    rect,
-                    &mut present_rect_storage,
-                    &mut present_rect_vec_storage,
-                ),
-                None => rect_vec,
-            },
+            // Skip applying the LUT to prevent crashes with hardware DRM (e.g., PlayReady SL3000).
+            Ok(PresentInputOutcome::HardwareProtected) => {
+                log::skipped_hardware_protected(overlay_swap_chain);
+                rect_vec
+            }
+            Ok(PresentInputOutcome::Ready(inputs)) => {
+                match apply_lut(overlay_swap_chain, &profile, &inputs) {
+                    Some(rect) => full_present_rect_vec(
+                        rect,
+                        &mut present_rect_storage,
+                        &mut present_rect_vec_storage,
+                    ),
+                    None => rect_vec,
+                }
+            }
             Err(error) => {
                 log::present_input_collect_error(this, overlay_swap_chain, rect_vec, error);
                 rect_vec
@@ -86,24 +84,26 @@ unsafe fn collect_present_inputs(
     profile: &HookProfile,
     overlay_swap_chain: usize,
     rect_vec: usize,
-) -> Result<PresentInputs, PresentInputError> {
+) -> Result<PresentInputOutcome, PresentInputError> {
     if overlay_swap_chain == 0 {
         return Err(PresentInputError::NullOverlaySwapChain);
     }
 
-    let hardware_protected =
-        unsafe { dwmcore::read_hardware_protected(overlay_swap_chain, profile.hardware_protected) }
-            .map_err(PresentInputError::HardwareProtected)?;
+    if unsafe { dwmcore::read_hardware_protected(overlay_swap_chain, profile.hardware_protected) }
+        .map_err(PresentInputError::HardwareProtected)?
+    {
+        return Ok(PresentInputOutcome::HardwareProtected);
+    }
+
     let monitor_identity =
         unsafe { dwmcore::read_monitor_identity(overlay_swap_chain, profile.monitor_identity) }
             .map_err(PresentInputError::MonitorIdentity)?;
     let dirty_rects =
         unsafe { dwmcore::read_dirty_rects(rect_vec) }.map_err(PresentInputError::DirtyRects)?;
-    Ok(PresentInputs {
+    Ok(PresentInputOutcome::Ready(PresentInputs {
         monitor_identity,
         dirty_rects,
-        hardware_protected,
-    })
+    }))
 }
 
 fn apply_lut(
@@ -147,9 +147,8 @@ fn apply_lut(
             None
         }
         Ok(render_outcome) => {
-            log_present_lut_frame(
+            log::present_lut_frame(
                 overlay_swap_chain,
-                inputs.hardware_protected,
                 inputs.monitor_identity,
                 &inputs.dirty_rects,
                 render_outcome,
@@ -157,35 +156,6 @@ fn apply_lut(
             render_outcome.present_dirty_rect
         }
     }
-}
-
-fn log_present_lut_frame(
-    overlay_swap_chain: usize,
-    hardware_protected: bool,
-    monitor_identity: MonitorIdentity,
-    dirty_rects: &[DirtyRect],
-    outcome: crate::d3d11::PresentLutOutcome,
-) {
-    #[cfg(debug_assertions)]
-    {
-        let is_err = matches!(outcome.draw, PresentDrawStatus::Failed(_));
-        if !is_err {
-            let key = PresentLutLogKey {
-                overlay_swap_chain,
-                back_buffer: outcome.back_buffer_id,
-            };
-            if !PRESENT_LUT_LOG_LIMITER.sample(key).should_log {
-                return;
-            }
-        }
-    }
-    log::present_lut_frame(
-        overlay_swap_chain,
-        hardware_protected,
-        monitor_identity,
-        dirty_rects,
-        outcome,
-    );
 }
 
 fn empty_rect_vec_storage() -> RectVec {
@@ -376,7 +346,10 @@ mod tests {
         FakePresentObjects, FakeVirtualPresentObjects, initialize_test_state,
         test_monitor_identity, test_profile,
     };
-    use super::{PresentInputError, PresentInputs, apply_lut, collect_present_inputs, present};
+    use super::{
+        PresentInputError, PresentInputOutcome, PresentInputs, apply_lut, collect_present_inputs,
+        present,
+    };
     use crate::d3d11::{DXGI_FORMAT_B8G8R8A8_UNORM, PresentDrawStatus};
     use crate::dwmcore::{self, DirtyRect};
     use crate::lifecycle;
@@ -404,7 +377,6 @@ mod tests {
     fn sample_inputs(dirty_rects: Vec<DirtyRect>) -> PresentInputs {
         PresentInputs {
             monitor_identity: test_monitor_identity(),
-            hardware_protected: false,
             dirty_rects,
         }
     }
@@ -423,7 +395,7 @@ mod tests {
                 }],
                 false,
             );
-            let inputs = unsafe {
+            let outcome = unsafe {
                 collect_present_inputs(
                     &test_profile(),
                     unprotected.overlay_swap_chain_address(),
@@ -431,45 +403,69 @@ mod tests {
                 )
             }
             .expect("present inputs should be collected");
+            let PresentInputOutcome::Ready(inputs) = outcome else {
+                panic!("expected Ready outcome");
+            };
             assert_eq!(inputs.monitor_identity, test_monitor_identity());
             assert_eq!(inputs.dirty_rects, unprotected.dirty_rects);
-            assert!(!inputs.hardware_protected);
-
-            let protected = FakePresentObjects::new(unprotected.dirty_rects.clone(), true);
-            let inputs = unsafe {
-                collect_present_inputs(
-                    &test_profile(),
-                    protected.overlay_swap_chain_address(),
-                    protected.rect_vec_address(),
-                )
-            }
-            .expect("hardware protected state should be collected");
-            assert!(inputs.hardware_protected);
         }
 
         #[test]
-        fn reads_virtual_base_hardware_protected_inputs() {
+        fn returns_hardware_protected_without_reading_dirty_rects() {
+            let fake = FakePresentObjects::new(
+                vec![DirtyRect {
+                    left: 10,
+                    top: 20,
+                    right: 30,
+                    bottom: 40,
+                }],
+                true,
+            );
+            let outcome = unsafe {
+                collect_present_inputs(
+                    &test_profile(),
+                    fake.overlay_swap_chain_address(),
+                    0, // would fail if dirty rects were read
+                )
+            }
+            .expect("hardware-protected outcome should not be an error");
+            assert_eq!(outcome, PresentInputOutcome::HardwareProtected);
+        }
+
+        #[test]
+        fn reads_virtual_base_overlay_outcomes() {
             let dirty_rects = vec![DirtyRect {
                 left: 1,
                 top: 2,
                 right: 3,
                 bottom: 4,
             }];
-            for expected in [false, true] {
-                let fake = FakeVirtualPresentObjects::new(dirty_rects.clone(), expected);
-                let inputs = unsafe {
-                    collect_present_inputs(
-                        &fake.profile(),
-                        fake.overlay_swap_chain_address(),
-                        fake.rect_vec_address(),
-                    )
-                }
-                .expect("virtual-base hardware protected state should be collected");
 
-                assert_eq!(inputs.monitor_identity, test_monitor_identity());
-                assert_eq!(inputs.dirty_rects, fake.dirty_rects);
-                assert_eq!(inputs.hardware_protected, expected);
+            let unprotected = FakeVirtualPresentObjects::new(dirty_rects.clone(), false);
+            let outcome = unsafe {
+                collect_present_inputs(
+                    &unprotected.profile(),
+                    unprotected.overlay_swap_chain_address(),
+                    unprotected.rect_vec_address(),
+                )
             }
+            .expect("unprotected virtual-base inputs should be collected");
+            let PresentInputOutcome::Ready(inputs) = outcome else {
+                panic!("expected Ready outcome");
+            };
+            assert_eq!(inputs.monitor_identity, test_monitor_identity());
+            assert_eq!(inputs.dirty_rects, unprotected.dirty_rects);
+
+            let protected = FakeVirtualPresentObjects::new(dirty_rects, true);
+            let outcome = unsafe {
+                collect_present_inputs(
+                    &protected.profile(),
+                    protected.overlay_swap_chain_address(),
+                    0,
+                )
+            }
+            .expect("protected virtual-base outcome should not be an error");
+            assert_eq!(outcome, PresentInputOutcome::HardwareProtected);
         }
 
         #[test]
@@ -560,6 +556,49 @@ mod tests {
                 0x42
             });
             assert_eq!(forwarded, 0x42);
+        }
+
+        #[test]
+        fn skips_lut_when_hardware_protected() {
+            let _guard = HOOK_GLOBAL_TEST_LOCK
+                .lock()
+                .expect("test mutex should lock");
+            initialize_test_state();
+            let fake = FakePresentObjects::new(
+                vec![DirtyRect {
+                    left: 10,
+                    top: 20,
+                    right: 64,
+                    bottom: 96,
+                }],
+                true,
+            );
+            crate::d3d11::set_fake_render_result(Ok(sample_outcome(
+                Some(DirtyRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                }),
+                PresentDrawStatus::Applied { full_redraw: true },
+            )));
+
+            let original_rect_vec = fake.rect_vec_address();
+            let mut forwarded_rect_vec = None;
+            let status = present(
+                0x1234,
+                fake.overlay_swap_chain_address(),
+                original_rect_vec,
+                |rect_vec| {
+                    forwarded_rect_vec = Some(rect_vec);
+                    0x42
+                },
+            );
+
+            assert_eq!(status, 0x42);
+            assert_eq!(forwarded_rect_vec, Some(original_rect_vec));
+            assert!(crate::d3d11::fake_render_present_lut_call().is_none());
+            crate::d3d11::reset_fake_render_result();
         }
 
         #[test]
