@@ -361,21 +361,10 @@ mod tests {
     use crate::dwmcore::DwmcoreVersionError;
     use crate::resolver::{HookResolveError, SignatureResolutionReport};
     use crate::state::{self, HOOK_GLOBAL_TEST_LOCK};
-    use dwm_lut_profile::{
-        DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError, SUPPORTED_BUILDS,
-    };
+    use crate::test_support::representative_hook_profile as test_profile;
+    use dwm_lut_profile::{DwmcoreVersion, HookProfile, HookTarget, ProfileSelectError};
 
     use super::HookError;
-
-    fn test_profile() -> HookProfile {
-        (SUPPORTED_BUILDS
-            .first()
-            .expect("SUPPORTED_BUILDS is non-empty")
-            .profiles
-            .last()
-            .expect("supported build must include profiles")
-            .profile)()
-    }
 
     fn test_payload() -> HookPayload {
         HookPayload {

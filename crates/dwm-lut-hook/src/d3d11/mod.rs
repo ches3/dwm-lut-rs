@@ -1,4 +1,4 @@
-use crate::dwmcore::DirtyRect;
+use crate::dwmcore::{D3D11TextureResolveError, DirtyRect};
 
 #[cfg(not(test))]
 mod context_state;
@@ -16,7 +16,6 @@ pub(crate) use plan::DXGI_FORMAT_B8G8R8A8_UNORM;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DrawPlanSkipReason {
     ZeroSize,
-    MissingMonitorIdentity,
     UnsupportedFormat,
     MissingAssignment,
     EmptyDirtyRects,
@@ -27,7 +26,6 @@ impl DrawPlanSkipReason {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::ZeroSize => "zero_size",
-            Self::MissingMonitorIdentity => "missing_monitor_identity",
             Self::UnsupportedFormat => "unsupported_format",
             Self::MissingAssignment => "missing_assignment",
             Self::EmptyDirtyRects => "empty_dirty_rects",
@@ -38,22 +36,10 @@ impl DrawPlanSkipReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) enum RenderAcquireError {
-    BackBuffer,
+    BackBuffer(D3D11TextureResolveError),
     Device,
     Context,
     Unavailable,
-}
-
-#[cfg(debug_assertions)]
-impl RenderAcquireError {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::BackBuffer => "back_buffer",
-            Self::Device => "device",
-            Self::Context => "context",
-            Self::Unavailable => "unavailable",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

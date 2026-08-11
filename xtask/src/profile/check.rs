@@ -1,21 +1,19 @@
+mod access;
+mod hooks;
+
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
 
 use comfy_table::presets::NOTHING;
 use comfy_table::{Cell, Color, Table, TableComponent};
-use dwm_lut_profile::{
-    DwmcoreVersion, FieldOffsetTarget, HookProfile, HookTarget, ProfileSelectError,
-    SignatureScanError, VtableIndexTarget, resolve_signature_rva, select_profile,
-};
+use dwm_lut_profile::{DwmcoreVersion, ProfileSelectError, select_profile};
 
+use self::access::{AccessCheckReport, build_access_check_reports};
+use self::hooks::{HookCheckReport, build_hook_check_report};
+use super::analysis::access::access_field_label;
+use super::analysis::analyze;
 use super::ensure;
-use super::extract::field_offsets::extract_field_offsets;
-use super::extract::report::{ExtractionRow, ExtractionStatus};
-use super::extract::symbols::{SymbolResolveError, resolve_function_symbol};
-use super::extract::vtable_indices::extract_vtable_indices;
-use super::pdb_publics::PdbPublics;
-use super::pe::PeImage;
 
 #[derive(Debug)]
 pub enum CheckError {
@@ -78,18 +76,17 @@ pub(super) fn run(args: Args) -> Result<(), CheckError> {
         args.yes,
     )?;
 
-    let pe = PeImage::load(&dll_path)?;
+    let analysis = analyze(&dll_path, &pdb_path)?;
     let version = DwmcoreVersion {
-        build: u32::from(pe.file_version.build),
-        revision: u32::from(pe.file_version.revision),
+        build: u32::from(analysis.pe.file_version.build),
+        revision: u32::from(analysis.pe.file_version.revision),
     };
     let selected = select_profile(version)?;
     let profile = (selected.profile)();
 
-    let pubs = PdbPublics::load(&pdb_path)?;
-    pubs.verify_against_pe(&pe.codeview)?;
-    let vtable_indices = extract_vtable_indices(&pe, &pubs);
-    let field_offsets = extract_field_offsets(&pe, &pubs);
+    let access_reports = build_access_check_reports(profile.accesses(), &analysis.accesses);
+    let hook_report =
+        build_hook_check_report(&profile, &analysis.pe, &analysis.pubs, &analysis.abis);
 
     println!();
     println!("version  10.0.{version}");
@@ -98,39 +95,42 @@ pub(super) fn run(args: Args) -> Result<(), CheckError> {
     println!("pdb      {}", pdb_path.display());
     println!();
 
-    let vtable_index_failed = print_vtable_index_table(&profile, &vtable_indices);
-    let field_offset_failed = print_field_offset_table(&profile, &field_offsets);
-    let signature_failed = print_signatures_table(&profile, &pe, &pubs);
-    mismatch_result(vtable_index_failed, field_offset_failed, signature_failed)
+    print_access_table(&access_reports);
+    println!();
+    print_hooks_table(&hook_report);
+    mismatch_result(
+        access_reports
+            .iter()
+            .map(AccessCheckReport::failed_count)
+            .sum(),
+        hook_report.aob_failed_count(),
+        hook_report.abi_failed_count(),
+    )
 }
 
 fn mismatch_result(
-    vtable_index_failed: usize,
-    field_offset_failed: usize,
-    signature_failed: usize,
+    access_failed: usize,
+    aob_failed: usize,
+    abi_failed: usize,
 ) -> Result<(), CheckError> {
     let mut failures = Vec::new();
 
-    if vtable_index_failed != 0 {
+    if access_failed != 0 {
         failures.push(format!(
-            "{vtable_index_failed} vtable {} failed",
-            if vtable_index_failed == 1 {
-                "index"
-            } else {
-                "indices"
-            }
+            "{access_failed} access field{} failed",
+            if access_failed == 1 { "" } else { "s" }
         ));
     }
-    if field_offset_failed != 0 {
+    if aob_failed != 0 {
         failures.push(format!(
-            "{field_offset_failed} field offset{} failed",
-            if field_offset_failed == 1 { "" } else { "s" }
+            "{aob_failed} aob{} failed",
+            if aob_failed == 1 { "" } else { "s" }
         ));
     }
-    if signature_failed != 0 {
+    if abi_failed != 0 {
         failures.push(format!(
-            "{signature_failed} signature{} failed",
-            if signature_failed == 1 { "" } else { "s" }
+            "{abi_failed} ABI definition{} failed",
+            if abi_failed == 1 { "" } else { "s" }
         ));
     }
 
@@ -141,184 +141,60 @@ fn mismatch_result(
     }
 }
 
-fn print_vtable_index_table(
-    profile: &HookProfile,
-    extracted: &[ExtractionRow<VtableIndexTarget>],
-) -> usize {
+fn print_access_table(reports: &[AccessCheckReport]) {
     let mut table = Table::new();
     table
         .load_preset(NOTHING)
         .set_style(TableComponent::HeaderLines, '─');
     table.set_header(vec![
-        Cell::new("Vtable index"),
+        Cell::new("Access"),
+        Cell::new("Field"),
         Cell::new("Status"),
-        Cell::new("Extracted"),
-        Cell::new("Profile"),
     ]);
 
-    let mut failed = 0usize;
-    for &target in VtableIndexTarget::ALL {
-        let profile_value = profile.vtable_index(target);
-        let row = extracted.iter().find(|row| row.target == target);
-        let (status, extracted_value) = match row {
-            Some(row) if row.status == ExtractionStatus::Ok && row.value == Some(profile_value) => {
-                (status_cell("ok", Color::Green), profile_value.to_string())
-            }
-            Some(row) if row.status == ExtractionStatus::Ok => {
-                failed += 1;
-                (
-                    status_cell("mismatch", Color::Red),
-                    row.value
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "-".into()),
-                )
-            }
-            Some(row) => {
-                failed += 1;
-                (status_cell(row.status.as_str(), Color::Red), "-".into())
-            }
-            None => {
-                failed += 1;
-                (status_cell("missing", Color::Red), "-".into())
-            }
+    for report in reports {
+        for (index, row) in report.rows.iter().enumerate() {
+            let status_color = if row.status.is_ok() {
+                Color::Green
+            } else {
+                Color::Red
+            };
+            table.add_row(vec![
+                Cell::new(if index == 0 {
+                    report.target.label()
+                } else {
+                    ""
+                }),
+                Cell::new(access_field_label(row.field)),
+                status_cell(row.status.as_str(), status_color),
+            ]);
+        }
+    }
+
+    println!("{table}");
+}
+
+fn print_hooks_table(report: &HookCheckReport) {
+    let mut table = Table::new();
+    table
+        .load_preset(NOTHING)
+        .set_style(TableComponent::HeaderLines, '─');
+    table.set_header(vec![Cell::new("Hook"), Cell::new("Status")]);
+
+    for row in &report.rows {
+        let status_color = if row.is_ok() {
+            Color::Green
+        } else {
+            Color::Red
         };
 
         table.add_row(vec![
-            Cell::new(target.label()),
-            status,
-            Cell::new(extracted_value),
-            Cell::new(profile_value),
+            Cell::new(row.target.label()),
+            status_cell(row.status_label(), status_color),
         ]);
     }
 
     println!("{table}");
-    println!();
-    failed
-}
-
-fn print_field_offset_table(
-    profile: &HookProfile,
-    extracted: &[ExtractionRow<FieldOffsetTarget>],
-) -> usize {
-    let mut table = Table::new();
-    table
-        .load_preset(NOTHING)
-        .set_style(TableComponent::HeaderLines, '─');
-    table.set_header(vec![
-        Cell::new("Field offset"),
-        Cell::new("Status"),
-        Cell::new("Extracted"),
-        Cell::new("Profile"),
-    ]);
-
-    let mut failed = 0usize;
-    for &target in FieldOffsetTarget::ALL {
-        let profile_value = profile.field_offset(target);
-        let row = extracted.iter().find(|row| row.target == target);
-        let (status, extracted_value) = match row {
-            Some(row) if row.status == ExtractionStatus::Ok && row.value == Some(profile_value) => {
-                (
-                    status_cell("ok", Color::Green),
-                    format!("{profile_value:#x}"),
-                )
-            }
-            Some(row) if row.status == ExtractionStatus::Ok => {
-                failed += 1;
-                (
-                    status_cell("mismatch", Color::Red),
-                    row.value
-                        .map(|value| format!("{value:#x}"))
-                        .unwrap_or_else(|| "-".into()),
-                )
-            }
-            Some(row) => {
-                failed += 1;
-                (status_cell(row.status.as_str(), Color::Red), "-".into())
-            }
-            None => {
-                failed += 1;
-                (status_cell("missing", Color::Red), "-".into())
-            }
-        };
-
-        table.add_row(vec![
-            Cell::new(target.label()),
-            status,
-            Cell::new(extracted_value),
-            Cell::new(format!("{profile_value:#x}")),
-        ]);
-    }
-
-    println!("{table}");
-    println!();
-    failed
-}
-
-fn print_signatures_table(profile: &HookProfile, pe: &PeImage, pubs: &PdbPublics) -> usize {
-    let mut table = Table::new();
-    table
-        .load_preset(NOTHING)
-        .set_style(TableComponent::HeaderLines, '─');
-    table.set_header(vec![
-        Cell::new("Signature"),
-        Cell::new("Status"),
-        Cell::new("RVA"),
-    ]);
-
-    let mut signature_failed = 0usize;
-
-    for signature in profile.signatures {
-        let label = signature.target.label();
-
-        let (status, rva) = match resolve_signature_rva(&pe.image, signature) {
-            Ok(resolved) => match expected_symbol_rva(signature.target, pe, pubs) {
-                Ok(symbol_rva) if symbol_rva as usize == resolved.rva.0 => (
-                    status_cell("ok", Color::Green),
-                    format!("{:#x}", resolved.rva.0),
-                ),
-                Ok(_) => {
-                    signature_failed += 1;
-                    (
-                        status_cell("symbol_mismatch", Color::Red),
-                        format!("{:#x}", resolved.rva.0),
-                    )
-                }
-                Err(error) => {
-                    signature_failed += 1;
-                    let status = if error == SymbolResolveError::Ambiguous {
-                        "ambiguous_symbol"
-                    } else {
-                        "no_symbol"
-                    };
-                    (
-                        status_cell(status, Color::Red),
-                        format!("{:#x}", resolved.rva.0),
-                    )
-                }
-            },
-            Err(SignatureScanError::NotFound { .. }) => {
-                signature_failed += 1;
-                (status_cell("not_found", Color::Red), "-".into())
-            }
-            Err(SignatureScanError::Ambiguous { .. }) => {
-                signature_failed += 1;
-                (status_cell("ambiguous", Color::Red), "-".into())
-            }
-        };
-
-        table.add_row(vec![Cell::new(label), status, Cell::new(rva)]);
-    }
-
-    println!("{table}");
-    signature_failed
-}
-
-fn expected_symbol_rva(
-    target: HookTarget,
-    pe: &PeImage,
-    pubs: &PdbPublics,
-) -> Result<u32, SymbolResolveError> {
-    resolve_function_symbol(target, pubs, pe).map(|symbol| symbol.rva)
 }
 
 fn status_cell(text: &str, color: Color) -> Cell {
@@ -344,31 +220,31 @@ mod tests {
     }
 
     #[test]
-    fn vtable_index_failures_are_mismatch() {
+    fn access_field_failures_are_mismatch() {
         let error = mismatch_result(2, 0, 0).expect_err("mismatch");
         assert!(matches!(
             error,
-            CheckError::Mismatch(message) if message == "2 vtable indices failed"
+            CheckError::Mismatch(message) if message == "2 access fields failed"
         ));
     }
 
     #[test]
-    fn signature_failures_are_mismatch() {
-        let error = mismatch_result(0, 0, 1).expect_err("mismatch");
+    fn aob_failures_are_mismatch() {
+        let error = mismatch_result(0, 1, 0).expect_err("mismatch");
         assert!(matches!(
             error,
-            CheckError::Mismatch(message) if message == "1 signature failed"
+            CheckError::Mismatch(message) if message == "1 aob failed"
         ));
     }
 
     #[test]
     fn combined_failures_are_mismatch() {
-        let error = mismatch_result(1, 2, 3).expect_err("mismatch");
+        let error = mismatch_result(2, 3, 1).expect_err("mismatch");
         assert!(matches!(
             error,
             CheckError::Mismatch(message)
                 if message
-                    == "1 vtable index failed, 2 field offsets failed, 3 signatures failed"
+                    == "2 access fields failed, 3 aobs failed, 1 ABI definition failed"
         ));
     }
 }

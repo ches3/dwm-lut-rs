@@ -12,6 +12,7 @@ dwm-lut-profile = { version = "0.1.0", path = "../crates/dwm-lut-profile", featu
 flate2 = "1.1.9"
 iced-x86 = "1.21.0"
 ico = "0.5.0"
+msvc-demangler = "0.11.0"
 pdb = "0.8.0"
 pelite = "0.10.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }

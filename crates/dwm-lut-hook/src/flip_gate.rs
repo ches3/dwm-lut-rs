@@ -37,19 +37,20 @@ pub(crate) fn should_block(target: HookTarget, overlay_context: usize) -> bool {
     if assignments.is_empty() {
         return false;
     }
-    let blocked =
-        dwmcore::resolve_overlay_swap_chain(overlay_context, profile.overlay_swap_chain_path())
-            .and_then(|swap_chain| {
-                dwmcore::read_monitor_identity(
-                    swap_chain,
-                    profile.overlay_swap_chain_identity_offsets(),
-                )
-            })
-            .is_some_and(|identity| {
-                assignments
-                    .iter()
-                    .any(|assignment| assignment.target.identity == identity)
-            });
+    let blocked = unsafe {
+        dwmcore::resolve_overlay_swap_chain(
+            overlay_context,
+            profile.overlay_swap_chain_from_context,
+        )
+        .and_then(|swap_chain| {
+            dwmcore::read_monitor_identity(swap_chain, profile.monitor_identity).ok()
+        })
+    }
+    .is_some_and(|identity| {
+        assignments
+            .iter()
+            .any(|assignment| assignment.target.identity == identity)
+    });
     if blocked {
         record_flip_gate_denied(target);
     }

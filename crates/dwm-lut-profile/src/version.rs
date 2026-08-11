@@ -79,58 +79,44 @@ mod tests {
     use super::{
         DwmcoreVersion, ProfileSelectError, RevisionProfile, SupportedBuild, select_profile,
     };
-    use crate::profile::{FieldOffsets, HookProfile, VtableIndices};
+    use crate::profile::{
+        D3D11ResourceAccess, HardwareProtectedAccess, HookProfile, MonitorIdentityAccess,
+        OverlaySwapChainFromContext,
+    };
 
-    const fn marked_vtable_indices(build: usize, revision: usize) -> VtableIndices {
-        VtableIndices {
-            get_physical_back_buffer: build,
-            get_d3d11_resource: revision,
-            get_overlay_swap_chain: 0,
+    const fn marked_profile(build: usize, revision: usize) -> HookProfile {
+        HookProfile {
+            hooks: &[],
+            overlay_swap_chain_from_context: OverlaySwapChainFromContext {
+                overlay_monitor_target_pointer_offset: 0,
+                get_overlay_swap_chain_vtable_index: 0,
+            },
+            d3d11_resource: D3D11ResourceAccess::PhysicalBackBuffer {
+                get_physical_back_buffer_vtable_index: build,
+                get_d3d11_resource_vtable_index: revision,
+            },
+            monitor_identity: MonitorIdentityAccess {
+                get_display_adapter_luid_vtable_index: 0,
+                get_vid_pn_target_id_vtable_index: 0,
+            },
+            hardware_protected: HardwareProtectedAccess::DirectField { offset: 0 },
         }
     }
 
-    static VTABLE_INDICES_100_10: VtableIndices = marked_vtable_indices(100, 10);
-    static VTABLE_INDICES_100_50: VtableIndices = marked_vtable_indices(100, 50);
-    static VTABLE_INDICES_200_10: VtableIndices = marked_vtable_indices(200, 10);
-    static VTABLE_INDICES_200_30: VtableIndices = marked_vtable_indices(200, 30);
-    static FIELD_OFFSETS: FieldOffsets = FieldOffsets {
-        hardware_protected: 0,
-        adapter_luid_low_part: 0,
-        adapter_luid_high_part: 0,
-        vid_pn_target_id: 0,
-        overlay_monitor_target_pointer: 0,
-    };
-
     fn profile_100_10() -> HookProfile {
-        HookProfile {
-            signatures: &[],
-            vtable_indices: &VTABLE_INDICES_100_10,
-            field_offsets: &FIELD_OFFSETS,
-        }
+        marked_profile(100, 10)
     }
 
     fn profile_100_50() -> HookProfile {
-        HookProfile {
-            signatures: &[],
-            vtable_indices: &VTABLE_INDICES_100_50,
-            field_offsets: &FIELD_OFFSETS,
-        }
+        marked_profile(100, 50)
     }
 
     fn profile_200_10() -> HookProfile {
-        HookProfile {
-            signatures: &[],
-            vtable_indices: &VTABLE_INDICES_200_10,
-            field_offsets: &FIELD_OFFSETS,
-        }
+        marked_profile(200, 10)
     }
 
     fn profile_200_30() -> HookProfile {
-        HookProfile {
-            signatures: &[],
-            vtable_indices: &VTABLE_INDICES_200_30,
-            field_offsets: &FIELD_OFFSETS,
-        }
+        marked_profile(200, 30)
     }
 
     const FIXTURE_BUILDS: &[SupportedBuild] = &[
@@ -167,16 +153,11 @@ mod tests {
         assert_eq!(selected.min_version, expected_min);
         let profile = (selected.profile)();
         assert_eq!(
-            profile
-                .d3d11_resource_path()
-                .get_physical_back_buffer_vtable_index,
-            expected_min.build as usize
-        );
-        assert_eq!(
-            profile
-                .d3d11_resource_path()
-                .get_d3d11_resource_vtable_index,
-            expected_min.revision as usize
+            profile.d3d11_resource,
+            D3D11ResourceAccess::PhysicalBackBuffer {
+                get_physical_back_buffer_vtable_index: expected_min.build as usize,
+                get_d3d11_resource_vtable_index: expected_min.revision as usize,
+            }
         );
     }
 

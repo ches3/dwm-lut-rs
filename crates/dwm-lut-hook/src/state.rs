@@ -130,13 +130,7 @@ pub fn hook_profile() -> Option<HookProfile> {
 
 #[cfg(test)]
 pub(crate) fn reset_state_for_tests() {
-    let test_profile = (dwm_lut_profile::SUPPORTED_BUILDS
-        .first()
-        .expect("SUPPORTED_BUILDS is non-empty")
-        .profiles
-        .last()
-        .expect("supported build must include profiles")
-        .profile)();
+    let test_profile = crate::test_support::representative_hook_profile();
     if PROFILE.set(test_profile).is_err() {
         assert_eq!(
             PROFILE.get().copied(),

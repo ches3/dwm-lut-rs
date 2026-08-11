@@ -191,15 +191,15 @@ pub(super) const fn keeps_device_resource(key: ResourceKey, current: ResourceKey
 
 pub(super) fn prepare_gpu_draw_plan(
     assignments: &[LutAssignment],
-    monitor_identity: Option<MonitorIdentity>,
+    monitor_identity: MonitorIdentity,
     dxgi_format: u32,
     width: u32,
     height: u32,
     dirty_rects: &[DirtyRect],
 ) -> Result<GpuDrawPlan, DrawPlanSkip> {
     let format = BackBufferFormat::from_dxgi_format(dxgi_format);
-    let matched = monitor_identity.zip(format).and_then(|(identity, format)| {
-        find_assignment(assignments, identity, format.color_mode())
+    let matched = format.and_then(|format| {
+        find_assignment(assignments, monitor_identity, format.color_mode())
             .map(|(lut_index, lut)| (format, lut_index, lut))
     });
 
@@ -210,11 +210,6 @@ pub(super) fn prepare_gpu_draw_plan(
             }
             None => DrawPlanSkip::inactive(DrawPlanSkipReason::ZeroSize),
         });
-    }
-    if monitor_identity.is_none() {
-        return Err(DrawPlanSkip::inactive(
-            DrawPlanSkipReason::MissingMonitorIdentity,
-        ));
     }
     if format.is_none() {
         return Err(DrawPlanSkip::inactive(
@@ -521,7 +516,7 @@ mod tests {
         assert!(
             prepare_gpu_draw_plan(
                 &assignments,
-                Some(test_identity()),
+                test_identity(),
                 DXGI_FORMAT_B8G8R8A8_UNORM,
                 1920,
                 1080,
@@ -531,7 +526,7 @@ mod tests {
         );
         let hdr_plan = prepare_gpu_draw_plan(
             &assignments,
-            Some(test_identity()),
+            test_identity(),
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             1920,
             1080,
@@ -548,7 +543,7 @@ mod tests {
         let assignments = test_assignments();
         let zero_size_skip = prepare_gpu_draw_plan(
             &assignments,
-            Some(test_identity()),
+            test_identity(),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             0,
             1080,
@@ -564,7 +559,7 @@ mod tests {
         unmatched_identity.target_id = unmatched_identity.target_id.saturating_add(1);
         let missing_assignment_skip = prepare_gpu_draw_plan(
             &assignments,
-            Some(unmatched_identity),
+            unmatched_identity,
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
             1080,
@@ -597,7 +592,7 @@ mod tests {
         let assignments = test_assignments();
         let plan = prepare_gpu_draw_plan(
             &assignments,
-            Some(test_identity()),
+            test_identity(),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
             1080,
@@ -924,7 +919,7 @@ mod tests {
         let assignments = test_assignments();
         let plan = prepare_gpu_draw_plan(
             &assignments,
-            Some(test_identity()),
+            test_identity(),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
             1080,
@@ -956,7 +951,7 @@ mod tests {
         );
         let skip = prepare_gpu_draw_plan(
             &assignments,
-            Some(test_identity()),
+            test_identity(),
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
             1080,
@@ -1021,7 +1016,7 @@ mod tests {
 
         let plan = prepare_gpu_draw_plan(
             &assignments,
-            Some(right),
+            right,
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
             1080,
@@ -1030,17 +1025,6 @@ mod tests {
         .expect("runtime monitor identity should select a plan");
 
         assert_eq!(plan.lut_index, 1);
-        assert!(
-            prepare_gpu_draw_plan(
-                &assignments,
-                None,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                1920,
-                1080,
-                &[],
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -1136,7 +1120,7 @@ mod tests {
         )]));
         let plan = prepare_gpu_draw_plan(
             &assignments,
-            Some(identity),
+            identity,
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
             1080,
@@ -1162,7 +1146,7 @@ mod tests {
         )]));
         let plan = prepare_gpu_draw_plan(
             &assignments,
-            Some(identity),
+            identity,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             1920,
             1080,
@@ -1183,7 +1167,7 @@ mod tests {
             crate::state::assignments_from_payload(&payload([(identity, ColorMode::Sdr, lut)]));
         let plan = prepare_gpu_draw_plan(
             &assignments,
-            Some(identity),
+            identity,
             DXGI_FORMAT_B8G8R8A8_UNORM,
             1920,
             1080,

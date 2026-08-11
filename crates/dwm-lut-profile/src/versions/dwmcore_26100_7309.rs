@@ -1,4 +1,7 @@
-use crate::profile::{AobToken, FieldOffsets, HookProfile, HookSignature, VtableIndices};
+use crate::profile::{
+    AbiArgument, AbiClass, AobToken, D3D11ResourceAccess, HardwareProtectedAccess, HookEntry,
+    HookProfile, MonitorIdentityAccess, OverlaySwapChainFromContext,
+};
 use crate::target::HookTarget;
 use AobToken::{Exact, Wildcard};
 
@@ -104,39 +107,46 @@ const IS_CANDIDATE_OVERLAY_COMPATIBLE_AOB: &[AobToken] = &[
     Exact(0x01),
 ];
 
-const SIGNATURES: &[HookSignature] = &[
-    HookSignature {
+const HOOKS: &[HookEntry] = &[
+    HookEntry {
         target: HookTarget::Present,
+        arguments: &[
+            AbiArgument::OverlaySwapChain,
+            AbiArgument::Wildcard(AbiClass::Integer),
+            AbiArgument::DirtyRects,
+            AbiArgument::Wildcard(AbiClass::Integer),
+            AbiArgument::Wildcard(AbiClass::Integer),
+            AbiArgument::Wildcard(AbiClass::Integer),
+        ],
         aob: PRESENT_AOB,
     },
-    HookSignature {
+    HookEntry {
         target: HookTarget::IsCandidateDirectFlipCompatible,
+        arguments: &[AbiArgument::Wildcard(AbiClass::Integer); 5],
         aob: IS_CANDIDATE_DIRECT_FLIP_COMPATIBLE_AOB,
     },
-    HookSignature {
+    HookEntry {
         target: HookTarget::IsCandidateOverlayCompatible,
+        arguments: &[AbiArgument::Wildcard(AbiClass::Integer); 8],
         aob: IS_CANDIDATE_OVERLAY_COMPATIBLE_AOB,
     },
 ];
 
-static VTABLE_INDICES: VtableIndices = VtableIndices {
-    get_physical_back_buffer: 24,
-    get_d3d11_resource: 19,
-    get_overlay_swap_chain: 35,
-};
-
-static FIELD_OFFSETS: FieldOffsets = FieldOffsets {
-    hardware_protected: 0x64,
-    adapter_luid_low_part: 0x34,
-    adapter_luid_high_part: 0x38,
-    vid_pn_target_id: 0x3c,
-    overlay_monitor_target_pointer: 0,
-};
-
 pub(super) fn profile() -> HookProfile {
     HookProfile {
-        signatures: SIGNATURES,
-        vtable_indices: &VTABLE_INDICES,
-        field_offsets: &FIELD_OFFSETS,
+        hooks: HOOKS,
+        overlay_swap_chain_from_context: OverlaySwapChainFromContext {
+            overlay_monitor_target_pointer_offset: 0,
+            get_overlay_swap_chain_vtable_index: 35,
+        },
+        d3d11_resource: D3D11ResourceAccess::PhysicalBackBuffer {
+            get_physical_back_buffer_vtable_index: 24,
+            get_d3d11_resource_vtable_index: 19,
+        },
+        monitor_identity: MonitorIdentityAccess {
+            get_display_adapter_luid_vtable_index: 27,
+            get_vid_pn_target_id_vtable_index: 29,
+        },
+        hardware_protected: HardwareProtectedAccess::DirectField { offset: 0x64 },
     }
 }

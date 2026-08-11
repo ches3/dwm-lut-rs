@@ -1,3 +1,5 @@
+#[cfg(feature = "xtask")]
+mod access;
 mod profile;
 mod scan;
 mod target;
@@ -5,8 +7,9 @@ mod version;
 mod versions;
 
 pub use profile::{
-    AobToken, D3D11ResourcePath, FieldOffsets, HookProfile, HookSignature,
-    OverlaySwapChainIdentityOffsets, OverlaySwapChainPath, VtableIndices,
+    AbiArgument, AbiClass, AbiObjectType, AbiType, AobToken, D3D11ResourceAccess,
+    DeviceResourceVirtualBaseAccess, HardwareProtectedAccess, HookEntry, HookProfile,
+    MonitorIdentityAccess, OverlaySwapChainFromContext,
 };
 pub use scan::{
     AobMatch, ResolvedRva, Rva, SignatureScanError, SignatureScanReport, SkippedSignature,
@@ -15,8 +18,16 @@ pub use scan::{
 pub use target::HookTarget;
 
 #[cfg(feature = "xtask")]
+pub use access::{
+    AccessExtractSpec, AccessFieldTarget, AccessMethodExtractSpec, ProfileAccess,
+    ProfileAccessField, ProfileAccessTarget, VirtualBaseComponent,
+};
+#[cfg(feature = "xtask")]
 pub use target::{
-    FieldOffsetExtractSpec, FieldOffsetTarget, VtableIndexExtractSpec, VtableIndexTarget,
+    AbiReturnType, DirectFieldWidth, FieldOffsetExtractSpec, FieldOffsetTarget, HookExtractSpec,
+    ParameterSpec, VirtualBaseClassExtractSpec, VirtualBaseExtractSpec, VirtualBaseTarget,
+    VirtualMethodExtractSpec, VirtualMethodReturnType, VirtualMethodTarget, VtableExtractSpec,
+    VtableView,
 };
 pub use version::{
     DWMCORE_MODULE_NAME, DwmcoreVersion, ProfileSelectError, RevisionProfile, SelectedProfile,

@@ -1,85 +1,21 @@
 use comfy_table::presets::NOTHING;
 use comfy_table::{Cell, Color, Table, TableComponent};
-use dwm_lut_profile::{FieldOffsetTarget, HookTarget, VtableIndexTarget};
+use dwm_lut_profile::HookTarget;
+
+use super::super::analysis::abi::{
+    AbiExtractionRow, AbiExtractionStatus, ExtractedFunctionAbi, classify_hook_argument,
+};
+use super::super::analysis::access::{AccessReport, AccessStatus, access_field_label};
+use super::super::analysis::model::{AobReport, AobStatus};
 
 #[derive(Debug, Clone)]
 pub struct InspectReport {
     pub file_version: String,
     pub dll: String,
     pub pdb: String,
-    pub vtable_indices: Vec<ExtractionRow<VtableIndexTarget>>,
-    pub field_offsets: Vec<ExtractionRow<FieldOffsetTarget>>,
-    pub signatures: Vec<SignatureReport>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignatureStatus {
-    Ok,
-    NoSymbol,
-    IcfStub,
-    AmbiguousSymbol,
-    UniquifyFailed,
-}
-
-impl SignatureStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Ok => "ok",
-            Self::NoSymbol => "no_symbol",
-            Self::IcfStub => "icf_stub",
-            Self::AmbiguousSymbol => "ambiguous_symbol",
-            Self::UniquifyFailed => "uniquify_failed",
-        }
-    }
-
-    fn is_ok(self) -> bool {
-        matches!(self, Self::Ok)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SignatureReport {
-    pub target: String,
-    pub hook_target: HookTarget,
-    pub status: SignatureStatus,
-    pub rva: Option<String>,
-    pub aob: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExtractionStatus {
-    Ok,
-    NoSymbol,
-    NoVftable,
-    NoDisp,
-    Ambiguous,
-}
-
-impl ExtractionStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Ok => "ok",
-            Self::NoSymbol => "no_symbol",
-            Self::NoVftable => "no_vftable",
-            Self::NoDisp => "no_disp",
-            Self::Ambiguous => "ambiguous",
-        }
-    }
-
-    fn is_ok(self) -> bool {
-        matches!(self, Self::Ok)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ExtractionRow<T> {
-    pub target: T,
-    pub status: ExtractionStatus,
-    pub value: Option<usize>,
-}
-
-pub fn format_rva(rva: u32) -> String {
-    format!("{rva:#x}")
+    pub accesses: Vec<AccessReport>,
+    pub aobs: Vec<AobReport>,
+    pub abis: Vec<AbiExtractionRow>,
 }
 
 const AOB_BYTES_PER_LINE: usize = 16;
@@ -91,97 +27,85 @@ pub fn print_report(report: &InspectReport) {
     println!("pdb      {}", report.pdb);
     println!();
 
-    let mut vtable_index_table = Table::new();
-    vtable_index_table
-        .load_preset(NOTHING)
-        .set_style(TableComponent::HeaderLines, '─');
-    vtable_index_table.set_header(vec![
-        Cell::new("Vtable index"),
-        Cell::new("Status"),
-        Cell::new("Value"),
-    ]);
-    for row in &report.vtable_indices {
-        let value = row
-            .value
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".into());
-        vtable_index_table.add_row(vec![
-            Cell::new(row.target.label()),
-            extraction_status_cell(row.status),
-            Cell::new(value),
-        ]);
-    }
-    println!("{vtable_index_table}");
+    print_access_table(&report.accesses);
     println!();
+    print_hooks(report);
+}
 
-    let mut field_offset_table = Table::new();
-    field_offset_table
-        .load_preset(NOTHING)
-        .set_style(TableComponent::HeaderLines, '─');
-    field_offset_table.set_header(vec![
-        Cell::new("Field offset"),
-        Cell::new("Status"),
-        Cell::new("Value"),
-    ]);
-    for row in &report.field_offsets {
-        let value = row
-            .value
-            .map(|value| format!("{value:#x}"))
-            .unwrap_or_else(|| "-".into());
-        field_offset_table.add_row(vec![
-            Cell::new(row.target.label()),
-            extraction_status_cell(row.status),
-            Cell::new(value),
-        ]);
-    }
-    println!("{field_offset_table}");
-    println!();
+fn print_hooks(report: &InspectReport) {
+    println!("hooks");
+    push_section_rule_stdout();
 
-    let mut table = Table::new();
-    table
-        .load_preset(NOTHING)
-        .set_style(TableComponent::HeaderLines, '─');
-    table.set_header(vec![
-        Cell::new("Signature"),
-        Cell::new("Status"),
-        Cell::new("Required"),
-        Cell::new("RVA"),
-    ]);
+    for row in &report.aobs {
+        let abi_row = report.abis.iter().find(|abi| abi.target == row.hook_target);
+        let abi_status = abi_row.map(|abi| abi.status);
+        let arguments = abi_row.map_or_else(
+            || "-".to_string(),
+            |abi_row| {
+                abi_row.abi.as_ref().map_or_else(
+                    || abi_row.detail.clone().unwrap_or_else(|| "-".into()),
+                    |abi| format_hook_arguments(row.hook_target, abi),
+                )
+            },
+        );
+        let status = format_hook_status(row.status, abi_status, row.hook_target.is_required_hook());
 
-    for signature in &report.signatures {
-        let required = signature.hook_target.is_required_signature();
-        let required_label = if required { "yes" } else { "no" };
-        table.add_row(vec![
-            Cell::new(&signature.target),
-            status_cell(signature.status, required),
-            Cell::new(required_label),
-            Cell::new(signature.rva.as_deref().unwrap_or("-")),
-        ]);
-    }
-
-    println!("{table}");
-
-    let aob_signatures: Vec<&SignatureReport> = report
-        .signatures
-        .iter()
-        .filter(|signature| signature.aob.is_some())
-        .collect();
-    if !aob_signatures.is_empty() {
         println!();
-        println!("aob");
-        push_section_rule_stdout();
-        for signature in aob_signatures {
-            let aob = signature.aob.as_deref().expect("filtered to Some");
-            println!();
-            println!("[{}]", signature.target);
+        println!("[{}]", row.target);
+        println!("  status  {status}");
+        println!("  arguments");
+        println!("    {arguments}");
+        if let Some(aob) = row.aob.as_deref() {
+            println!("  aob");
             for line in wrap_aob(aob, AOB_BYTES_PER_LINE) {
-                println!("  {line}");
+                println!("    {line}");
             }
         }
     }
 }
 
-fn extraction_status_cell(status: ExtractionStatus) -> Cell {
+fn format_hook_arguments(target: HookTarget, abi: &ExtractedFunctionAbi) -> String {
+    abi.arguments
+        .iter()
+        .map(|argument| match classify_hook_argument(target, argument) {
+            Some(role) => role.extract_label(),
+            None => argument.display(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn print_access_table(accesses: &[AccessReport]) {
+    let mut table = Table::new();
+    table
+        .load_preset(NOTHING)
+        .set_style(TableComponent::HeaderLines, '─');
+    table.set_header(vec![
+        Cell::new("Access"),
+        Cell::new("Field"),
+        Cell::new("Status"),
+        Cell::new("Value"),
+    ]);
+
+    for access in accesses {
+        for (index, row) in access.result.rows().iter().enumerate() {
+            table.add_row(vec![
+                Cell::new(if index == 0 {
+                    access.target.label()
+                } else {
+                    ""
+                }),
+                Cell::new(access_field_label(row.field)),
+                access_status_cell(row.status),
+                Cell::new(row.value.as_deref().unwrap_or("-")),
+            ]);
+        }
+    }
+
+    println!("{table}");
+}
+
+fn access_status_cell(status: AccessStatus) -> Cell {
     let cell = Cell::new(status.as_str());
     if !stdout_supports_color() {
         return cell;
@@ -193,18 +117,27 @@ fn extraction_status_cell(status: ExtractionStatus) -> Cell {
     }
 }
 
-fn status_cell(status: SignatureStatus, required: bool) -> Cell {
-    let cell = Cell::new(status.as_str());
+fn hook_status_label(aob: AobStatus, abi: Option<AbiExtractionStatus>) -> &'static str {
+    if !aob.is_ok() {
+        return aob.as_str();
+    }
+    abi.map_or("missing", AbiExtractionStatus::as_str)
+}
+
+fn format_hook_status(aob: AobStatus, abi: Option<AbiExtractionStatus>, required: bool) -> String {
+    let label = hook_status_label(aob, abi);
     if !stdout_supports_color() {
-        return cell;
+        return label.to_string();
     }
-    if status.is_ok() {
-        cell.fg(Color::Green)
+    let ok = aob.is_ok() && abi == Some(AbiExtractionStatus::Ok);
+    let code = if ok {
+        32
     } else if required {
-        cell.fg(Color::Red)
+        31
     } else {
-        cell.fg(Color::Yellow)
-    }
+        33
+    };
+    format!("\x1b[{code}m{label}\x1b[0m")
 }
 
 fn stdout_supports_color() -> bool {

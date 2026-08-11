@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 #[cfg(debug_assertions)]
 use std::collections::BTreeSet;
-use std::ffi::c_void;
-use std::mem::{size_of, transmute_copy};
-use std::ptr;
+use std::mem::size_of;
 use std::sync::LazyLock;
 
 use parking_lot::{Mutex, MutexGuard};
@@ -34,7 +32,7 @@ use super::{
 use crate::dwmcore::DirtyRect;
 use crate::state::LutAssignment;
 use dwm_lut_payload::MonitorIdentity;
-use dwm_lut_profile::D3D11ResourcePath;
+use dwm_lut_profile::D3D11ResourceAccess;
 
 static RENDERER: LazyLock<Mutex<D3D11Renderer>> =
     LazyLock::new(|| Mutex::new(D3D11Renderer::new()));
@@ -55,8 +53,8 @@ struct D3D11Renderer {
 #[derive(Clone, Copy)]
 struct PresentRenderContext {
     overlay_swap_chain: usize,
-    d3d11_resource_path: D3D11ResourcePath,
-    monitor_identity: Option<MonitorIdentity>,
+    d3d11_resource: D3D11ResourceAccess,
+    monitor_identity: MonitorIdentity,
 }
 
 #[derive(Clone, Copy)]
@@ -83,13 +81,13 @@ impl D3D11Renderer {
         dirty_rects: &[DirtyRect],
         assignments: &[LutAssignment],
     ) -> Result<PresentLutOutcome, RenderAcquireError> {
-        let back_buffer = (unsafe {
-            self.overlay_swap_chain_to_back_buffer(
+        let back_buffer = unsafe {
+            crate::dwmcore::resolve_d3d11_texture2d(
                 present_context.overlay_swap_chain,
-                present_context.d3d11_resource_path,
+                present_context.d3d11_resource,
             )
-        })
-        .ok_or(RenderAcquireError::BackBuffer)?;
+        }
+        .map_err(RenderAcquireError::BackBuffer)?;
 
         let device =
             (unsafe { back_buffer.GetDevice() }).map_err(|_| RenderAcquireError::Device)?;
@@ -137,18 +135,6 @@ impl D3D11Renderer {
             draw_plan,
             back_buffer_id,
         ))
-    }
-
-    unsafe fn overlay_swap_chain_to_back_buffer(
-        &mut self,
-        overlay_swap_chain: usize,
-        d3d11_resource_path: D3D11ResourcePath,
-    ) -> Option<ID3D11Texture2D> {
-        let resource =
-            crate::dwmcore::resolve_d3d11_resource(overlay_swap_chain, d3d11_resource_path)?;
-        let texture = microseh::try_seh(|| unsafe { query_interface_texture2d(resource) })
-            .unwrap_or_default()?;
-        Some(unsafe { ID3D11Texture2D::from_raw(texture) })
     }
 
     fn render_with_device(
@@ -302,38 +288,6 @@ impl D3D11Renderer {
             }
         }
     }
-}
-
-const IUNKNOWN_QUERY_INTERFACE: usize = 0;
-
-unsafe fn query_interface_texture2d(resource: usize) -> Option<*mut c_void> {
-    type QueryInterface =
-        unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> i32;
-
-    if resource == 0 {
-        return None;
-    }
-
-    let vtable = unsafe { (resource as *const usize).read_unaligned() };
-    if vtable == 0 {
-        return None;
-    }
-    let method_offset = IUNKNOWN_QUERY_INTERFACE
-        .checked_mul(size_of::<usize>())
-        .and_then(|offset| vtable.checked_add(offset))?;
-    let method = unsafe { (method_offset as *const usize).read_unaligned() };
-    if method == 0 {
-        return None;
-    }
-    let query_interface: QueryInterface = unsafe { transmute_copy(&method) };
-
-    let mut texture = ptr::null_mut();
-    let hr =
-        unsafe { query_interface(resource as *mut c_void, &ID3D11Texture2D::IID, &mut texture) };
-    if hr < 0 || texture.is_null() {
-        return None;
-    }
-    Some(texture)
 }
 
 fn private_data_back_buffer_id(back_buffer: &ID3D11Texture2D) -> Result<u128, &'static str> {
@@ -640,8 +594,8 @@ impl RendererGuard {
     pub(crate) unsafe fn render_present_lut(
         &mut self,
         overlay_swap_chain: usize,
-        d3d11_resource_path: D3D11ResourcePath,
-        monitor_identity: Option<MonitorIdentity>,
+        d3d11_resource: D3D11ResourceAccess,
+        monitor_identity: MonitorIdentity,
         dirty_rects: &[DirtyRect],
         assignments: &[LutAssignment],
     ) -> Result<PresentLutOutcome, RenderAcquireError> {
@@ -649,7 +603,7 @@ impl RendererGuard {
             self.renderer.render_present_lut(
                 PresentRenderContext {
                     overlay_swap_chain,
-                    d3d11_resource_path,
+                    d3d11_resource,
                     monitor_identity,
                 },
                 dirty_rects,

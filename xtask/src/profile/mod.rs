@@ -1,3 +1,4 @@
+mod analysis;
 mod check;
 mod ensure;
 mod extract;

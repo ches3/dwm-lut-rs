@@ -12,16 +12,6 @@ pub(crate) enum PresentLutAcquireFailReason {
     Acquire(RenderAcquireError),
 }
 
-impl PresentLutAcquireFailReason {
-    #[cfg(debug_assertions)]
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::LockMiss => "lock_miss",
-            Self::Acquire(error) => error.as_str(),
-        }
-    }
-}
-
 impl From<RenderAcquireError> for PresentLutAcquireFailReason {
     fn from(value: RenderAcquireError) -> Self {
         Self::Acquire(value)
@@ -46,31 +36,31 @@ pub(crate) fn present_input_collect_error(
 
 pub(crate) fn present_lut_acquire_failed(
     overlay_swap_chain: usize,
-    reason: PresentLutAcquireFailReason,
+    error: PresentLutAcquireFailReason,
 ) {
     #[cfg(debug_assertions)]
     {
         super::write(format_args!(
-            "event=present_lut_acquire_failed overlay_swap_chain=0x{overlay_swap_chain:x} reason={}",
-            reason.as_str()
+            "event=present_lut_acquire_failed overlay_swap_chain=0x{overlay_swap_chain:x} error={error:?}"
         ));
     }
     #[cfg(not(debug_assertions))]
-    let _ = (overlay_swap_chain, reason);
+    let _ = (overlay_swap_chain, error);
 }
 
 pub(crate) fn present_lut_frame(
     overlay_swap_chain: usize,
     hardware_protected: bool,
-    monitor_identity: Option<MonitorIdentity>,
+    monitor_identity: MonitorIdentity,
     dirty_rects: &[DirtyRect],
     outcome: PresentLutOutcome,
 ) {
     #[cfg(debug_assertions)]
     {
-        let monitor_identity = monitor_identity
-            .map(|identity| format!("{}:{}", identity.adapter_luid, identity.target_id))
-            .unwrap_or_else(|| "none".to_owned());
+        let monitor_identity = format!(
+            "{}:{}",
+            monitor_identity.adapter_luid, monitor_identity.target_id
+        );
         super::write(format_args!(
             "event=present_lut_frame overlay_swap_chain=0x{:x} applied={} draw={} lut_active={} dxgi_format={:?} width={:?} height={:?} lut_index={:?} back_buffer_id={} dirty_rects={:?} present_dirty_rect={:?} monitor_identity={} hardware_protected={}",
             overlay_swap_chain,

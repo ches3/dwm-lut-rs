@@ -6,6 +6,9 @@ A Rust implementation based on [ledoge/dwm_lut](https://github.com/ledoge/dwm_lu
 
 ## Supported Versions
 
+- Windows 11 21H2 (Build 22000)
+- Windows 11 22H2 (Build 22621)
+- Windows 11 23H2 (Build 22631)
 - Windows 11 24H2 (Build 26100)
 - Windows 11 25H2 (Build 26200)
 

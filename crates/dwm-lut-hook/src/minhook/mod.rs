@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 mod detours;
 
-use detours::{detour_for_target, original_slot_for_target};
+use detours::{configure_present_bindings, detour_for_entry, original_slot_for_target};
 
 use crate::resolver::{ResolvedFunctionVa, Va};
 use dwm_lut_profile::HookTarget;
@@ -16,6 +16,7 @@ pub type MhStatus = i32;
 pub const MH_OK: MhStatus = 0;
 pub const MH_ERROR_ENABLED: MhStatus = 5;
 pub const MH_ERROR_DISABLED: MhStatus = 6;
+const MH_ERROR_UNSUPPORTED_ABI: MhStatus = -1_000;
 
 pub type MhInitializeApi = unsafe extern "system" fn() -> MhStatus;
 pub type MhUninitializeApi = unsafe extern "system" fn() -> MhStatus;
@@ -47,6 +48,12 @@ pub struct MinHookError {
 
 impl std::fmt::Display for MinHookError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.status == MH_ERROR_UNSUPPORTED_ABI {
+            let MinHookOperation::CreateHook(target) = self.operation else {
+                unreachable!("unsupported ABI is only reported while creating a hook");
+            };
+            return write!(f, "{} has an unsupported hook ABI", target.label());
+        }
         write!(
             f,
             "{:?} failed with MinHook status {}",
@@ -125,7 +132,17 @@ fn create_hook(
     target: &ResolvedFunctionVa,
     apis: MinHookApis,
 ) -> Result<RegisteredHook, MinHookError> {
-    let detour = detour_for_target(target.target());
+    let entry = target.entry();
+    let unsupported_abi = || {
+        MinHookError::new(
+            MinHookOperation::CreateHook(target.target()),
+            MH_ERROR_UNSUPPORTED_ABI,
+        )
+    };
+    let detour = detour_for_entry(entry).ok_or_else(unsupported_abi)?;
+    if target.target() == HookTarget::Present {
+        configure_present_bindings(entry).ok_or_else(unsupported_abi)?;
+    }
     let original_slot = original_slot_for_target(target.target());
     let target_ptr = target.va().0 as *mut c_void;
     let status = unsafe { (apis.create_hook)(target_ptr, detour, original_slot) };
@@ -412,6 +429,7 @@ mod tests {
     use crate::resolver::ResolvedFunctionVa;
     use crate::resolver::Va;
     use crate::state::HOOK_GLOBAL_TEST_LOCK as CONTROLLED_TEST_LOCK;
+    use crate::test_support::representative_hook_profile as test_profile;
     use dwm_lut_profile::HookTarget;
 
     use super::{
@@ -421,9 +439,18 @@ mod tests {
     };
 
     fn targets(entries: &[(HookTarget, usize)]) -> Vec<ResolvedFunctionVa> {
+        let profile = test_profile();
         entries
             .iter()
-            .map(|(target, va)| ResolvedFunctionVa::new(*target, Va(*va)))
+            .map(|(target, va)| {
+                let entry = profile
+                    .hooks
+                    .iter()
+                    .find(|entry| entry.target == *target)
+                    .copied()
+                    .expect("test profile must contain requested target");
+                ResolvedFunctionVa::new(entry, Va(*va))
+            })
             .collect()
     }
 

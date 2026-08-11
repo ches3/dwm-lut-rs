@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 
 use dwm_lut_profile::{
-    AobToken, DWMCORE_MODULE_NAME, HookProfile, HookTarget, Rva, SignatureScanError,
+    AobToken, DWMCORE_MODULE_NAME, HookEntry, HookProfile, HookTarget, Rva, SignatureScanError,
     SignatureScanReport, SkippedSignature, scan_profile,
 };
 
@@ -114,17 +114,21 @@ pub struct Va(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedFunctionVa {
-    target: HookTarget,
+    entry: HookEntry,
     va: Va,
 }
 
 impl ResolvedFunctionVa {
-    pub(crate) fn new(target: HookTarget, va: Va) -> Self {
-        Self { target, va }
+    pub(crate) fn new(entry: HookEntry, va: Va) -> Self {
+        Self { entry, va }
     }
 
     pub fn target(self) -> HookTarget {
-        self.target
+        self.entry.target
+    }
+
+    pub fn entry(self) -> HookEntry {
+        self.entry
     }
 
     pub fn va(self) -> Va {
@@ -144,11 +148,11 @@ impl SignatureResolutionReport {
     pub(crate) fn synthetic_for_tests(profile: &HookProfile) -> Self {
         let base_address = 0x1800_0000usize;
         let function_targets = profile
-            .signatures
+            .hooks
             .iter()
             .enumerate()
-            .map(|(index, signature)| {
-                ResolvedFunctionVa::new(signature.target, Va(base_address + 0x1000 + index * 0x100))
+            .map(|(index, entry)| {
+                ResolvedFunctionVa::new(*entry, Va(base_address + 0x1000 + index * 0x100))
             })
             .collect();
 
@@ -278,12 +282,13 @@ fn resolve_profile_from_clean_image(
     clean_image: &[u8],
 ) -> Result<SignatureResolutionReport, HookResolveError> {
     let scan = scan_profile(profile, clean_image)?;
-    let resolution = report_with_vas(module, scan)?;
+    let resolution = report_with_vas(profile, module, scan)?;
     validate_live_prologues(profile, &resolution, live_image)?;
     Ok(resolution)
 }
 
 fn report_with_vas(
+    profile: &HookProfile,
     module: LoadedModule,
     scan: SignatureScanReport,
 ) -> Result<SignatureResolutionReport, HookResolveError> {
@@ -293,7 +298,16 @@ fn report_with_vas(
 
     for hit in scan.resolved {
         let va = va_from_rva(base, hit.rva, module_name)?;
-        function_targets.push(ResolvedFunctionVa::new(hit.target, va));
+        let entry = profile
+            .hooks
+            .iter()
+            .find(|entry| entry.target == hit.target)
+            .copied()
+            .ok_or(HookResolveError::InvalidModuleImage {
+                module_name,
+                detail: "resolved target had no matching profile hook",
+            })?;
+        function_targets.push(ResolvedFunctionVa::new(entry, va));
     }
 
     Ok(SignatureResolutionReport {
@@ -318,15 +332,15 @@ fn validate_live_prologues(
     live_image: &[u8],
 ) -> Result<(), HookResolveError> {
     for target in &resolution.function_targets {
-        let signature = profile
-            .signatures
+        let entry = profile
+            .hooks
             .iter()
-            .find(|signature| signature.target == target.target())
+            .find(|entry| entry.target == target.target())
             .ok_or(HookResolveError::InvalidModuleImage {
                 module_name: resolution.module.module_name,
-                detail: "resolved target had no matching profile signature",
+                detail: "resolved target had no matching profile hook",
             })?;
-        let tokens = signature.aob;
+        let tokens = entry.aob;
         let rva = target
             .va()
             .0
@@ -494,34 +508,34 @@ mod tests {
         HookResolveError, LoadedModule, ResolvedFunctionVa, Va, resolve_profile_from_clean_image,
     };
     use dwm_lut_profile::{
-        AobToken, DWMCORE_MODULE_NAME, FieldOffsets, HookProfile, HookSignature, HookTarget,
-        SignatureScanError, VtableIndices,
+        AobToken, D3D11ResourceAccess, DWMCORE_MODULE_NAME, HardwareProtectedAccess, HookEntry,
+        HookProfile, HookTarget, MonitorIdentityAccess, OverlaySwapChainFromContext,
+        SignatureScanError,
     };
 
-    static EMPTY_VTABLE_INDICES: VtableIndices = VtableIndices {
-        get_physical_back_buffer: 0,
-        get_d3d11_resource: 0,
-        get_overlay_swap_chain: 0,
-    };
-    static EMPTY_FIELD_OFFSETS: FieldOffsets = FieldOffsets {
-        hardware_protected: 0,
-        adapter_luid_low_part: 0,
-        adapter_luid_high_part: 0,
-        vid_pn_target_id: 0,
-        overlay_monitor_target_pointer: 0,
-    };
-
-    fn test_profile(signatures: &'static [HookSignature]) -> HookProfile {
+    fn test_profile(hooks: &'static [HookEntry]) -> HookProfile {
         HookProfile {
-            signatures,
-            vtable_indices: &EMPTY_VTABLE_INDICES,
-            field_offsets: &EMPTY_FIELD_OFFSETS,
+            hooks,
+            overlay_swap_chain_from_context: OverlaySwapChainFromContext {
+                overlay_monitor_target_pointer_offset: 0,
+                get_overlay_swap_chain_vtable_index: 0,
+            },
+            d3d11_resource: D3D11ResourceAccess::PhysicalBackBuffer {
+                get_physical_back_buffer_vtable_index: 0,
+                get_d3d11_resource_vtable_index: 0,
+            },
+            monitor_identity: MonitorIdentityAccess {
+                get_display_adapter_luid_vtable_index: 0,
+                get_vid_pn_target_id_vtable_index: 0,
+            },
+            hardware_protected: HardwareProtectedAccess::DirectField { offset: 0 },
         }
     }
 
     fn prologue_test_profile() -> HookProfile {
-        test_profile(&[HookSignature {
+        test_profile(&[HookEntry {
             target: HookTarget::Present,
+            arguments: &[],
             aob: &[
                 AobToken::Exact(0x40),
                 AobToken::Exact(0x55),
@@ -584,7 +598,7 @@ mod tests {
         };
         let profile = prologue_test_profile();
         let error = resolve_profile_from_clean_image(&profile, module, &image, &image)
-            .expect_err("missing required signature");
+            .expect_err("missing required hook");
         assert!(matches!(
             error,
             HookResolveError::Scan(SignatureScanError::NotFound {
@@ -601,17 +615,19 @@ mod tests {
             base_address: 0x2000_0000,
             size: image.len(),
         };
-        const SIGNATURES: &[HookSignature] = &[
-            HookSignature {
+        const HOOKS: &[HookEntry] = &[
+            HookEntry {
                 target: HookTarget::Present,
+                arguments: &[],
                 aob: &[AobToken::Exact(0xAA)],
             },
-            HookSignature {
+            HookEntry {
                 target: HookTarget::IsCandidateOverlayCompatible,
+                arguments: &[],
                 aob: &[AobToken::Exact(0xBB)],
             },
         ];
-        let profile = test_profile(SIGNATURES);
+        let profile = test_profile(HOOKS);
 
         let report = resolve_profile_from_clean_image(&profile, module, &image, &image)
             .expect("resolution should succeed");
@@ -619,11 +635,8 @@ mod tests {
         assert_eq!(
             report.function_targets,
             vec![
-                ResolvedFunctionVa::new(HookTarget::Present, Va(module.base_address)),
-                ResolvedFunctionVa::new(
-                    HookTarget::IsCandidateOverlayCompatible,
-                    Va(module.base_address + 1),
-                ),
+                ResolvedFunctionVa::new(HOOKS[0], Va(module.base_address)),
+                ResolvedFunctionVa::new(HOOKS[1], Va(module.base_address + 1),),
             ]
         );
         assert!(report.skipped.is_empty());

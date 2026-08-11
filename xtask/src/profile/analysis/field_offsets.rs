@@ -2,7 +2,10 @@ use dwm_lut_profile::{FieldOffsetExtractSpec, FieldOffsetTarget};
 
 use iced_x86::{Decoder, DecoderOptions, Instruction, OpKind, Register};
 
-use super::report::{ExtractionRow, ExtractionStatus};
+use super::model::{ExtractionStatus, FieldOffsetExtractionRow};
+use super::symbols::{
+    ctor_symbol_prefix, parameter_type_encoding, qualified_method_symbol_prefixes,
+};
 use crate::profile::pdb_publics::PdbPublics;
 use crate::profile::pe::PeImage;
 
@@ -12,17 +15,20 @@ const GPR_COUNT: usize = 16;
 const VOLATILE_GPRS: &[usize] = &[0, 1, 2, 8, 9, 10, 11];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FieldLoad {
+    disp: usize,
+    size: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GetterOrigin {
     Unknown,
     This(usize),
-    Field(usize),
+    Field(FieldLoad),
     Output,
 }
 
-pub fn extract_field_offsets(
-    pe: &PeImage,
-    pubs: &PdbPublics,
-) -> Vec<ExtractionRow<FieldOffsetTarget>> {
+pub fn extract_field_offsets(pe: &PeImage, pubs: &PdbPublics) -> Vec<FieldOffsetExtractionRow> {
     FieldOffsetTarget::ALL
         .iter()
         .copied()
@@ -34,17 +40,19 @@ fn extract_target(
     target: FieldOffsetTarget,
     pe: &PeImage,
     pubs: &PdbPublics,
-) -> ExtractionRow<FieldOffsetTarget> {
+) -> FieldOffsetExtractionRow {
     match interpret(target.extract_spec(), pe, pubs) {
-        Ok(value) => ExtractionRow {
+        Ok((value, load_size)) => FieldOffsetExtractionRow {
             target,
             status: ExtractionStatus::Ok,
             value: Some(value),
+            load_size,
         },
-        Err(status) => ExtractionRow {
+        Err(status) => FieldOffsetExtractionRow {
             target,
             status,
             value: None,
+            load_size: None,
         },
     }
 }
@@ -53,38 +61,52 @@ fn interpret(
     spec: FieldOffsetExtractSpec,
     pe: &PeImage,
     pubs: &PdbPublics,
-) -> Result<usize, ExtractionStatus> {
+) -> Result<(usize, Option<usize>), ExtractionStatus> {
     match spec {
         FieldOffsetExtractSpec::GetterDisp {
-            symbol_prefix,
+            class_name,
+            method_names,
             derived_add,
-        } => interpret_getter_disp(symbol_prefix, derived_add, pe, pubs),
+            width: _,
+        } => {
+            let load = interpret_getter_disp(
+                &qualified_method_symbol_prefixes(class_name, method_names),
+                derived_add,
+                pe,
+                pubs,
+            )?;
+            Ok((load.disp, Some(load.size)))
+        }
         FieldOffsetExtractSpec::CtorFirstParamStore {
-            ctor_symbol_prefix,
-            first_param_type_encoding,
+            class_name,
+            first_parameter,
         } => interpret_ctor_first_param_store(
-            ctor_symbol_prefix,
-            first_param_type_encoding,
+            &ctor_symbol_prefix(class_name),
+            &parameter_type_encoding(first_parameter),
             pe,
             pubs,
-        ),
+        )
+        .map(|disp| (disp, None)),
     }
 }
 
 fn interpret_getter_disp(
-    symbol_prefix: &str,
+    symbol_prefixes: &[String],
     derived_add: Option<usize>,
     pe: &PeImage,
     pubs: &PdbPublics,
-) -> Result<usize, ExtractionStatus> {
-    let rva = unique_symbol_rva(symbol_prefix, pubs)?;
+) -> Result<FieldLoad, ExtractionStatus> {
+    let rva = unique_symbol_rva(symbol_prefixes, pubs)?;
     let bytes = pe
         .bytes_at(rva, GETTER_DISP_MAX_SCAN)
         .map_err(|_| ExtractionStatus::NoDisp)?;
-    let disp = returned_memory_disp(bytes, u64::from(rva))?;
+    let load = returned_memory_load(bytes, u64::from(rva))?;
     match derived_add {
-        Some(add) => disp.checked_add(add).ok_or(ExtractionStatus::NoDisp),
-        None => Ok(disp),
+        Some(add) => Ok(FieldLoad {
+            disp: load.disp.checked_add(add).ok_or(ExtractionStatus::NoDisp)?,
+            size: load.size,
+        }),
+        None => Ok(load),
     }
 }
 
@@ -147,13 +169,16 @@ fn ctor_has_first_param(
     params.starts_with(first_param_type_encoding)
 }
 
-fn unique_symbol_rva(symbol_prefix: &str, pubs: &PdbPublics) -> Result<u32, ExtractionStatus> {
-    unique_rva(
-        pubs.symbols
+fn unique_symbol_rva(
+    symbol_prefixes: &[String],
+    pubs: &PdbPublics,
+) -> Result<u32, ExtractionStatus> {
+    unique_rva(pubs.symbols.iter().filter_map(|symbol| {
+        symbol_prefixes
             .iter()
-            .filter(|symbol| symbol.name.starts_with(symbol_prefix))
-            .map(|symbol| symbol.rva),
-    )
+            .any(|prefix| symbol.name.starts_with(prefix.as_str()))
+            .then_some(symbol.rva)
+    }))
 }
 
 fn unique_rva(rvas: impl IntoIterator<Item = u32>) -> Result<u32, ExtractionStatus> {
@@ -168,7 +193,7 @@ fn unique_rva(rvas: impl IntoIterator<Item = u32>) -> Result<u32, ExtractionStat
     chosen.ok_or(ExtractionStatus::NoSymbol)
 }
 
-fn returned_memory_disp(bytes: &[u8], ip: u64) -> Result<usize, ExtractionStatus> {
+fn returned_memory_load(bytes: &[u8], ip: u64) -> Result<FieldLoad, ExtractionStatus> {
     let mut decoder = Decoder::with_ip(64, bytes, ip, DecoderOptions::NONE);
     let mut instruction = Instruction::default();
     let mut origins = [GetterOrigin::Unknown; GPR_COUNT];
@@ -183,16 +208,16 @@ fn returned_memory_disp(bytes: &[u8], ip: u64) -> Result<usize, ExtractionStatus
         }
         if instruction.mnemonic() == iced_x86::Mnemonic::Ret {
             return match origins[gpr64_index(Register::RAX).expect("rax")] {
-                GetterOrigin::Field(disp) => Ok(disp),
+                GetterOrigin::Field(load) => Ok(load),
                 GetterOrigin::Output => output_field.ok_or(ExtractionStatus::NoDisp),
                 GetterOrigin::Unknown | GetterOrigin::This(_) => Err(ExtractionStatus::NoDisp),
             };
         }
-        if let Some(disp) = output_store_field(&instruction, &origins) {
+        if let Some(load) = output_store_field(&instruction, &origins) {
             match output_field {
-                Some(existing) if existing != disp => return Err(ExtractionStatus::Ambiguous),
+                Some(existing) if existing != load => return Err(ExtractionStatus::Ambiguous),
                 Some(_) => {}
-                None => output_field = Some(disp),
+                None => output_field = Some(load),
             }
         }
         update_getter_origins(&instruction, &mut origins);
@@ -203,7 +228,7 @@ fn returned_memory_disp(bytes: &[u8], ip: u64) -> Result<usize, ExtractionStatus
 fn output_store_field(
     instruction: &Instruction,
     origins: &[GetterOrigin; GPR_COUNT],
-) -> Option<usize> {
+) -> Option<FieldLoad> {
     if instruction.mnemonic() != iced_x86::Mnemonic::Mov
         || instruction.op_kind(0) != OpKind::Memory
         || instruction.memory_index() != Register::None
@@ -215,7 +240,7 @@ fn output_store_field(
     let src = gpr64_index(instruction.op1_register())?;
     (origins[base] == GetterOrigin::Output).then_some(())?;
     match origins[src] {
-        GetterOrigin::Field(disp) => Some(disp),
+        GetterOrigin::Field(load) => Some(load),
         GetterOrigin::Unknown | GetterOrigin::This(_) | GetterOrigin::Output => None,
     }
 }
@@ -233,7 +258,7 @@ fn update_getter_origins(instruction: &Instruction, origins: &mut [GetterOrigin;
                     .map(|src| origins[src])
                     .unwrap_or(GetterOrigin::Unknown),
                 OpKind::Memory if instruction.memory_index() == Register::None => {
-                    this_relative_disp(instruction, origins)
+                    this_relative_field_load(instruction, origins)
                         .map(GetterOrigin::Field)
                         .unwrap_or(GetterOrigin::Unknown)
                 }
@@ -275,6 +300,15 @@ fn this_relative_disp(
     let disp = instruction.memory_displacement64() as i64;
     let total = i64::try_from(base_disp).ok()?.checked_add(disp)?;
     (0..0x400).contains(&total).then_some(total as usize)
+}
+
+fn this_relative_field_load(
+    instruction: &Instruction,
+    origins: &[GetterOrigin; GPR_COUNT],
+) -> Option<FieldLoad> {
+    let disp = this_relative_disp(instruction, origins)?;
+    let size = instruction.memory_size().size();
+    (size > 0).then_some(FieldLoad { disp, size })
 }
 
 fn instruction_destination_gpr(instruction: &Instruction) -> Option<usize> {
@@ -459,7 +493,7 @@ fn clear_volatile<T: Copy>(values: &mut [T; GPR_COUNT], cleared: T) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExtractionStatus, ctor_has_first_param, returned_memory_disp,
+        ExtractionStatus, FieldLoad, ctor_has_first_param, returned_memory_load,
         select_ctor_first_param_store_disp, this_store_from_first_param_disp, unique_rva,
     };
 
@@ -476,12 +510,33 @@ mod tests {
     #[test]
     fn getter_disp_follows_the_returned_field() {
         let direct = [0x8B, 0x51, 0x10, 0x8B, 0x41, 0x34, 0xC3];
-        assert_eq!(returned_memory_disp(&direct, 0), Ok(0x34));
+        assert_eq!(
+            returned_memory_load(&direct, 0),
+            Ok(FieldLoad {
+                disp: 0x34,
+                size: 4
+            })
+        );
 
         let output_buffer = [
             0x48, 0x8B, 0x41, 0x34, 0x48, 0x89, 0x02, 0x48, 0x8B, 0xC2, 0xC3,
         ];
-        assert_eq!(returned_memory_disp(&output_buffer, 0), Ok(0x34));
+        assert_eq!(
+            returned_memory_load(&output_buffer, 0),
+            Ok(FieldLoad {
+                disp: 0x34,
+                size: 8
+            })
+        );
+
+        let byte_field = [0x0F, 0xB6, 0x41, 0x64, 0xC3];
+        assert_eq!(
+            returned_memory_load(&byte_field, 0),
+            Ok(FieldLoad {
+                disp: 0x64,
+                size: 1
+            })
+        );
     }
 
     #[test]

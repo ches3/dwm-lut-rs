@@ -1,3 +1,5 @@
+mod dwmcore_22000_194;
+mod dwmcore_22621_169;
 mod dwmcore_26100_1;
 mod dwmcore_26100_1591;
 mod dwmcore_26100_2161;
@@ -9,43 +11,59 @@ mod dwmcore_26100_7705;
 
 use crate::version::{RevisionProfile, SupportedBuild};
 
-pub const SUPPORTED_BUILDS: &[SupportedBuild] = &[SupportedBuild {
-    build: 26100,
-    profiles: &[
-        RevisionProfile {
-            min_revision: 1,
-            profile: dwmcore_26100_1::profile,
-        },
-        RevisionProfile {
-            min_revision: 1591,
-            profile: dwmcore_26100_1591::profile,
-        },
-        RevisionProfile {
-            min_revision: 2161,
-            profile: dwmcore_26100_2161::profile,
-        },
-        RevisionProfile {
-            min_revision: 2454,
-            profile: dwmcore_26100_2454::profile,
-        },
-        RevisionProfile {
-            min_revision: 3912,
-            profile: dwmcore_26100_3912::profile,
-        },
-        RevisionProfile {
-            min_revision: 4484,
-            profile: dwmcore_26100_4484::profile,
-        },
-        RevisionProfile {
-            min_revision: 7309,
-            profile: dwmcore_26100_7309::profile,
-        },
-        RevisionProfile {
-            min_revision: 7705,
-            profile: dwmcore_26100_7705::profile,
-        },
-    ],
-}];
+pub const SUPPORTED_BUILDS: &[SupportedBuild] = &[
+    SupportedBuild {
+        build: 22000,
+        profiles: &[RevisionProfile {
+            min_revision: 194,
+            profile: dwmcore_22000_194::profile,
+        }],
+    },
+    SupportedBuild {
+        build: 22621,
+        profiles: &[RevisionProfile {
+            min_revision: 169,
+            profile: dwmcore_22621_169::profile,
+        }],
+    },
+    SupportedBuild {
+        build: 26100,
+        profiles: &[
+            RevisionProfile {
+                min_revision: 1,
+                profile: dwmcore_26100_1::profile,
+            },
+            RevisionProfile {
+                min_revision: 1591,
+                profile: dwmcore_26100_1591::profile,
+            },
+            RevisionProfile {
+                min_revision: 2161,
+                profile: dwmcore_26100_2161::profile,
+            },
+            RevisionProfile {
+                min_revision: 2454,
+                profile: dwmcore_26100_2454::profile,
+            },
+            RevisionProfile {
+                min_revision: 3912,
+                profile: dwmcore_26100_3912::profile,
+            },
+            RevisionProfile {
+                min_revision: 4484,
+                profile: dwmcore_26100_4484::profile,
+            },
+            RevisionProfile {
+                min_revision: 7309,
+                profile: dwmcore_26100_7309::profile,
+            },
+            RevisionProfile {
+                min_revision: 7705,
+                profile: dwmcore_26100_7705::profile,
+            },
+        ],
+    },
+];
 
 #[cfg(test)]
 mod tests {
@@ -84,19 +102,16 @@ mod tests {
     }
 
     #[test]
-    fn revision_profiles_include_required_signatures() {
+    fn revision_profiles_include_required_hooks() {
         for supported in SUPPORTED_BUILDS {
             for entry in supported.profiles {
                 let profile = (entry.profile)();
                 for &target in HookTarget::ALL {
-                    if !target.is_required_signature() {
+                    if !target.is_required_hook() {
                         continue;
                     }
                     assert!(
-                        profile
-                            .signatures
-                            .iter()
-                            .any(|signature| signature.target == target),
+                        profile.hooks.iter().any(|hook| hook.target == target),
                         "build {}.{} must include required target {}",
                         supported.build,
                         entry.min_revision,

@@ -27,7 +27,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ProfileCommand {
-    /// Check whether the registered profile supports a dwmcore.dll (signatures + vtable indices + field offsets)
+    /// Check whether the registered profile supports a dwmcore.dll
     Check {
         /// Use %SystemRoot%\\System32\\dwmcore.dll
         #[arg(long, conflicts_with_all = ["dll", "pdb", "version", "build_latest"])]
@@ -56,7 +56,7 @@ enum ProfileCommand {
         #[arg(short = 'y', long = "yes")]
         yes: bool,
     },
-    /// Extract signature / vtable index / field offset materials from DLL + PDB
+    /// Extract AOB / ABI / access materials from DLL + PDB
     Extract {
         /// Use %SystemRoot%\\System32\\dwmcore.dll
         #[arg(long, conflicts_with_all = ["dll", "pdb", "version", "build_latest"])]

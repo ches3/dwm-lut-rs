@@ -17,6 +17,8 @@ mod minhook;
 mod present;
 mod resolver;
 mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use bootstrap::HookError;
 pub use dwmcore::DirtyRect;

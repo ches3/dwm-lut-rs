@@ -1,20 +1,13 @@
-pub(super) mod field_offsets;
-pub(super) mod report;
-mod signatures;
-pub(super) mod symbols;
-pub(super) mod vtable_indices;
+mod report;
 
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use field_offsets::extract_field_offsets;
 use report::{InspectReport, print_report};
-use signatures::extract_signatures;
-use vtable_indices::extract_vtable_indices;
 
+use super::analysis::access::build_access_reports;
+use super::analysis::analyze;
 use super::ensure;
-use super::pdb_publics::PdbPublics;
-use super::pe::PeImage;
 
 pub(super) struct Args {
     pub system: bool,
@@ -34,25 +27,15 @@ pub(super) fn run(args: Args) -> Result<(), Box<dyn Error>> {
         args.pdb.as_ref(),
         args.yes,
     )?;
-    let report = extract(&dll, &pdb)?;
+    let analysis = analyze(&dll, &pdb)?;
+    let report = InspectReport {
+        file_version: analysis.pe.file_version.label(),
+        dll: dll.display().to_string(),
+        pdb: pdb.display().to_string(),
+        accesses: build_access_reports(&analysis.accesses),
+        aobs: analysis.extract_aobs()?,
+        abis: analysis.abis,
+    };
     print_report(&report);
     Ok(())
-}
-
-fn extract(dll_path: &Path, pdb_path: &Path) -> Result<InspectReport, Box<dyn Error>> {
-    let pe = PeImage::load(dll_path)?;
-    let pubs = PdbPublics::load(pdb_path)?;
-    pubs.verify_against_pe(&pe.codeview)?;
-    let signatures = extract_signatures(&pe, &pubs)?;
-    let vtable_indices = extract_vtable_indices(&pe, &pubs);
-    let field_offsets = extract_field_offsets(&pe, &pubs);
-
-    Ok(InspectReport {
-        file_version: pe.file_version.label(),
-        dll: dll_path.display().to_string(),
-        pdb: pdb_path.display().to_string(),
-        signatures,
-        vtable_indices,
-        field_offsets,
-    })
 }

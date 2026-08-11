@@ -2,7 +2,10 @@ use std::ptr;
 
 #[cfg(debug_assertions)]
 use crate::d3d11::{BackBufferId, PresentDrawStatus};
-use crate::dwmcore::{self, DirtyRect, DirtyRectReadError, RectVec};
+use crate::dwmcore::{
+    self, DirtyRect, DirtyRectReadError, HardwareProtectedReadError, MonitorIdentityReadError,
+    RectVec,
+};
 use crate::lifecycle;
 #[cfg(debug_assertions)]
 use crate::log::SharedLimiter;
@@ -11,9 +14,9 @@ use crate::state;
 use dwm_lut_payload::MonitorIdentity;
 use dwm_lut_profile::HookProfile;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct PresentInputs {
-    monitor_identity: Option<MonitorIdentity>,
+    monitor_identity: MonitorIdentity,
     dirty_rects: Vec<DirtyRect>,
     hardware_protected: bool,
 }
@@ -21,8 +24,9 @@ struct PresentInputs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PresentInputError {
     NullOverlaySwapChain,
-    InvalidDirtyRectVector,
-    UnreadableMemory,
+    HardwareProtected(HardwareProtectedReadError),
+    MonitorIdentity(MonitorIdentityReadError),
+    DirtyRects(DirtyRectReadError),
 }
 
 #[cfg(debug_assertions)]
@@ -39,8 +43,8 @@ pub(crate) fn present(
     this: usize,
     overlay_swap_chain: usize,
     rect_vec: usize,
-    call_original: impl FnOnce(usize) -> i64,
-) -> i64 {
+    call_original: impl FnOnce(usize) -> i32,
+) -> i32 {
     if !lifecycle::is_runtime_active() {
         return call_original(rect_vec);
     }
@@ -74,6 +78,10 @@ pub(crate) fn present(
     call_original(prepared_rect_vec)
 }
 
+/// # Safety
+///
+/// `overlay_swap_chain` must point to a live object compatible with `profile`, and `rect_vec`
+/// must point to a valid dirty-rect vector whose storage remains stable for this call.
 unsafe fn collect_present_inputs(
     profile: &HookProfile,
     overlay_swap_chain: usize,
@@ -84,17 +92,13 @@ unsafe fn collect_present_inputs(
     }
 
     let hardware_protected =
-        dwmcore::read_hardware_protected(overlay_swap_chain, profile.hardware_protected_offset())
-            .ok_or(PresentInputError::UnreadableMemory)?;
-    let monitor_identity = dwmcore::read_monitor_identity(
-        overlay_swap_chain,
-        profile.overlay_swap_chain_identity_offsets(),
-    );
+        unsafe { dwmcore::read_hardware_protected(overlay_swap_chain, profile.hardware_protected) }
+            .map_err(PresentInputError::HardwareProtected)?;
+    let monitor_identity =
+        unsafe { dwmcore::read_monitor_identity(overlay_swap_chain, profile.monitor_identity) }
+            .map_err(PresentInputError::MonitorIdentity)?;
     let dirty_rects =
-        unsafe { dwmcore::read_dirty_rects(rect_vec) }.map_err(|error| match error {
-            DirtyRectReadError::InvalidVector => PresentInputError::InvalidDirtyRectVector,
-            DirtyRectReadError::UnreadableMemory => PresentInputError::UnreadableMemory,
-        })?;
+        unsafe { dwmcore::read_dirty_rects(rect_vec) }.map_err(PresentInputError::DirtyRects)?;
     Ok(PresentInputs {
         monitor_identity,
         dirty_rects,
@@ -124,7 +128,7 @@ fn apply_lut(
             Some(assignments) => unsafe {
                 renderer.render_present_lut(
                     overlay_swap_chain,
-                    profile.d3d11_resource_path(),
+                    profile.d3d11_resource,
                     inputs.monitor_identity,
                     &inputs.dirty_rects,
                     &assignments,
@@ -158,7 +162,7 @@ fn apply_lut(
 fn log_present_lut_frame(
     overlay_swap_chain: usize,
     hardware_protected: bool,
-    monitor_identity: Option<MonitorIdentity>,
+    monitor_identity: MonitorIdentity,
     dirty_rects: &[DirtyRect],
     outcome: crate::d3d11::PresentLutOutcome,
 ) {
@@ -186,9 +190,9 @@ fn log_present_lut_frame(
 
 fn empty_rect_vec_storage() -> RectVec {
     RectVec {
-        start: ptr::null(),
+        first: ptr::null(),
+        last: ptr::null(),
         end: ptr::null(),
-        capacity_end: ptr::null(),
     }
 }
 
@@ -198,11 +202,11 @@ fn full_present_rect_vec(
     rect_vec_storage: &mut RectVec,
 ) -> usize {
     rect_storage[0] = rect;
-    let start = rect_storage.as_ptr();
+    let first = rect_storage.as_ptr();
     *rect_vec_storage = RectVec {
-        start,
-        end: unsafe { start.add(1) },
-        capacity_end: unsafe { start.add(1) },
+        first,
+        last: unsafe { first.add(1) },
+        end: unsafe { first.add(1) },
     };
     (rect_vec_storage as *const RectVec) as usize
 }
@@ -217,17 +221,8 @@ pub(crate) mod test_support {
     use crate::dwmcore::{self, DirtyRect, RectVec};
     use crate::resolver::SignatureResolutionReport;
     use crate::state;
-    use dwm_lut_profile::{HookProfile, SUPPORTED_BUILDS};
-
-    pub(crate) fn test_profile() -> HookProfile {
-        (SUPPORTED_BUILDS
-            .first()
-            .expect("SUPPORTED_BUILDS is non-empty")
-            .profiles
-            .last()
-            .expect("supported build must include profiles")
-            .profile)()
-    }
+    pub(crate) use crate::test_support::representative_hook_profile as test_profile;
+    use dwm_lut_profile::HookProfile;
 
     pub(crate) fn test_monitor_identity() -> MonitorIdentity {
         MonitorIdentity {
@@ -283,8 +278,25 @@ pub(crate) mod test_support {
             .expect("initialization should succeed with synthetic resolution");
     }
 
+    fn rect_vec_from(dirty_rects: &Vec<DirtyRect>) -> RectVec {
+        if dirty_rects.is_empty() {
+            RectVec {
+                first: std::ptr::null(),
+                last: std::ptr::null(),
+                end: std::ptr::null(),
+            }
+        } else {
+            let first = dirty_rects.as_ptr();
+            RectVec {
+                first,
+                last: unsafe { first.add(dirty_rects.len()) },
+                end: unsafe { first.add(dirty_rects.capacity()) },
+            }
+        }
+    }
+
     pub(crate) struct FakePresentObjects {
-        overlay_swap_chain: Vec<u8>,
+        overlay_swap_chain: dwmcore::test_support::FakeOverlaySwapChain,
         pub(crate) dirty_rects: Vec<DirtyRect>,
         rect_vec: RectVec,
     }
@@ -293,27 +305,13 @@ pub(crate) mod test_support {
         pub(crate) fn new(dirty_rects: Vec<DirtyRect>, hardware_protected: bool) -> Self {
             let profile = test_profile();
             let overlay_swap_chain =
-                dwmcore::test_support::overlay_swap_chain_bytes_with_hardware_protected(
-                    profile.overlay_swap_chain_identity_offsets(),
-                    profile.hardware_protected_offset(),
+                dwmcore::test_support::fake_overlay_swap_chain_with_hardware_protected(
+                    profile.monitor_identity,
+                    profile.hardware_protected,
                     test_monitor_identity(),
                     hardware_protected,
                 );
-
-            let rect_vec = if dirty_rects.is_empty() {
-                RectVec {
-                    start: std::ptr::null(),
-                    end: std::ptr::null(),
-                    capacity_end: std::ptr::null(),
-                }
-            } else {
-                let start = dirty_rects.as_ptr();
-                RectVec {
-                    start,
-                    end: unsafe { start.add(dirty_rects.len()) },
-                    capacity_end: unsafe { start.add(dirty_rects.capacity()) },
-                }
-            };
+            let rect_vec = rect_vec_from(&dirty_rects);
 
             Self {
                 overlay_swap_chain,
@@ -330,12 +328,53 @@ pub(crate) mod test_support {
             (&self.rect_vec as *const RectVec) as usize
         }
     }
+
+    pub(crate) struct FakeVirtualPresentObjects {
+        overlay_swap_chain: dwmcore::test_support::FakeOverlaySwapChain,
+        pub(crate) dirty_rects: Vec<DirtyRect>,
+        rect_vec: RectVec,
+    }
+
+    impl FakeVirtualPresentObjects {
+        pub(crate) fn new(dirty_rects: Vec<DirtyRect>, hardware_protected: bool) -> Self {
+            let profile = test_profile();
+            let overlay_swap_chain =
+                dwmcore::test_support::overlay_swap_chain_with_virtual_base_hardware_protected(
+                    profile.monitor_identity,
+                    test_monitor_identity(),
+                    hardware_protected,
+                );
+            let rect_vec = rect_vec_from(&dirty_rects);
+
+            Self {
+                overlay_swap_chain,
+                dirty_rects,
+                rect_vec,
+            }
+        }
+
+        pub(crate) fn profile(&self) -> HookProfile {
+            let mut profile = test_profile();
+            profile.hardware_protected =
+                dwmcore::test_support::virtual_base_hardware_protected_access();
+            profile
+        }
+
+        pub(crate) fn overlay_swap_chain_address(&self) -> usize {
+            self.overlay_swap_chain.as_ptr() as usize
+        }
+
+        pub(crate) fn rect_vec_address(&self) -> usize {
+            (&self.rect_vec as *const RectVec) as usize
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::test_support::{
-        FakePresentObjects, initialize_test_state, test_monitor_identity, test_profile,
+        FakePresentObjects, FakeVirtualPresentObjects, initialize_test_state,
+        test_monitor_identity, test_profile,
     };
     use super::{PresentInputError, PresentInputs, apply_lut, collect_present_inputs, present};
     use crate::d3d11::{DXGI_FORMAT_B8G8R8A8_UNORM, PresentDrawStatus};
@@ -364,7 +403,7 @@ mod tests {
 
     fn sample_inputs(dirty_rects: Vec<DirtyRect>) -> PresentInputs {
         PresentInputs {
-            monitor_identity: Some(test_monitor_identity()),
+            monitor_identity: test_monitor_identity(),
             hardware_protected: false,
             dirty_rects,
         }
@@ -392,7 +431,7 @@ mod tests {
                 )
             }
             .expect("present inputs should be collected");
-            assert_eq!(inputs.monitor_identity, Some(test_monitor_identity()));
+            assert_eq!(inputs.monitor_identity, test_monitor_identity());
             assert_eq!(inputs.dirty_rects, unprotected.dirty_rects);
             assert!(!inputs.hardware_protected);
 
@@ -409,6 +448,31 @@ mod tests {
         }
 
         #[test]
+        fn reads_virtual_base_hardware_protected_inputs() {
+            let dirty_rects = vec![DirtyRect {
+                left: 1,
+                top: 2,
+                right: 3,
+                bottom: 4,
+            }];
+            for expected in [false, true] {
+                let fake = FakeVirtualPresentObjects::new(dirty_rects.clone(), expected);
+                let inputs = unsafe {
+                    collect_present_inputs(
+                        &fake.profile(),
+                        fake.overlay_swap_chain_address(),
+                        fake.rect_vec_address(),
+                    )
+                }
+                .expect("virtual-base hardware protected state should be collected");
+
+                assert_eq!(inputs.monitor_identity, test_monitor_identity());
+                assert_eq!(inputs.dirty_rects, fake.dirty_rects);
+                assert_eq!(inputs.hardware_protected, expected);
+            }
+        }
+
+        #[test]
         fn rejects_null_dirty_rect_vector() {
             let fake = FakePresentObjects::new(Vec::new(), false);
             let error = unsafe {
@@ -416,7 +480,10 @@ mod tests {
             }
             .expect_err("null rectVec pointer should be rejected");
 
-            assert_eq!(error, PresentInputError::InvalidDirtyRectVector);
+            assert_eq!(
+                error,
+                PresentInputError::DirtyRects(dwmcore::DirtyRectReadError::InvalidVector)
+            );
         }
     }
 
@@ -450,7 +517,7 @@ mod tests {
             let render_call = crate::d3d11::fake_render_present_lut_call()
                 .expect("renderer should receive present inputs");
             assert_eq!(render_call.overlay_swap_chain, overlay_swap_chain);
-            assert_eq!(render_call.monitor_identity, Some(test_monitor_identity()));
+            assert_eq!(render_call.monitor_identity, test_monitor_identity());
             assert_eq!(render_call.dirty_rects, dirty_rects);
         }
 

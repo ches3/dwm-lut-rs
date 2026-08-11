@@ -16,6 +16,14 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/lut_pipeline.hlsl");
     println!("cargo:rerun-if-changed=src/blue_noise.rs");
 
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        // The hook is loaded dynamically and its exports are resolved at runtime, so an
+        // import library is unused. Suppressing it also keeps link.exe's informational
+        // import-library message from becoming a Rust linker warning.
+        println!("cargo::rustc-link-arg-cdylib=/NOIMPLIB");
+        println!("cargo::rustc-link-arg-cdylib=/NOEXP");
+    }
+
     let source = SHADER_TEMPLATE.replace("__BLUE_NOISE_64X64__", &render_blue_noise_hlsl());
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set"));
     compile_shader(

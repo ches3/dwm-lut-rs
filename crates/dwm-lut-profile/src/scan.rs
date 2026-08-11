@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::profile::{AobToken, HookProfile, HookSignature};
+use crate::profile::{AobToken, HookEntry, HookProfile};
 use crate::target::HookTarget;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,10 +47,10 @@ impl fmt::Display for SignatureScanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound { target } => {
-                write!(f, "signature {} was not found", target.label())
+                write!(f, "hook {} was not found", target.label())
             }
             Self::Ambiguous { target } => {
-                write!(f, "signature {} matched multiple locations", target.label())
+                write!(f, "hook {} matched multiple locations", target.label())
             }
         }
     }
@@ -75,22 +75,22 @@ impl SignatureScanError {
 
 pub fn resolve_signature_rva(
     image: &[u8],
-    signature: &HookSignature,
+    entry: &HookEntry,
 ) -> Result<ResolvedRva, SignatureScanError> {
-    resolve_unique_rva(signature.target, match_aob(image, signature.aob))
+    resolve_unique_rva(entry.target, match_aob(image, entry.aob))
 }
 
 pub fn scan_profile(
     profile: &HookProfile,
     image: &[u8],
 ) -> Result<SignatureScanReport, SignatureScanError> {
-    let mut resolved = Vec::with_capacity(profile.signatures.len());
+    let mut resolved = Vec::with_capacity(profile.hooks.len());
     let mut skipped = Vec::new();
 
-    for signature in profile.signatures {
-        match resolve_signature_rva(image, signature) {
+    for entry in profile.hooks {
+        match resolve_signature_rva(image, entry) {
             Ok(hit) => resolved.push(hit),
-            Err(error) if !signature.target.is_required_signature() => {
+            Err(error) if !entry.target.is_required_hook() => {
                 skipped.push(error.into_optional_skip()?);
             }
             Err(error) => return Err(error),
@@ -151,21 +151,11 @@ mod tests {
         AobMatch, ResolvedRva, Rva, SignatureScanError, SkippedSignature, SkippedSignatureReason,
         match_aob, scan_profile,
     };
-    use crate::profile::{AobToken, FieldOffsets, HookProfile, HookSignature, VtableIndices};
+    use crate::profile::{
+        AobToken, D3D11ResourceAccess, HardwareProtectedAccess, HookEntry, HookProfile,
+        MonitorIdentityAccess, OverlaySwapChainFromContext,
+    };
     use crate::target::HookTarget;
-
-    static EMPTY_VTABLE_INDICES: VtableIndices = VtableIndices {
-        get_physical_back_buffer: 0,
-        get_d3d11_resource: 0,
-        get_overlay_swap_chain: 0,
-    };
-    static EMPTY_FIELD_OFFSETS: FieldOffsets = FieldOffsets {
-        hardware_protected: 0,
-        adapter_luid_low_part: 0,
-        adapter_luid_high_part: 0,
-        vid_pn_target_id: 0,
-        overlay_monitor_target_pointer: 0,
-    };
 
     #[test]
     fn match_aob_honors_wildcards() {
@@ -188,33 +178,47 @@ mod tests {
         assert_eq!(match_aob(&image, &tokens), AobMatch::Ambiguous);
     }
 
-    fn test_profile(signatures: &'static [HookSignature]) -> HookProfile {
+    fn test_profile(hooks: &'static [HookEntry]) -> HookProfile {
         HookProfile {
-            signatures,
-            vtable_indices: &EMPTY_VTABLE_INDICES,
-            field_offsets: &EMPTY_FIELD_OFFSETS,
+            hooks,
+            overlay_swap_chain_from_context: OverlaySwapChainFromContext {
+                overlay_monitor_target_pointer_offset: 0,
+                get_overlay_swap_chain_vtable_index: 0,
+            },
+            d3d11_resource: D3D11ResourceAccess::PhysicalBackBuffer {
+                get_physical_back_buffer_vtable_index: 0,
+                get_d3d11_resource_vtable_index: 0,
+            },
+            monitor_identity: MonitorIdentityAccess {
+                get_display_adapter_luid_vtable_index: 0,
+                get_vid_pn_target_id_vtable_index: 0,
+            },
+            hardware_protected: HardwareProtectedAccess::DirectField { offset: 0 },
         }
     }
 
     #[test]
     fn scan_profile_collects_all_resolved_targets() {
         let image = [0xAA, 0xBB, 0xCC];
-        const SIGNATURES: &[HookSignature] = &[
-            HookSignature {
+        const HOOKS: &[HookEntry] = &[
+            HookEntry {
                 target: HookTarget::Present,
+                arguments: &[],
                 aob: &[AobToken::Exact(0xAA)],
             },
-            HookSignature {
+            HookEntry {
                 target: HookTarget::IsCandidateOverlayCompatible,
+                arguments: &[],
                 aob: &[AobToken::Exact(0xBB)],
             },
-            HookSignature {
+            HookEntry {
                 target: HookTarget::IsCandidateDirectFlipCompatible,
+                arguments: &[],
                 aob: &[AobToken::Exact(0xCC)],
             },
         ];
 
-        let report = scan_profile(&test_profile(SIGNATURES), &image).expect("scan");
+        let report = scan_profile(&test_profile(HOOKS), &image).expect("scan");
         assert_eq!(
             report.resolved,
             vec![
@@ -235,10 +239,11 @@ mod tests {
     }
 
     #[test]
-    fn scan_profile_reports_missing_required_signature() {
+    fn scan_profile_reports_missing_required_hook() {
         let image = [0x00];
-        const SIGNATURES: &[HookSignature] = &[HookSignature {
+        const HOOKS: &[HookEntry] = &[HookEntry {
             target: HookTarget::Present,
+            arguments: &[],
             aob: &[
                 AobToken::Exact(0x40),
                 AobToken::Exact(0x55),
@@ -246,7 +251,7 @@ mod tests {
                 AobToken::Exact(0x57),
             ],
         }];
-        let error = scan_profile(&test_profile(SIGNATURES), &image).expect_err("required miss");
+        let error = scan_profile(&test_profile(HOOKS), &image).expect_err("required miss");
         assert!(matches!(
             error,
             SignatureScanError::NotFound {
@@ -256,14 +261,16 @@ mod tests {
     }
 
     #[test]
-    fn scan_profile_records_optional_signature_failures() {
-        const PRESENT_AND_OPTIONAL: &[HookSignature] = &[
-            HookSignature {
+    fn scan_profile_records_optional_hook_failures() {
+        const PRESENT_AND_OPTIONAL: &[HookEntry] = &[
+            HookEntry {
                 target: HookTarget::Present,
+                arguments: &[],
                 aob: &[AobToken::Exact(0xAA)],
             },
-            HookSignature {
+            HookEntry {
                 target: HookTarget::IsCandidateOverlayCompatible,
+                arguments: &[],
                 aob: &[AobToken::Exact(0xDD)],
             },
         ];
@@ -275,7 +282,7 @@ mod tests {
 
         for (image, reason) in cases {
             let report = scan_profile(&test_profile(PRESENT_AND_OPTIONAL), image)
-                .expect("optional signature failure is allowed");
+                .expect("optional hook failure is allowed");
             assert_eq!(report.resolved.len(), 1);
             assert_eq!(report.resolved[0].target, HookTarget::Present);
             assert_eq!(
@@ -291,8 +298,9 @@ mod tests {
     #[test]
     fn scan_profile_rejects_ambiguous_required_match() {
         let image = [0x83, 0x00, 0x00, 0x83, 0x00, 0x00];
-        const SIGNATURES: &[HookSignature] = &[HookSignature {
+        const HOOKS: &[HookEntry] = &[HookEntry {
             target: HookTarget::Present,
+            arguments: &[],
             aob: &[
                 AobToken::Exact(0x83),
                 AobToken::Wildcard,
@@ -300,7 +308,7 @@ mod tests {
             ],
         }];
 
-        let error = scan_profile(&test_profile(SIGNATURES), &image).expect_err("ambiguous");
+        let error = scan_profile(&test_profile(HOOKS), &image).expect_err("ambiguous");
         assert!(matches!(
             error,
             SignatureScanError::Ambiguous {

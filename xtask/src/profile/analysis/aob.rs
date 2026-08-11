@@ -2,7 +2,7 @@ use iced_x86::{Decoder, DecoderOptions, Instruction};
 
 use dwm_lut_profile::{AobMatch, AobToken, HookTarget, Rva, match_aob};
 
-use super::report::{SignatureReport, SignatureStatus, format_rva};
+use super::model::{AobReport, AobStatus};
 use super::symbols::{
     EXTRACT_TARGETS, MAX_LEN, MIN_INSNS, ResolvedSymbol, SymbolResolveError,
     resolve_function_symbol,
@@ -10,63 +10,52 @@ use super::symbols::{
 use crate::profile::pdb_publics::PdbPublics;
 use crate::profile::pe::PeImage;
 
-pub fn extract_signatures(pe: &PeImage, pubs: &PdbPublics) -> Result<Vec<SignatureReport>, String> {
+pub fn extract_aobs(pe: &PeImage, pubs: &PdbPublics) -> Result<Vec<AobReport>, String> {
     Ok(EXTRACT_TARGETS
         .iter()
         .copied()
-        .map(|target| extract_function_signature(target, pe, pubs))
+        .map(|target| extract_aob(target, pe, pubs))
         .collect())
 }
 
-fn extract_function_signature(
-    target: HookTarget,
-    pe: &PeImage,
-    pubs: &PdbPublics,
-) -> SignatureReport {
+fn extract_aob(target: HookTarget, pe: &PeImage, pubs: &PdbPublics) -> AobReport {
     match resolve_function_symbol(target, pubs, pe) {
         Ok(resolved) => uniquify_function(target, &resolved, pe),
         Err(error) => missing_symbol_report(target, error),
     }
 }
 
-fn uniquify_function(
-    target: HookTarget,
-    resolved: &ResolvedSymbol,
-    pe: &PeImage,
-) -> SignatureReport {
+fn uniquify_function(target: HookTarget, resolved: &ResolvedSymbol, pe: &PeImage) -> AobReport {
     match uniquify_at_rva(pe, resolved.rva) {
-        Ok(pattern) => SignatureReport {
+        Ok(pattern) => AobReport {
             target: target.label().into(),
             hook_target: target,
-            status: SignatureStatus::Ok,
-            rva: Some(format_rva(resolved.rva)),
+            status: AobStatus::Ok,
             aob: Some(tokens_to_aob(&pattern.tokens)),
         },
-        Err(_error) => SignatureReport {
+        Err(_error) => AobReport {
             target: target.label().into(),
             hook_target: target,
-            status: SignatureStatus::UniquifyFailed,
-            rva: Some(format_rva(resolved.rva)),
+            status: AobStatus::UniquifyFailed,
             aob: None,
         },
     }
 }
 
-fn missing_symbol_report(target: HookTarget, error: SymbolResolveError) -> SignatureReport {
-    SignatureReport {
+fn missing_symbol_report(target: HookTarget, error: SymbolResolveError) -> AobReport {
+    AobReport {
         target: target.label().into(),
         hook_target: target,
         status: status_from_symbol_error(&error),
-        rva: None,
         aob: None,
     }
 }
 
-fn status_from_symbol_error(error: &SymbolResolveError) -> SignatureStatus {
+fn status_from_symbol_error(error: &SymbolResolveError) -> AobStatus {
     match error {
-        SymbolResolveError::IcfStub => SignatureStatus::IcfStub,
-        SymbolResolveError::Ambiguous => SignatureStatus::AmbiguousSymbol,
-        SymbolResolveError::Missing => SignatureStatus::NoSymbol,
+        SymbolResolveError::IcfStub => AobStatus::IcfStub,
+        SymbolResolveError::Ambiguous => AobStatus::AmbiguousSymbol,
+        SymbolResolveError::Missing => AobStatus::NoSymbol,
     }
 }
 
