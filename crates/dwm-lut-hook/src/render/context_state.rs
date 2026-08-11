@@ -13,7 +13,7 @@ const SHADER_CLASS_INSTANCE_LIMIT: usize = 256;
 const VIEWPORT_LIMIT: usize = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE as usize;
 const RENDER_TARGET_LIMIT: usize = D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT as usize;
 
-pub(super) struct ShaderStageState<T> {
+struct ShaderStageState<T> {
     shader: Option<T>,
     class_instances: [Option<ID3D11ClassInstance>; SHADER_CLASS_INSTANCE_LIMIT],
     class_instance_count: u32,
@@ -220,20 +220,5 @@ impl ContextState {
             context.RSSetViewports(Some(&self.viewports[..self.viewport_count as usize]));
             context.RSSetScissorRects(Some(&self.scissor_rects[..self.scissor_count as usize]));
         }
-    }
-}
-
-pub(super) fn unbind_pipeline(context: &ID3D11DeviceContext) {
-    let null_srvs: [Option<ID3D11ShaderResourceView>; 2] = std::array::from_fn(|_| None);
-    let null_samplers: [Option<ID3D11SamplerState>; 1] = std::array::from_fn(|_| None);
-    let null_buffers: [Option<ID3D11Buffer>; 1] = std::array::from_fn(|_| None);
-    let null_rtvs: [Option<ID3D11RenderTargetView>; RENDER_TARGET_LIMIT] =
-        std::array::from_fn(|_| None);
-    unsafe {
-        context.PSSetShaderResources(0, Some(&null_srvs));
-        context.PSSetSamplers(0, Some(&null_samplers));
-        context.VSSetConstantBuffers(0, Some(&null_buffers));
-        context.PSSetConstantBuffers(0, Some(&null_buffers));
-        context.OMSetRenderTargets(Some(&null_rtvs), None::<&ID3D11DepthStencilView>);
     }
 }

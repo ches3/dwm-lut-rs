@@ -3,35 +3,36 @@
 use dwm_lut_payload::MonitorIdentity;
 
 use crate::DirtyRect;
-#[cfg(debug_assertions)]
-use crate::d3d11::{BackBufferId, PresentDrawStatus};
-use crate::d3d11::{PresentLutOutcome, RenderAcquireError};
 use crate::present::PresentInputError;
+#[cfg(debug_assertions)]
+use crate::render::LutApplyStatus;
+use crate::render::{FrameAcquireError, LutApplyOutcome};
 
 #[cfg(debug_assertions)]
 use super::SharedLimiter;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PresentLutAcquireFailReason {
-    LockMiss,
-    Acquire(RenderAcquireError),
+pub(crate) enum LutApplyUnavailableReason {
+    RendererBusy,
+    AssignmentsUnavailable,
+    Frame(FrameAcquireError),
 }
 
-impl From<RenderAcquireError> for PresentLutAcquireFailReason {
-    fn from(value: RenderAcquireError) -> Self {
-        Self::Acquire(value)
+impl From<FrameAcquireError> for LutApplyUnavailableReason {
+    fn from(value: FrameAcquireError) -> Self {
+        Self::Frame(value)
     }
 }
 
 #[cfg(debug_assertions)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PresentLutLogKey {
+struct LutApplyLogKey {
     overlay_swap_chain: usize,
-    back_buffer: Option<BackBufferId>,
+    back_buffer: u128,
 }
 
 #[cfg(debug_assertions)]
-static PRESENT_LUT_LIMITER: SharedLimiter<PresentLutLogKey> = SharedLimiter::new(300);
+static LUT_APPLY_LIMITER: SharedLimiter<LutApplyLogKey> = SharedLimiter::new(300);
 
 #[cfg(debug_assertions)]
 static SKIPPED_HARDWARE_PROTECTED_LIMITER: SharedLimiter<usize> = SharedLimiter::new(300);
@@ -69,54 +70,53 @@ pub(crate) fn skipped_hardware_protected(overlay_swap_chain: usize) {
     let _ = overlay_swap_chain;
 }
 
-pub(crate) fn present_lut_acquire_failed(
-    overlay_swap_chain: usize,
-    error: PresentLutAcquireFailReason,
-) {
+pub(crate) fn lut_apply_unavailable(overlay_swap_chain: usize, reason: LutApplyUnavailableReason) {
     #[cfg(debug_assertions)]
     {
         super::write(format_args!(
-            "event=present_lut_acquire_failed overlay_swap_chain=0x{overlay_swap_chain:x} error={error:?}"
+            "event=lut_apply_unavailable overlay_swap_chain=0x{overlay_swap_chain:x} reason={reason:?}"
         ));
     }
     #[cfg(not(debug_assertions))]
-    let _ = (overlay_swap_chain, error);
+    let _ = (overlay_swap_chain, reason);
 }
 
-pub(crate) fn present_lut_frame(
+pub(crate) fn lut_apply_frame(
     overlay_swap_chain: usize,
     monitor_identity: MonitorIdentity,
     dirty_rects: &[DirtyRect],
-    outcome: PresentLutOutcome,
+    outcome: LutApplyOutcome,
 ) {
     #[cfg(debug_assertions)]
     {
-        let is_err = matches!(outcome.draw, PresentDrawStatus::Failed(_));
+        let is_err = matches!(outcome.status, LutApplyStatus::Failed(_));
         if !is_err {
-            let key = PresentLutLogKey {
+            let key = LutApplyLogKey {
                 overlay_swap_chain,
                 back_buffer: outcome.back_buffer_id,
             };
-            if !PRESENT_LUT_LIMITER.sample(key).should_log {
+            if !LUT_APPLY_LIMITER.sample(key).should_log {
                 return;
             }
         }
 
+        let lut_applied = matches!(outcome.status, LutApplyStatus::Applied);
+        let lut_active = outcome.lut_index.is_some();
         let monitor_identity = format!(
             "{}:{}",
             monitor_identity.adapter_luid, monitor_identity.target_id
         );
         super::write(format_args!(
-            "event=present_lut_frame overlay_swap_chain=0x{:x} applied={} draw={} lut_active={} dxgi_format={:?} width={:?} height={:?} lut_index={:?} back_buffer_id={} dirty_rects={:?} present_dirty_rect={:?} monitor_identity={}",
+            "event=lut_apply_frame overlay_swap_chain=0x{:x} applied={} status={} lut_active={} dxgi_format={} width={} height={} lut_index={:?} back_buffer_id={} dirty_rects={:?} present_dirty_rect={:?} monitor_identity={}",
             overlay_swap_chain,
-            u8::from(outcome.lut_applied()),
-            outcome.draw.as_str(),
-            u8::from(outcome.lut_active),
+            u8::from(lut_applied),
+            outcome.status.as_str(),
+            u8::from(lut_active),
             outcome.dxgi_format,
-            outcome.width,
-            outcome.height,
+            outcome.frame_size.width,
+            outcome.frame_size.height,
             outcome.lut_index,
-            super::quoted(outcome.back_buffer_id_for_log()),
+            super::quoted(format_args!("0x{:x}", outcome.back_buffer_id)),
             dirty_rects,
             outcome.present_dirty_rect,
             super::quoted(monitor_identity),

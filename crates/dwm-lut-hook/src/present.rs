@@ -5,7 +5,7 @@ use crate::dwmcore::{
     RectVec,
 };
 use crate::lifecycle;
-use crate::log::{self, PresentLutAcquireFailReason};
+use crate::log::{self, LutApplyUnavailableReason};
 use crate::state;
 use dwm_lut_payload::MonitorIdentity;
 use dwm_lut_profile::HookProfile;
@@ -111,12 +111,9 @@ fn apply_lut(
     profile: &HookProfile,
     inputs: &PresentInputs,
 ) -> Option<DirtyRect> {
-    let render_result = {
-        let Some(mut renderer) = crate::d3d11::try_lock_renderer() else {
-            log::present_lut_acquire_failed(
-                overlay_swap_chain,
-                PresentLutAcquireFailReason::LockMiss,
-            );
+    let apply_result = {
+        let Some(mut renderer) = crate::render::try_lock_renderer() else {
+            log::lut_apply_unavailable(overlay_swap_chain, LutApplyUnavailableReason::RendererBusy);
             return None;
         };
 
@@ -124,36 +121,37 @@ fn apply_lut(
             return None;
         }
 
-        match state::assignments() {
-            Some(assignments) => unsafe {
-                renderer.render_present_lut(
-                    overlay_swap_chain,
-                    profile.d3d11_resource,
-                    inputs.monitor_identity,
-                    &inputs.dirty_rects,
-                    &assignments,
-                )
-            },
-            None => Err(crate::d3d11::RenderAcquireError::Unavailable),
+        let Some(assignments) = state::assignments() else {
+            log::lut_apply_unavailable(
+                overlay_swap_chain,
+                LutApplyUnavailableReason::AssignmentsUnavailable,
+            );
+            return None;
+        };
+        unsafe {
+            renderer.apply_lut(
+                overlay_swap_chain,
+                profile.d3d11_resource,
+                inputs.monitor_identity,
+                &inputs.dirty_rects,
+                &assignments,
+            )
         }
     };
 
-    match render_result {
+    match apply_result {
         Err(error) => {
-            log::present_lut_acquire_failed(
-                overlay_swap_chain,
-                PresentLutAcquireFailReason::from(error),
-            );
+            log::lut_apply_unavailable(overlay_swap_chain, LutApplyUnavailableReason::from(error));
             None
         }
-        Ok(render_outcome) => {
-            log::present_lut_frame(
+        Ok(outcome) => {
+            log::lut_apply_frame(
                 overlay_swap_chain,
                 inputs.monitor_identity,
                 &inputs.dirty_rects,
-                render_outcome,
+                outcome,
             );
-            render_outcome.present_dirty_rect
+            outcome.present_dirty_rect
         }
     }
 }
@@ -350,27 +348,27 @@ mod tests {
         PresentInputError, PresentInputOutcome, PresentInputs, apply_lut, collect_present_inputs,
         present,
     };
-    use crate::d3d11::{DXGI_FORMAT_B8G8R8A8_UNORM, PresentDrawStatus};
     use crate::dwmcore::{self, DirtyRect};
     use crate::lifecycle;
+    use crate::render::{DXGI_FORMAT_B8G8R8A8_UNORM, FrameSize, LutApplyStatus};
     use crate::state;
     use crate::state::HOOK_GLOBAL_TEST_LOCK;
 
     fn sample_outcome(
         present_dirty_rect: Option<DirtyRect>,
-        draw: PresentDrawStatus,
-    ) -> crate::d3d11::PresentLutOutcome {
-        crate::d3d11::PresentLutOutcome {
-            lut_active: present_dirty_rect.is_some()
-                || matches!(draw, PresentDrawStatus::Applied { .. }),
+        status: LutApplyStatus,
+    ) -> crate::render::LutApplyOutcome {
+        crate::render::LutApplyOutcome {
             present_dirty_rect,
-            draw,
-            dxgi_format: Some(DXGI_FORMAT_B8G8R8A8_UNORM),
-            width: None,
-            height: None,
+            status,
+            dxgi_format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            frame_size: FrameSize {
+                width: 1920,
+                height: 1080,
+            },
             lut_index: Some(0),
             #[cfg(debug_assertions)]
-            back_buffer_id: None,
+            back_buffer_id: 1,
         }
     }
 
@@ -500,33 +498,27 @@ mod tests {
                 bottom: 64,
             }];
             let inputs = sample_inputs(dirty_rects.clone());
-            crate::d3d11::set_fake_render_result(Ok(sample_outcome(
-                None,
-                PresentDrawStatus::Applied { full_redraw: false },
-            )));
+            crate::render::set_fake_apply_result(Ok(sample_outcome(None, LutApplyStatus::Applied)));
 
             assert_eq!(
                 apply_lut(overlay_swap_chain, &test_profile(), &inputs),
                 None
             );
 
-            let render_call = crate::d3d11::fake_render_present_lut_call()
+            let apply_call = crate::render::fake_apply_lut_call()
                 .expect("renderer should receive present inputs");
-            assert_eq!(render_call.overlay_swap_chain, overlay_swap_chain);
-            assert_eq!(render_call.monitor_identity, test_monitor_identity());
-            assert_eq!(render_call.dirty_rects, dirty_rects);
+            assert_eq!(apply_call.overlay_swap_chain, overlay_swap_chain);
+            assert_eq!(apply_call.monitor_identity, test_monitor_identity());
+            assert_eq!(apply_call.dirty_rects, dirty_rects);
         }
 
         #[test]
-        fn skips_render_when_shutdown_starts_after_entry_check() {
+        fn skips_lut_application_when_shutdown_starts_after_entry_check() {
             let _guard = HOOK_GLOBAL_TEST_LOCK
                 .lock()
                 .expect("test mutex should lock");
             initialize_test_state();
-            crate::d3d11::set_fake_render_result(Ok(sample_outcome(
-                None,
-                PresentDrawStatus::Applied { full_redraw: false },
-            )));
+            crate::render::set_fake_apply_result(Ok(sample_outcome(None, LutApplyStatus::Applied)));
 
             let shutdown = match lifecycle::begin_shutdown() {
                 lifecycle::ShutdownStart::Started(transition) => transition,
@@ -535,7 +527,7 @@ mod tests {
 
             let _ = apply_lut(0x1234, &test_profile(), &sample_inputs(Vec::new()));
 
-            assert!(crate::d3d11::fake_render_present_lut_call().is_none());
+            assert!(crate::render::fake_apply_lut_call().is_none());
             shutdown.finish_inactive();
             state::reset_state_for_tests();
         }
@@ -573,14 +565,14 @@ mod tests {
                 }],
                 true,
             );
-            crate::d3d11::set_fake_render_result(Ok(sample_outcome(
+            crate::render::set_fake_apply_result(Ok(sample_outcome(
                 Some(DirtyRect {
                     left: 0,
                     top: 0,
                     right: 1920,
                     bottom: 1080,
                 }),
-                PresentDrawStatus::Applied { full_redraw: true },
+                LutApplyStatus::Applied,
             )));
 
             let original_rect_vec = fake.rect_vec_address();
@@ -597,8 +589,8 @@ mod tests {
 
             assert_eq!(status, 0x42);
             assert_eq!(forwarded_rect_vec, Some(original_rect_vec));
-            assert!(crate::d3d11::fake_render_present_lut_call().is_none());
-            crate::d3d11::reset_fake_render_result();
+            assert!(crate::render::fake_apply_lut_call().is_none());
+            crate::render::reset_fake_apply_result();
         }
 
         #[test]
@@ -622,9 +614,9 @@ mod tests {
                 right: 1920,
                 bottom: 1080,
             };
-            crate::d3d11::set_fake_render_result(Ok(sample_outcome(
+            crate::render::set_fake_apply_result(Ok(sample_outcome(
                 Some(full_rect),
-                PresentDrawStatus::Applied { full_redraw: true },
+                LutApplyStatus::Applied,
             )));
 
             let mut forwarded_rects = None;
@@ -640,7 +632,7 @@ mod tests {
 
             assert_eq!(status, 0x42);
             assert_eq!(forwarded_rects, Some(vec![full_rect]));
-            crate::d3d11::reset_fake_render_result();
+            crate::render::reset_fake_apply_result();
         }
     }
 }

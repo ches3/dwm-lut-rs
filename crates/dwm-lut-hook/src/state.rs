@@ -142,7 +142,7 @@ pub(crate) fn reset_state_for_tests() {
     clear_assignments();
     clear_hook_runtime();
     crate::lifecycle::reset_for_tests();
-    crate::d3d11::reset_fake_render_result();
+    crate::render::reset_fake_apply_result();
     crate::minhook::reset_test_minhook_behavior(None);
 }
 

@@ -181,17 +181,17 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
     }
 
     let result = {
-        let mut renderer = crate::d3d11::lock_renderer();
+        let mut renderer = crate::render::lock_renderer();
         match set_flip_gate_enabled(&runtime.minhook, &runtime.hooks, next_flip_gate_enabled) {
             Ok(()) => {
                 store_assignments(next_assignments);
-                let _ = renderer.clear_resources();
+                renderer.clear_resources();
                 transition.commit_active(&profile_name);
                 Ok(())
             }
             Err(error) => {
                 clear_assignments();
-                let _ = renderer.clear_resources();
+                renderer.clear_resources();
                 transition.finish_inactive();
                 Err(ReplaceAssignmentsError::Inactive(error))
             }
@@ -202,8 +202,8 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
 }
 
 fn deactivate_hook_runtime(runtime: &HookRuntime) -> Result<(), MinHookError> {
-    let mut renderer = crate::d3d11::lock_renderer();
-    let _ = renderer.clear_resources();
+    let mut renderer = crate::render::lock_renderer();
+    renderer.clear_resources();
     crate::desktop_redraw::request_desktop_redraw();
     disable_all_hooks(&runtime.minhook)
 }
