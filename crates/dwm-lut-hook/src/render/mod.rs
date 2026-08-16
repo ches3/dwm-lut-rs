@@ -31,6 +31,21 @@ mod renderer;
 #[cfg_attr(test, allow(dead_code))]
 mod resources;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct SwapChainRoute {
+    device_id: usize,
+    swap_chain: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RestoreToken {
+    session_id: Option<usize>,
+    monitor_identity: dwm_lut_payload::MonitorIdentity,
+    route: SwapChainRoute,
+    back_buffer_id: usize,
+    state_generation: u64,
+}
+
 #[cfg(test)]
 pub(crate) use frame_plan::DXGI_FORMAT_B8G8R8A8_UNORM;
 
@@ -38,7 +53,6 @@ pub(crate) use frame_plan::DXGI_FORMAT_B8G8R8A8_UNORM;
 pub(crate) enum FrameSkipReason {
     ZeroSize,
     UnsupportedFormat,
-    MissingAssignment,
     NoValidDirtyRects,
 }
 
@@ -48,7 +62,6 @@ impl FrameSkipReason {
         match self {
             Self::ZeroSize => "zero_size",
             Self::UnsupportedFormat => "unsupported_format",
-            Self::MissingAssignment => "missing_assignment",
             Self::NoValidDirtyRects => "no_valid_dirty_rects",
         }
     }
@@ -65,39 +78,46 @@ pub(crate) enum FrameAcquireError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(test, allow(dead_code))]
-pub(crate) enum LutRenderFailure {
-    DeviceResourcesCreateFailed,
-    LutIndexOutOfRange,
-    SourceTextureCreateFailed,
-    RenderTargetViewCreateFailed,
+pub(crate) enum FrameProcessingError {
+    DeviceResources,
+    LutTexture,
+    CleanFrameCreate,
+    CleanFrameMissing,
+    RenderTargetView,
 }
 
 #[cfg(debug_assertions)]
-impl LutRenderFailure {
+impl FrameProcessingError {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::DeviceResourcesCreateFailed => "device_resources_create_failed",
-            Self::LutIndexOutOfRange => "lut_index_out_of_range",
-            Self::SourceTextureCreateFailed => "source_texture_create_failed",
-            Self::RenderTargetViewCreateFailed => "render_target_view_create_failed",
+            Self::DeviceResources => "device_resources_create_failed",
+            Self::LutTexture => "lut_texture_create_failed",
+            Self::CleanFrameCreate => "clean_frame_create_failed",
+            Self::CleanFrameMissing => "clean_frame_missing",
+            Self::RenderTargetView => "render_target_view_create_failed",
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LutApplyStatus {
-    Applied,
+pub(crate) enum FrameStatus {
+    LutApplied,
+    Restored,
+    #[cfg_attr(test, allow(dead_code))]
+    Unchanged,
     #[cfg_attr(test, allow(dead_code))]
     Skipped(FrameSkipReason),
     #[cfg_attr(test, allow(dead_code))]
-    Failed(LutRenderFailure),
+    Failed(FrameProcessingError),
 }
 
 #[cfg(debug_assertions)]
-impl LutApplyStatus {
+impl FrameStatus {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::Applied => "applied",
+            Self::LutApplied => "applied",
+            Self::Restored => "restored",
+            Self::Unchanged => "unchanged",
             Self::Skipped(reason) => reason.as_str(),
             Self::Failed(reason) => reason.as_str(),
         }
@@ -105,14 +125,15 @@ impl LutApplyStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct LutApplyOutcome {
+pub(crate) struct FrameOutcome {
     pub present_dirty_rect: Option<DirtyRect>,
-    pub status: LutApplyStatus,
+    pub status: FrameStatus,
     pub dxgi_format: u32,
     pub frame_size: FrameSize,
     pub lut_index: Option<usize>,
+    pub restore_token: Option<RestoreToken>,
     #[cfg(debug_assertions)]
-    pub(crate) back_buffer_id: u128,
+    pub(crate) back_buffer_id: usize,
 }
 
 #[cfg(not(test))]
@@ -120,6 +141,7 @@ pub(crate) use renderer::{lock_renderer, try_lock_renderer};
 
 #[cfg(test)]
 pub(crate) use fake::{
-    fake_apply_lut_call, lock_renderer, reset_fake_apply_result, set_fake_apply_result,
+    FakeFrameOperation, fake_clear_resources_calls, fake_frame_call, fake_restore_commit,
+    lock_renderer, reset_fake_frame_result, set_fake_frame_result, set_fake_restore_token,
     try_lock_renderer,
 };

@@ -47,9 +47,18 @@ pub(super) struct LutSelection {
     pub(super) lut_index: usize,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum FrameOperation<'a> {
+    Apply {
+        lut: LutSelection,
+        assignment: &'a LutAssignment,
+    },
+    Restore,
+}
+
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct FrameInput {
-    pub(super) lut: LutSelection,
+pub(super) struct PreparedFrame {
+    pub(super) back_buffer_format: BackBufferFormat,
     pub(super) size: FrameSize,
     pub(super) source_dirty_rects: Vec<DirtyRect>,
 }
@@ -62,21 +71,22 @@ pub(super) enum DrawScope {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct FramePlan {
-    input: FrameInput,
+    frame: PreparedFrame,
+    lut: LutSelection,
     scope: DrawScope,
 }
 
 impl FramePlan {
     pub(super) fn source_dirty_rects(&self) -> &[DirtyRect] {
-        &self.input.source_dirty_rects
+        &self.frame.source_dirty_rects
     }
 
     pub(super) const fn lut(&self) -> LutSelection {
-        self.input.lut
+        self.lut
     }
 
     pub(super) const fn size(&self) -> FrameSize {
-        self.input.size
+        self.frame.size
     }
 
     pub(super) const fn scope(&self) -> DrawScope {
@@ -86,73 +96,67 @@ impl FramePlan {
     pub(super) const fn present_dirty_rect(&self) -> Option<DirtyRect> {
         match self.scope {
             DrawScope::DirtyRects => None,
-            DrawScope::FullFrame => Some(self.input.size.full_rect()),
+            DrawScope::FullFrame => Some(self.frame.size.full_rect()),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct FrameSkip {
-    pub(super) reason: FrameSkipReason,
-    pub(super) lut_index: Option<usize>,
-}
-
-pub(super) fn prepare_frame_input(
-    assignments: &[LutAssignment],
-    monitor_identity: MonitorIdentity,
+pub(super) fn prepare_frame(
     dxgi_format: u32,
     size: FrameSize,
     dirty_rects: &[DirtyRect],
-) -> Result<FrameInput, FrameSkip> {
+) -> Result<PreparedFrame, FrameSkipReason> {
     let format = BackBufferFormat::from_dxgi_format(dxgi_format);
-    let matched = format.and_then(|format| {
-        find_assignment(assignments, monitor_identity, format.color_mode())
-            .map(|(lut_index, _)| (format, lut_index))
-    });
 
     if size.width == 0 || size.height == 0 {
-        return Err(FrameSkip {
-            reason: FrameSkipReason::ZeroSize,
-            lut_index: matched.map(|(_, lut_index)| lut_index),
-        });
+        return Err(FrameSkipReason::ZeroSize);
     }
     if format.is_none() {
-        return Err(FrameSkip {
-            reason: FrameSkipReason::UnsupportedFormat,
-            lut_index: None,
-        });
+        return Err(FrameSkipReason::UnsupportedFormat);
     }
-    let Some((format, lut_index)) = matched else {
-        return Err(FrameSkip {
-            reason: FrameSkipReason::MissingAssignment,
-            lut_index: None,
-        });
-    };
+    let format = format.expect("supported format was checked above");
     let source_dirty_rects = normalize_dirty_rects(dirty_rects, size);
     if source_dirty_rects.is_empty() {
-        return Err(FrameSkip {
-            reason: FrameSkipReason::NoValidDirtyRects,
-            lut_index: Some(lut_index),
-        });
+        return Err(FrameSkipReason::NoValidDirtyRects);
     }
 
-    Ok(FrameInput {
-        lut: LutSelection {
-            back_buffer_format: format,
-            lut_index,
-        },
+    Ok(PreparedFrame {
+        back_buffer_format: format,
         size,
         source_dirty_rects,
     })
 }
 
-pub(super) fn build_frame_plan(input: FrameInput, previous: Option<LutSelection>) -> FramePlan {
-    let scope = if previous == Some(input.lut) {
+pub(super) fn select_frame_operation(
+    assignments: &[LutAssignment],
+    monitor_identity: MonitorIdentity,
+    format: BackBufferFormat,
+) -> FrameOperation<'_> {
+    let Some((lut_index, assignment)) =
+        find_assignment(assignments, monitor_identity, format.color_mode())
+    else {
+        return FrameOperation::Restore;
+    };
+    FrameOperation::Apply {
+        lut: LutSelection {
+            back_buffer_format: format,
+            lut_index,
+        },
+        assignment,
+    }
+}
+
+pub(super) fn build_frame_plan(
+    frame: PreparedFrame,
+    lut: LutSelection,
+    previous: Option<LutSelection>,
+) -> FramePlan {
+    let scope = if previous == Some(lut) {
         DrawScope::DirtyRects
     } else {
         DrawScope::FullFrame
     };
-    FramePlan { input, scope }
+    FramePlan { frame, lut, scope }
 }
 
 fn normalize_dirty_rects(dirty_rects: &[DirtyRect], size: FrameSize) -> Vec<DirtyRect> {
@@ -228,35 +232,36 @@ mod tests {
     }
 
     #[test]
-    fn selects_assignment_for_back_buffer_format() {
+    fn selects_frame_operation_for_back_buffer_format_and_assignment() {
         let assignments = [assignment(ColorMode::Sdr), assignment(ColorMode::Hdr)];
+        let FrameOperation::Apply {
+            lut: sdr,
+            assignment: sdr_assignment,
+        } = select_frame_operation(&assignments, identity(), BackBufferFormat::Bgra8Unorm)
+        else {
+            panic!("SDR assignment should select LUT application");
+        };
+        let FrameOperation::Apply {
+            lut: hdr,
+            assignment: hdr_assignment,
+        } = select_frame_operation(&assignments, identity(), BackBufferFormat::Rgba16Float)
+        else {
+            panic!("HDR assignment should select LUT application");
+        };
 
-        let sdr = prepare_frame_input(
-            &assignments,
-            identity(),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            size(),
-            &[],
-        )
-        .unwrap();
-        let hdr = prepare_frame_input(
-            &assignments,
-            identity(),
-            DXGI_FORMAT_R16G16B16A16_FLOAT,
-            size(),
-            &[],
-        )
-        .unwrap();
-
-        assert_eq!(sdr.lut.lut_index, 0);
-        assert_eq!(hdr.lut.lut_index, 1);
+        assert_eq!(sdr.lut_index, 0);
+        assert_eq!(hdr.lut_index, 1);
+        assert_eq!(sdr_assignment.target.color_mode, ColorMode::Sdr);
+        assert_eq!(hdr_assignment.target.color_mode, ColorMode::Hdr);
+        assert!(matches!(
+            select_frame_operation(&[], identity(), BackBufferFormat::Bgra8Unorm),
+            FrameOperation::Restore
+        ));
     }
 
     #[test]
     fn normalizes_dirty_rects_to_frame() {
-        let input = prepare_frame_input(
-            &[assignment(ColorMode::Sdr)],
-            identity(),
+        let input = prepare_frame(
             DXGI_FORMAT_B8G8R8A8_UNORM,
             size(),
             &[
@@ -289,23 +294,14 @@ mod tests {
 
     #[test]
     fn empty_dirty_rects_mean_full_frame() {
-        let input = prepare_frame_input(
-            &[assignment(ColorMode::Sdr)],
-            identity(),
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            size(),
-            &[],
-        )
-        .unwrap();
+        let input = prepare_frame(DXGI_FORMAT_B8G8R8A8_UNORM, size(), &[]).unwrap();
 
         assert_eq!(input.source_dirty_rects, vec![size().full_rect()]);
     }
 
     #[test]
     fn skips_when_no_valid_dirty_rect_remains_after_normalization() {
-        let skip = prepare_frame_input(
-            &[assignment(ColorMode::Sdr)],
-            identity(),
+        let skip = prepare_frame(
             DXGI_FORMAT_B8G8R8A8_UNORM,
             size(),
             &[
@@ -325,20 +321,12 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(
-            skip,
-            FrameSkip {
-                reason: FrameSkipReason::NoValidDirtyRects,
-                lut_index: Some(0),
-            }
-        );
+        assert_eq!(skip, FrameSkipReason::NoValidDirtyRects);
     }
 
     #[test]
     fn new_or_changed_lut_requires_full_draw_and_present() {
-        let input = prepare_frame_input(
-            &[assignment(ColorMode::Sdr)],
-            identity(),
+        let input = prepare_frame(
             DXGI_FORMAT_B8G8R8A8_UNORM,
             size(),
             &[DirtyRect {
@@ -350,13 +338,17 @@ mod tests {
         )
         .unwrap();
         let source_dirty_rects = input.source_dirty_rects.clone();
+        let lut = LutSelection {
+            back_buffer_format: BackBufferFormat::Bgra8Unorm,
+            lut_index: 0,
+        };
         let previous_lut = LutSelection {
             back_buffer_format: BackBufferFormat::Bgra8Unorm,
             lut_index: 1,
         };
 
-        let new_back_buffer = build_frame_plan(input.clone(), None);
-        let changed_lut = build_frame_plan(input, Some(previous_lut));
+        let new_back_buffer = build_frame_plan(input.clone(), lut, None);
+        let changed_lut = build_frame_plan(input, lut, Some(previous_lut));
 
         for plan in [new_back_buffer, changed_lut] {
             assert_eq!(plan.scope(), DrawScope::FullFrame);
@@ -367,9 +359,7 @@ mod tests {
 
     #[test]
     fn unchanged_lut_uses_source_dirty_rects_without_replacing_present_rects() {
-        let input = prepare_frame_input(
-            &[assignment(ColorMode::Sdr)],
-            identity(),
+        let input = prepare_frame(
             DXGI_FORMAT_B8G8R8A8_UNORM,
             size(),
             &[DirtyRect {
@@ -380,19 +370,20 @@ mod tests {
             }],
         )
         .unwrap();
-        let lut = input.lut;
+        let lut = LutSelection {
+            back_buffer_format: BackBufferFormat::Bgra8Unorm,
+            lut_index: 0,
+        };
 
-        let plan = build_frame_plan(input, Some(lut));
+        let plan = build_frame_plan(input, lut, Some(lut));
 
         assert_eq!(plan.scope(), DrawScope::DirtyRects);
         assert_eq!(plan.present_dirty_rect(), None);
     }
 
     #[test]
-    fn skip_records_whether_an_assignment_was_selected() {
-        let active = prepare_frame_input(
-            &[assignment(ColorMode::Sdr)],
-            identity(),
+    fn rejects_invalid_size_and_format_independently_of_assignment_selection() {
+        let zero_size = prepare_frame(
             DXGI_FORMAT_B8G8R8A8_UNORM,
             FrameSize {
                 width: 0,
@@ -401,9 +392,9 @@ mod tests {
             &[],
         )
         .unwrap_err();
-        let inactive = prepare_frame_input(&[], identity(), 999, size(), &[]).unwrap_err();
+        let unsupported = prepare_frame(999, size(), &[]).unwrap_err();
 
-        assert_eq!(active.lut_index, Some(0));
-        assert_eq!(inactive.lut_index, None);
+        assert_eq!(zero_size, FrameSkipReason::ZeroSize);
+        assert_eq!(unsupported, FrameSkipReason::UnsupportedFormat);
     }
 }

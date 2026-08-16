@@ -377,9 +377,9 @@ fn evaluate_shutdown_status(status: ShutdownStatus) -> ShutdownDecision {
         ShutdownStatus::NotInitialized | ShutdownStatus::AlreadyShutDown => {
             ShutdownDecision::Inactive
         }
-        ShutdownStatus::AlreadyInProgress | ShutdownStatus::MinHookDisableAllFailed => {
-            ShutdownDecision::Fail
-        }
+        ShutdownStatus::AlreadyInProgress
+        | ShutdownStatus::MinHookDisableAllFailed
+        | ShutdownStatus::BackBufferRestoreTimedOut => ShutdownDecision::Fail,
     }
 }
 
@@ -446,7 +446,8 @@ fn deferred_shutdown_status_rank(status: ShutdownStatus) -> u8 {
         ShutdownStatus::NotInitialized => 1,
         ShutdownStatus::Success
         | ShutdownStatus::AlreadyInProgress
-        | ShutdownStatus::MinHookDisableAllFailed => 0,
+        | ShutdownStatus::MinHookDisableAllFailed
+        | ShutdownStatus::BackBufferRestoreTimedOut => 0,
     }
 }
 
@@ -580,6 +581,10 @@ mod tests {
         );
         assert_eq!(
             evaluate_shutdown_status(ShutdownStatus::MinHookDisableAllFailed),
+            ShutdownDecision::Fail
+        );
+        assert_eq!(
+            evaluate_shutdown_status(ShutdownStatus::BackBufferRestoreTimedOut),
             ShutdownDecision::Fail
         );
     }

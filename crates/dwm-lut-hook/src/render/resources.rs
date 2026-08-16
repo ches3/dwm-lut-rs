@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::mem::size_of;
 
 use windows::Win32::Graphics::Direct3D11::{
@@ -10,13 +10,21 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_SAMPLE_DESC,
 };
 
-use super::frame_plan::{BackBufferFormat, FrameInput, LutSelection, build_frame_plan};
-use super::render_pass::{LutPassInput, LutRenderPass};
-use super::{FrameSize, LutRenderFailure};
+use super::frame_plan::{
+    BackBufferFormat, FrameOperation, LutSelection, PreparedFrame, build_frame_plan,
+};
+use super::render_pass::{
+    LutPassInput, LutRenderPass, restore_back_buffer_from_clean_frame, update_clean_frame,
+};
+use super::{FrameProcessingError, FrameSize};
 use crate::dwmcore::DirtyRect;
 use crate::state::LutAssignment;
+use dwm_lut_payload::MonitorIdentity;
 
 pub(super) struct FrameResources<'a> {
+    pub(super) swap_chain: usize,
+    pub(super) back_buffer_id: usize,
+    pub(super) monitor_identity: MonitorIdentity,
     pub(super) device: &'a ID3D11Device,
     pub(super) context: &'a ID3D11DeviceContext,
     pub(super) back_buffer: &'a ID3D11Texture2D,
@@ -25,185 +33,387 @@ pub(super) struct FrameResources<'a> {
 
 pub(super) struct DeviceResources {
     lut_pass: LutRenderPass,
-    lut_views: Vec<ID3D11ShaderResourceView>,
+    lut_views: BTreeMap<usize, ID3D11ShaderResourceView>,
     swap_chains: BTreeMap<usize, SwapChainResources>,
 }
 
+pub(super) enum FrameEffect {
+    Unchanged,
+    LutApplied {
+        present_dirty_rect: Option<DirtyRect>,
+    },
+    Restored {
+        generation: u64,
+    },
+}
+
 impl DeviceResources {
-    pub(super) fn create(device: &ID3D11Device, assignments: &[LutAssignment]) -> Option<Self> {
+    pub(super) fn create(device: &ID3D11Device) -> Option<Self> {
         let lut_pass = LutRenderPass::create(device)?;
-        let lut_views = assignments
-            .iter()
-            .map(|assignment| create_lut_view(device, assignment))
-            .collect::<Option<Vec<_>>>()?;
 
         Some(Self {
             lut_pass,
-            lut_views,
+            lut_views: BTreeMap::new(),
             swap_chains: BTreeMap::new(),
         })
     }
 
-    pub(super) fn remove_swap_chain(&mut self, swap_chain: usize) {
-        self.swap_chains.remove(&swap_chain);
+    pub(super) fn invalidate_luts(&mut self) {
+        self.lut_views.clear();
+        for resources in self.swap_chains.values_mut() {
+            resources.back_buffer_states.require_full_application();
+        }
     }
 
-    pub(super) fn render_frame(
+    pub(super) fn restore_targets<'a>(
+        &'a self,
+        active_monitors: Option<&'a HashSet<MonitorIdentity>>,
+    ) -> impl Iterator<Item = usize> + 'a {
+        self.swap_chains
+            .iter()
+            .filter(move |(_, resources)| resources.is_restore_target(active_monitors))
+            .map(|(swap_chain, _)| *swap_chain)
+    }
+
+    pub(super) fn update_monitor_identity(
         &mut self,
         swap_chain: usize,
-        back_buffer_id: u128,
+        monitor_identity: MonitorIdentity,
+    ) {
+        if let Some(resources) = self.swap_chains.get_mut(&swap_chain) {
+            resources.monitor_identity = monitor_identity;
+        }
+    }
+
+    pub(super) fn prune_unused_swap_chains(&mut self) {
+        self.swap_chains
+            .retain(|_, resources| !resources.back_buffer_states.is_empty());
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.swap_chains.is_empty()
+    }
+
+    pub(super) fn process_frame(
+        &mut self,
         frame: FrameResources<'_>,
-        assignments: &[LutAssignment],
-        input: FrameInput,
-    ) -> Result<Option<DirtyRect>, LutRenderFailure> {
-        let lut_index = input.lut.lut_index;
-        let assignment = assignments
-            .get(lut_index)
-            .ok_or(LutRenderFailure::LutIndexOutOfRange)?;
-        let lut_view = self
-            .lut_views
-            .get(lut_index)
-            .cloned()
-            .ok_or(LutRenderFailure::LutIndexOutOfRange)?;
-        let render_target = create_render_target_view(frame.device, frame.back_buffer)
-            .ok_or(LutRenderFailure::RenderTargetViewCreateFailed)?;
+        frame_input: PreparedFrame,
+        operation: FrameOperation<'_>,
+    ) -> Result<FrameEffect, FrameProcessingError> {
+        let (lut, assignment) = match operation {
+            FrameOperation::Apply { lut, assignment } => (lut, assignment),
+            FrameOperation::Restore => return self.restore_frame(frame, frame_input),
+        };
+        let lut_index = lut.lut_index;
+        let draw_resources = (|| {
+            let lut_view = match self.lut_views.get(&lut_index) {
+                Some(view) => view.clone(),
+                None => {
+                    let view = create_lut_view(frame.device, assignment)
+                        .ok_or(FrameProcessingError::LutTexture)?;
+                    self.lut_views.insert(lut_index, view.clone());
+                    view
+                }
+            };
+            let render_target = create_render_target_view(frame.device, frame.back_buffer)
+                .ok_or(FrameProcessingError::RenderTargetView)?;
+            Ok((lut_view, render_target))
+        })();
 
         let swap_chain_resources = self
             .swap_chains
-            .entry(swap_chain)
-            .or_insert_with(|| SwapChainResources::new(frame.size));
+            .entry(frame.swap_chain)
+            .or_insert_with(|| SwapChainResources::new(frame.size, frame.monitor_identity));
         if swap_chain_resources.size != frame.size {
-            *swap_chain_resources = SwapChainResources::new(frame.size);
+            *swap_chain_resources = SwapChainResources::new(frame.size, frame.monitor_identity);
+        } else {
+            swap_chain_resources.monitor_identity = frame.monitor_identity;
         }
 
-        let previous = swap_chain_resources
+        let reusable_lut = swap_chain_resources
             .back_buffer_states
-            .last_applied_lut(back_buffer_id);
-        let plan = build_frame_plan(input, previous);
-        let (source, source_created) = swap_chain_resources
-            .sources
+            .reusable_lut(frame.back_buffer_id);
+        let plan = build_frame_plan(frame_input, lut, reusable_lut);
+        let (clean, clean_created) = swap_chain_resources
+            .clean_frames
             .get_or_create(frame.device, frame.size, plan.lut().back_buffer_format)
-            .ok_or(LutRenderFailure::SourceTextureCreateFailed)?;
-        let full_source_update = [frame.size.full_rect()];
-        let source_update_rects = if source_created {
-            &full_source_update[..]
+            .ok_or(FrameProcessingError::CleanFrameCreate)?;
+        let full_clean_update = [frame.size.full_rect()];
+        let clean_update_rects = if clean_created {
+            &full_clean_update[..]
         } else {
             plan.source_dirty_rects()
+        };
+
+        let (lut_view, render_target) = match draw_resources {
+            Ok(resources) => resources,
+            Err(error) => {
+                update_clean_frame(
+                    frame.context,
+                    frame.back_buffer,
+                    &clean.texture,
+                    clean_update_rects,
+                );
+                return Err(error);
+            }
         };
 
         self.lut_pass.execute(LutPassInput {
             context: frame.context,
             back_buffer: frame.back_buffer,
             render_target: &render_target,
-            source_texture: &source.texture,
-            source_view: &source.view,
+            clean_texture: &clean.texture,
+            clean_view: &clean.view,
             lut_view: &lut_view,
             assignment,
-            source_update_rects,
+            clean_update_rects,
             plan: &plan,
         });
         swap_chain_resources
             .back_buffer_states
-            .record_applied_lut(back_buffer_id, plan.lut());
+            .record_applied_lut(frame.back_buffer_id, plan.lut());
 
-        Ok(plan.present_dirty_rect())
+        Ok(FrameEffect::LutApplied {
+            present_dirty_rect: plan.present_dirty_rect(),
+        })
+    }
+
+    pub(super) fn restore_frame(
+        &mut self,
+        frame: FrameResources<'_>,
+        frame_input: PreparedFrame,
+    ) -> Result<FrameEffect, FrameProcessingError> {
+        let Some(resources) = self.swap_chains.get(&frame.swap_chain) else {
+            return Ok(FrameEffect::Unchanged);
+        };
+        if resources.size != frame.size {
+            self.swap_chains.remove(&frame.swap_chain);
+            return Ok(FrameEffect::Unchanged);
+        }
+        let resources = self
+            .swap_chains
+            .get_mut(&frame.swap_chain)
+            .expect("validated swap chain resources must remain available");
+        resources.monitor_identity = frame.monitor_identity;
+        let applied_state = resources
+            .back_buffer_states
+            .applied_state(frame.back_buffer_id);
+        let Some(applied_state) = applied_state else {
+            if let Some(clean) = resources.clean_frames.get(frame_input.back_buffer_format) {
+                update_clean_frame(
+                    frame.context,
+                    frame.back_buffer,
+                    &clean.texture,
+                    &frame_input.source_dirty_rects,
+                );
+            }
+            return Ok(FrameEffect::Unchanged);
+        };
+        if frame_input.back_buffer_format != applied_state.selection.back_buffer_format {
+            return Ok(FrameEffect::Unchanged);
+        }
+        let Some(clean) = resources
+            .clean_frames
+            .get(frame_input.back_buffer_format)
+            .cloned()
+        else {
+            return Err(FrameProcessingError::CleanFrameMissing);
+        };
+
+        restore_back_buffer_from_clean_frame(
+            frame.context,
+            frame.back_buffer,
+            &clean.texture,
+            &frame_input.source_dirty_rects,
+        );
+        Ok(FrameEffect::Restored {
+            generation: applied_state.generation,
+        })
+    }
+
+    pub(super) fn lut_applied_back_buffer_count(&self, swap_chain: usize) -> usize {
+        self.swap_chains
+            .get(&swap_chain)
+            .map_or(0, |resources| resources.back_buffer_states.len())
+    }
+
+    pub(super) fn record_restored(
+        &mut self,
+        swap_chain: usize,
+        back_buffer_id: usize,
+        generation: u64,
+    ) -> bool {
+        let Some(resources) = self.swap_chains.get_mut(&swap_chain) else {
+            return false;
+        };
+        let Some(applied_lut) = resources
+            .back_buffer_states
+            .record_clean(back_buffer_id, generation)
+        else {
+            return false;
+        };
+        if !resources
+            .back_buffer_states
+            .has_applied_format(applied_lut.back_buffer_format)
+        {
+            resources
+                .clean_frames
+                .remove(applied_lut.back_buffer_format);
+        }
+        true
+    }
+
+    pub(super) fn remove_back_buffer(&mut self, back_buffer_id: usize) {
+        for resources in self.swap_chains.values_mut() {
+            resources.back_buffer_states.remove(back_buffer_id);
+        }
     }
 }
 
 struct SwapChainResources {
     size: FrameSize,
-    sources: SourceTextures,
+    monitor_identity: MonitorIdentity,
+    clean_frames: CleanFrames,
     back_buffer_states: BackBufferStates,
 }
 
 impl SwapChainResources {
-    fn new(size: FrameSize) -> Self {
+    fn new(size: FrameSize, monitor_identity: MonitorIdentity) -> Self {
         Self {
             size,
-            sources: SourceTextures::default(),
+            monitor_identity,
+            clean_frames: CleanFrames::default(),
             back_buffer_states: BackBufferStates::default(),
         }
+    }
+
+    fn is_restore_target(&self, active_monitors: Option<&HashSet<MonitorIdentity>>) -> bool {
+        !self.back_buffer_states.is_empty()
+            && active_monitors.is_none_or(|active| active.contains(&self.monitor_identity))
     }
 }
 
 #[derive(Default)]
-struct SourceTextures {
-    sdr: Option<SourceTexture>,
-    hdr: Option<SourceTexture>,
+struct CleanFrames {
+    sdr: Option<CleanFrame>,
+    hdr: Option<CleanFrame>,
 }
 
-impl SourceTextures {
+impl CleanFrames {
     fn get_or_create(
         &mut self,
         device: &ID3D11Device,
         size: FrameSize,
         format: BackBufferFormat,
-    ) -> Option<(SourceTexture, bool)> {
+    ) -> Option<(CleanFrame, bool)> {
         let slot = match format {
             BackBufferFormat::Bgra8Unorm => &mut self.sdr,
             BackBufferFormat::Rgba16Float => &mut self.hdr,
         };
         let created = slot.is_none();
         if created {
-            *slot = Some(create_source_texture(device, size, format)?);
+            *slot = Some(create_clean_frame(device, size, format)?);
         }
         slot.clone().map(|source| (source, created))
+    }
+
+    fn get(&self, format: BackBufferFormat) -> Option<&CleanFrame> {
+        match format {
+            BackBufferFormat::Bgra8Unorm => self.sdr.as_ref(),
+            BackBufferFormat::Rgba16Float => self.hdr.as_ref(),
+        }
+    }
+
+    fn remove(&mut self, format: BackBufferFormat) {
+        match format {
+            BackBufferFormat::Bgra8Unorm => self.sdr = None,
+            BackBufferFormat::Rgba16Float => self.hdr = None,
+        }
     }
 }
 
 #[derive(Clone)]
-struct SourceTexture {
+struct CleanFrame {
     texture: ID3D11Texture2D,
     view: ID3D11ShaderResourceView,
 }
 
 #[derive(Clone, Copy)]
 struct BackBufferState {
-    lut: LutSelection,
-    last_seen: u64,
+    selection: LutSelection,
+    requires_full_application: bool,
+    generation: u64,
 }
 
 #[derive(Default)]
 struct BackBufferStates {
-    entries: BTreeMap<u128, BackBufferState>,
-    sequence: u64,
+    entries: BTreeMap<usize, BackBufferState>,
+    next_generation: u64,
 }
 
 impl BackBufferStates {
-    const MAX_ENTRIES: usize = 16;
-
-    fn last_applied_lut(&mut self, back_buffer: u128) -> Option<LutSelection> {
-        self.sequence = self.sequence.saturating_add(1);
-        let entry = self.entries.get_mut(&back_buffer)?;
-        entry.last_seen = self.sequence;
-        Some(entry.lut)
+    fn reusable_lut(&self, back_buffer: usize) -> Option<LutSelection> {
+        let entry = self.entries.get(&back_buffer)?;
+        (!entry.requires_full_application).then_some(entry.selection)
     }
 
-    fn record_applied_lut(&mut self, back_buffer: u128, lut: LutSelection) {
-        if !self.entries.contains_key(&back_buffer) && self.entries.len() >= Self::MAX_ENTRIES {
-            let oldest = self
-                .entries
-                .iter()
-                .min_by_key(|(id, entry)| (entry.last_seen, **id))
-                .map(|(id, _)| *id)
-                .expect("a full back buffer state cache must contain an oldest entry");
-            self.entries.remove(&oldest);
-        }
+    fn record_applied_lut(&mut self, back_buffer: usize, lut: LutSelection) {
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        let generation = self.next_generation;
         self.entries.insert(
             back_buffer,
             BackBufferState {
-                lut,
-                last_seen: self.sequence,
+                selection: lut,
+                requires_full_application: false,
+                generation,
             },
         );
     }
+
+    fn applied_state(&self, back_buffer: usize) -> Option<BackBufferState> {
+        self.entries.get(&back_buffer).copied()
+    }
+
+    fn has_applied_format(&self, format: BackBufferFormat) -> bool {
+        self.entries
+            .values()
+            .any(|entry| entry.selection.back_buffer_format == format)
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn record_clean(&mut self, back_buffer: usize, generation: u64) -> Option<LutSelection> {
+        let entry = self.entries.get(&back_buffer)?;
+        if entry.generation != generation {
+            return None;
+        }
+        self.remove(back_buffer)
+    }
+
+    fn remove(&mut self, back_buffer: usize) -> Option<LutSelection> {
+        self.entries
+            .remove(&back_buffer)
+            .map(|entry| entry.selection)
+    }
+
+    fn require_full_application(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.requires_full_application = true;
+        }
+    }
 }
 
-fn create_source_texture(
+fn create_clean_frame(
     device: &ID3D11Device,
     size: FrameSize,
     format: BackBufferFormat,
-) -> Option<SourceTexture> {
+) -> Option<CleanFrame> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: size.width,
         Height: size.height,
@@ -227,7 +437,7 @@ fn create_source_texture(
     }
     let texture = texture?;
     let view = create_shader_resource_view(device, &texture)?;
-    Some(SourceTexture { texture, view })
+    Some(CleanFrame { texture, view })
 }
 
 fn create_render_target_view(
@@ -293,6 +503,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dwm_lut_payload::AdapterLuid;
+
+    fn monitor(target_id: u32) -> MonitorIdentity {
+        MonitorIdentity {
+            adapter_luid: AdapterLuid {
+                high_part: 1,
+                low_part: 2,
+            },
+            target_id,
+        }
+    }
 
     fn lut(lut_index: usize) -> LutSelection {
         LutSelection {
@@ -302,33 +523,114 @@ mod tests {
     }
 
     #[test]
+    fn restore_target_follows_resource_monitor_and_applied_state() {
+        let first_monitor = monitor(1);
+        let second_monitor = monitor(2);
+        let mut resources = SwapChainResources::new(
+            FrameSize {
+                width: 1920,
+                height: 1080,
+            },
+            first_monitor,
+        );
+
+        assert!(!resources.is_restore_target(None));
+
+        resources.back_buffer_states.record_applied_lut(1, lut(0));
+        assert!(resources.is_restore_target(None));
+        assert!(resources.is_restore_target(Some(&HashSet::from([first_monitor]))));
+        assert!(!resources.is_restore_target(Some(&HashSet::from([second_monitor]))));
+
+        resources.monitor_identity = second_monitor;
+        assert!(!resources.is_restore_target(Some(&HashSet::from([first_monitor]))));
+        assert!(resources.is_restore_target(Some(&HashSet::from([second_monitor]))));
+    }
+
+    #[test]
     fn back_buffers_are_tracked_independently() {
         let first = 1;
         let second = 2;
         let mut states = BackBufferStates::default();
 
-        assert_eq!(states.last_applied_lut(first), None);
+        assert_eq!(states.reusable_lut(first), None);
         states.record_applied_lut(first, lut(0));
 
-        assert_eq!(states.last_applied_lut(first), Some(lut(0)));
-        assert_eq!(states.last_applied_lut(second), None);
+        assert_eq!(states.reusable_lut(first), Some(lut(0)));
+        assert_eq!(states.reusable_lut(second), None);
     }
 
     #[test]
-    fn back_buffer_states_evict_the_least_recently_seen_entry() {
+    fn full_application_does_not_forget_that_a_buffer_still_contains_a_lut() {
         let mut states = BackBufferStates::default();
-        for value in 0..BackBufferStates::MAX_ENTRIES as u128 {
-            states.last_applied_lut(value);
+        states.record_applied_lut(1, lut(0));
+
+        states.require_full_application();
+
+        assert_eq!(states.reusable_lut(1), None);
+        assert_eq!(
+            states.applied_state(1).map(|state| state.selection),
+            Some(lut(0))
+        );
+        assert_eq!(states.len(), 1);
+    }
+
+    #[test]
+    fn clean_buffer_is_not_a_restore_target_and_requires_full_lut_application() {
+        let mut states = BackBufferStates::default();
+        states.record_applied_lut(1, lut(0));
+        let generation = states.applied_state(1).unwrap().generation;
+
+        assert_eq!(states.record_clean(1, generation), Some(lut(0)));
+
+        assert_eq!(states.reusable_lut(1), None);
+        assert!(states.applied_state(1).is_none());
+        assert_eq!(states.len(), 0);
+    }
+
+    #[test]
+    fn applied_lut_presence_tracks_cleaned_buffers() {
+        let mut states = BackBufferStates::default();
+        states.record_applied_lut(1, lut(0));
+        states.record_applied_lut(2, lut(0));
+        let first_generation = states.applied_state(1).unwrap().generation;
+        let second_generation = states.applied_state(2).unwrap().generation;
+
+        assert_eq!(states.len(), 2);
+        states.record_clean(1, first_generation);
+        assert_eq!(states.len(), 1);
+        states.record_clean(2, second_generation);
+        assert_eq!(states.len(), 0);
+    }
+
+    #[test]
+    fn applied_buffers_are_retained_until_they_are_cleaned_or_destroyed() {
+        let mut states = BackBufferStates::default();
+        for value in 1..=32 {
             states.record_applied_lut(value, lut(0));
         }
-        states.last_applied_lut(0);
 
-        let new_id = BackBufferStates::MAX_ENTRIES as u128;
-        states.last_applied_lut(new_id);
-        states.record_applied_lut(new_id, lut(1));
+        assert_eq!(states.len(), 32);
+        assert_eq!(
+            states.applied_state(1).map(|state| state.selection),
+            Some(lut(0))
+        );
+        assert_eq!(
+            states.applied_state(32).map(|state| state.selection),
+            Some(lut(0))
+        );
+    }
 
-        assert!(states.entries.contains_key(&0));
-        assert!(!states.entries.contains_key(&1));
-        assert_eq!(states.last_applied_lut(new_id), Some(lut(1)));
+    #[test]
+    fn stale_restore_does_not_clear_a_newer_lut_application() {
+        let mut states = BackBufferStates::default();
+        states.record_applied_lut(1, lut(0));
+        let stale_generation = states.applied_state(1).unwrap().generation;
+        states.record_applied_lut(1, lut(1));
+
+        assert_eq!(states.record_clean(1, stale_generation), None);
+        assert_eq!(
+            states.applied_state(1).map(|state| state.selection),
+            Some(lut(1))
+        );
     }
 }

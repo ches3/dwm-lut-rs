@@ -8,6 +8,7 @@ compile_error!("dwm-lut-hook supports only x86_64-pc-windows-msvc");
 
 mod bootstrap;
 mod desktop_redraw;
+mod display_config;
 mod dwmcore;
 mod flip_gate;
 mod lifecycle;

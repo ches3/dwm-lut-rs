@@ -3,6 +3,7 @@ mod error;
 pub use error::{HookError, ReplaceAssignmentsError};
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dwm_lut_payload::{
     DwmLutPayloadBuffer, HookPayload, InitializeStatus, ReplaceAssignmentsStatus, ShutdownStatus,
@@ -16,7 +17,7 @@ use crate::lifecycle::{
 };
 use crate::log;
 use crate::minhook::{
-    MinHookError, MinHookRuntime, RegisteredHooks, disable_all_hooks, enable_hooks, register_hooks,
+    MinHookRuntime, RegisteredHooks, disable_all_hooks, enable_hooks, register_hooks,
     set_flip_gate_enabled, uninitialize,
 };
 use crate::resolver::{HookResolveError, SignatureResolutionReport, resolve_profile};
@@ -115,16 +116,11 @@ pub(crate) fn ffi_shutdown() -> u32 {
         return ShutdownStatus::Success as u32;
     };
 
-    let deactivate_result = deactivate_hook_runtime(&runtime);
+    let result = deactivate_hook_runtime(&runtime);
     clear_assignments();
     transition.finish_inactive();
-    if deactivate_result.is_err() {
-        log::shutdown_finished(log::ShutdownFinished::MinHookDisableAllFailed);
-        ShutdownStatus::MinHookDisableAllFailed as u32
-    } else {
-        log::shutdown_finished(log::ShutdownFinished::Success);
-        ShutdownStatus::Success as u32
-    }
+    log::shutdown_finished(result.shutdown_finished());
+    result.status() as u32
 }
 
 pub(crate) unsafe fn ffi_replace_assignments(payload_buffer: *const DwmLutPayloadBuffer) -> u32 {
@@ -185,7 +181,7 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
         match set_flip_gate_enabled(&runtime.minhook, &runtime.hooks, next_flip_gate_enabled) {
             Ok(()) => {
                 store_assignments(next_assignments);
-                renderer.clear_resources();
+                renderer.assignments_changed();
                 transition.commit_active(&profile_name);
                 Ok(())
             }
@@ -201,11 +197,81 @@ fn replace_assignments(payload: HookPayload) -> Result<(), ReplaceAssignmentsErr
     result
 }
 
-fn deactivate_hook_runtime(runtime: &HookRuntime) -> Result<(), MinHookError> {
+#[derive(Clone, Copy, Debug)]
+enum DeactivateHookResult {
+    Restored,
+    RestoreTimedOut,
+    DisableAllHooksFailed,
+}
+
+impl DeactivateHookResult {
+    fn shutdown_finished(self) -> log::ShutdownFinished {
+        match self {
+            Self::Restored => log::ShutdownFinished::Success,
+            Self::RestoreTimedOut => log::ShutdownFinished::BackBufferRestoreTimedOut,
+            Self::DisableAllHooksFailed => log::ShutdownFinished::MinHookDisableAllFailed,
+        }
+    }
+
+    fn status(self) -> ShutdownStatus {
+        match self {
+            Self::Restored => ShutdownStatus::Success,
+            Self::RestoreTimedOut => ShutdownStatus::BackBufferRestoreTimedOut,
+            Self::DisableAllHooksFailed => ShutdownStatus::MinHookDisableAllFailed,
+        }
+    }
+}
+
+fn deactivate_hook_runtime(runtime: &HookRuntime) -> DeactivateHookResult {
+    const RESTORE_TIMEOUT: Duration = Duration::from_secs(2);
+    const REDRAW_INTERVAL: Duration = Duration::from_millis(50);
+
+    let active_monitors = match crate::display_config::active_monitor_identities() {
+        Ok(monitors) => Some(monitors),
+        Err(error) => {
+            log::shutdown_active_monitors_query_failed(error);
+            None
+        }
+    };
+
     let mut renderer = crate::render::lock_renderer();
+    let pending_back_buffer_count = renderer.begin_restore(active_monitors.as_ref());
+    log::shutdown_restore_started(pending_back_buffer_count);
+    let deadline = Instant::now() + RESTORE_TIMEOUT;
+
+    let outcome = loop {
+        if renderer.pending_restore_back_buffer_count() == 0 {
+            break DeactivateHookResult::Restored;
+        }
+
+        drop(renderer);
+        crate::desktop_redraw::request_desktop_redraw();
+        renderer = crate::render::lock_renderer();
+        let pending_back_buffer_count = renderer.pending_restore_back_buffer_count();
+        if pending_back_buffer_count == 0 {
+            break DeactivateHookResult::Restored;
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            log::shutdown_restore_timed_out(pending_back_buffer_count);
+            break DeactivateHookResult::RestoreTimedOut;
+        }
+
+        let wait = REDRAW_INTERVAL.min(deadline.saturating_duration_since(now));
+        renderer.wait_for_restore_progress(wait);
+    };
+
+    if matches!(outcome, DeactivateHookResult::Restored) {
+        log::shutdown_restore_completed();
+    }
+    let disable_failed = disable_all_hooks(&runtime.minhook).is_err();
     renderer.clear_resources();
-    crate::desktop_redraw::request_desktop_redraw();
-    disable_all_hooks(&runtime.minhook)
+    if disable_failed {
+        DeactivateHookResult::DisableAllHooksFailed
+    } else {
+        outcome
+    }
 }
 
 fn initialize_from_payload(payload: HookPayload) -> Result<(), HookError> {
@@ -268,6 +334,7 @@ fn reactivate_from_payload(payload: HookPayload) -> Result<(), HookError> {
         return Err(HookError::AlreadyInitialized);
     };
     store_assignments(next_assignments);
+    crate::render::lock_renderer().assignments_changed();
     enable_hooks_for_runtime(
         &runtime.minhook,
         &runtime.hooks,
@@ -691,6 +758,7 @@ mod tests {
             super::ffi_shutdown(),
             ShutdownStatus::MinHookDisableAllFailed as u32
         );
+        assert_eq!(crate::render::fake_clear_resources_calls(), 1);
         assert_exported_status(HookStatus::Inactive, None);
 
         super::initialize_with_resolution(

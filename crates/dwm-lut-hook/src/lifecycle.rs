@@ -13,7 +13,7 @@ const LIFECYCLE_INACTIVE: u8 = 0;
 const LIFECYCLE_INITIALIZING: u8 = 1;
 const LIFECYCLE_RUNNING: u8 = 2;
 const LIFECYCLE_REPLACING_ASSIGNMENTS: u8 = 3;
-const LIFECYCLE_SHUTTING_DOWN: u8 = 4;
+const LIFECYCLE_RESTORING: u8 = 4;
 
 static STATUS_PUBLISH_LOCK: Mutex<()> = Mutex::new(());
 
@@ -169,6 +169,12 @@ pub(crate) enum ReplaceAssignmentsStart {
     AlreadyInProgress,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PresentMode {
+    Apply,
+    Restore,
+}
+
 fn publish_status(status: HookStatus, profile_name: Option<&str>) {
     let mut snapshot = DwmLutStatusSnapshot::inactive();
     snapshot.hook_status = status as u32;
@@ -229,6 +235,14 @@ pub(crate) fn is_runtime_active() -> bool {
     )
 }
 
+pub(crate) fn present_mode() -> Option<PresentMode> {
+    match LIFECYCLE.load(Ordering::Acquire) {
+        LIFECYCLE_RUNNING | LIFECYCLE_REPLACING_ASSIGNMENTS => Some(PresentMode::Apply),
+        LIFECYCLE_RESTORING => Some(PresentMode::Restore),
+        _ => None,
+    }
+}
+
 pub(crate) fn begin_replace_assignments() -> ReplaceAssignmentsStart {
     match transition_lifecycle(
         LIFECYCLE_RUNNING,
@@ -239,7 +253,7 @@ pub(crate) fn begin_replace_assignments() -> ReplaceAssignmentsStart {
         Ok(()) => {
             ReplaceAssignmentsStart::Started(ReplaceAssignmentsTransition { completed: false })
         }
-        Err(LIFECYCLE_INITIALIZING | LIFECYCLE_REPLACING_ASSIGNMENTS | LIFECYCLE_SHUTTING_DOWN) => {
+        Err(LIFECYCLE_INITIALIZING | LIFECYCLE_REPLACING_ASSIGNMENTS | LIFECYCLE_RESTORING) => {
             ReplaceAssignmentsStart::AlreadyInProgress
         }
         Err(_) => ReplaceAssignmentsStart::RuntimeInactive,
@@ -249,14 +263,14 @@ pub(crate) fn begin_replace_assignments() -> ReplaceAssignmentsStart {
 pub(crate) fn begin_shutdown() -> ShutdownStart {
     match transition_lifecycle(
         LIFECYCLE_RUNNING,
-        LIFECYCLE_SHUTTING_DOWN,
+        LIFECYCLE_RESTORING,
         HookStatus::Transitioning,
         None,
     ) {
         Ok(()) => ShutdownStart::Started(ShutdownTransition { completed: false }),
         Err(LIFECYCLE_INITIALIZING) => ShutdownStart::InitializationInProgress,
         Err(LIFECYCLE_REPLACING_ASSIGNMENTS) => ShutdownStart::AssignmentReplacementInProgress,
-        Err(LIFECYCLE_SHUTTING_DOWN) => ShutdownStart::ShutdownInProgress,
+        Err(LIFECYCLE_RESTORING) => ShutdownStart::ShutdownInProgress,
         Err(_) => ShutdownStart::AlreadyInactive,
     }
 }

@@ -5,7 +5,8 @@ use crate::dwmcore::{
     RectVec,
 };
 use crate::lifecycle;
-use crate::log::{self, LutApplyUnavailableReason};
+use crate::lifecycle::PresentMode;
+use crate::log::{self, FrameUnavailableReason};
 use crate::state;
 use dwm_lut_payload::MonitorIdentity;
 use dwm_lut_profile::HookProfile;
@@ -36,7 +37,7 @@ pub(crate) fn present(
     rect_vec: usize,
     call_original: impl FnOnce(usize) -> i32,
 ) -> i32 {
-    if !lifecycle::is_runtime_active() {
+    if lifecycle::present_mode().is_none() {
         return call_original(rect_vec);
     }
     let Some(profile) = state::hook_profile() else {
@@ -51,15 +52,18 @@ pub(crate) fn present(
     }];
     let mut present_rect_vec_storage = empty_rect_vec_storage();
 
+    let processed_frame;
     let prepared_rect_vec =
         match unsafe { collect_present_inputs(&profile, overlay_swap_chain, rect_vec) } {
             // Skip applying the LUT to prevent crashes with hardware DRM (e.g., PlayReady SL3000).
             Ok(PresentInputOutcome::HardwareProtected) => {
                 log::skipped_hardware_protected(overlay_swap_chain);
+                processed_frame = None;
                 rect_vec
             }
             Ok(PresentInputOutcome::Ready(inputs)) => {
-                match apply_lut(overlay_swap_chain, &profile, &inputs) {
+                processed_frame = process_frame(overlay_swap_chain, &profile, &inputs);
+                match processed_frame.and_then(|outcome| outcome.present_dirty_rect) {
                     Some(rect) => full_present_rect_vec(
                         rect,
                         &mut present_rect_storage,
@@ -70,10 +74,17 @@ pub(crate) fn present(
             }
             Err(error) => {
                 log::present_input_collect_error(this, overlay_swap_chain, rect_vec, error);
+                processed_frame = None;
                 rect_vec
             }
         };
-    call_original(prepared_rect_vec)
+    let status = call_original(prepared_rect_vec);
+    if status >= 0
+        && let Some(token) = processed_frame.and_then(|outcome| outcome.restore_token)
+    {
+        crate::render::lock_renderer().commit_restore(token);
+    }
+    status
 }
 
 /// # Safety
@@ -106,52 +117,61 @@ unsafe fn collect_present_inputs(
     }))
 }
 
-fn apply_lut(
+fn process_frame(
     overlay_swap_chain: usize,
     profile: &HookProfile,
     inputs: &PresentInputs,
-) -> Option<DirtyRect> {
-    let apply_result = {
+) -> Option<crate::render::FrameOutcome> {
+    let frame_processing_result = {
         let Some(mut renderer) = crate::render::try_lock_renderer() else {
-            log::lut_apply_unavailable(overlay_swap_chain, LutApplyUnavailableReason::RendererBusy);
+            log::frame_unavailable(overlay_swap_chain, FrameUnavailableReason::RendererBusy);
             return None;
         };
 
-        if !lifecycle::is_runtime_active() {
-            return None;
-        }
-
-        let Some(assignments) = state::assignments() else {
-            log::lut_apply_unavailable(
-                overlay_swap_chain,
-                LutApplyUnavailableReason::AssignmentsUnavailable,
-            );
-            return None;
-        };
-        unsafe {
-            renderer.apply_lut(
-                overlay_swap_chain,
-                profile.d3d11_resource,
-                inputs.monitor_identity,
-                &inputs.dirty_rects,
-                &assignments,
-            )
+        let mode = lifecycle::present_mode()?;
+        match mode {
+            PresentMode::Apply => {
+                let Some(assignments) = state::assignments() else {
+                    log::frame_unavailable(
+                        overlay_swap_chain,
+                        FrameUnavailableReason::AssignmentsUnavailable,
+                    );
+                    return None;
+                };
+                unsafe {
+                    renderer.process_frame(
+                        overlay_swap_chain,
+                        profile.d3d11_resource,
+                        inputs.monitor_identity,
+                        &inputs.dirty_rects,
+                        &assignments,
+                    )
+                }
+            }
+            PresentMode::Restore => unsafe {
+                renderer.restore_back_buffer(
+                    overlay_swap_chain,
+                    profile.d3d11_resource,
+                    inputs.monitor_identity,
+                    &inputs.dirty_rects,
+                )
+            },
         }
     };
 
-    match apply_result {
+    match frame_processing_result {
         Err(error) => {
-            log::lut_apply_unavailable(overlay_swap_chain, LutApplyUnavailableReason::from(error));
+            log::frame_unavailable(overlay_swap_chain, FrameUnavailableReason::from(error));
             None
         }
         Ok(outcome) => {
-            log::lut_apply_frame(
+            log::frame_processed(
                 overlay_swap_chain,
                 inputs.monitor_identity,
                 &inputs.dirty_rects,
                 outcome,
             );
-            outcome.present_dirty_rect
+            Some(outcome)
         }
     }
 }
@@ -345,20 +365,20 @@ mod tests {
         test_monitor_identity, test_profile,
     };
     use super::{
-        PresentInputError, PresentInputOutcome, PresentInputs, apply_lut, collect_present_inputs,
-        present,
+        PresentInputError, PresentInputOutcome, PresentInputs, collect_present_inputs, present,
+        process_frame,
     };
     use crate::dwmcore::{self, DirtyRect};
     use crate::lifecycle;
-    use crate::render::{DXGI_FORMAT_B8G8R8A8_UNORM, FrameSize, LutApplyStatus};
+    use crate::render::{DXGI_FORMAT_B8G8R8A8_UNORM, FrameSize, FrameStatus};
     use crate::state;
     use crate::state::HOOK_GLOBAL_TEST_LOCK;
 
     fn sample_outcome(
         present_dirty_rect: Option<DirtyRect>,
-        status: LutApplyStatus,
-    ) -> crate::render::LutApplyOutcome {
-        crate::render::LutApplyOutcome {
+        status: FrameStatus,
+    ) -> crate::render::FrameOutcome {
+        crate::render::FrameOutcome {
             present_dirty_rect,
             status,
             dxgi_format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -367,6 +387,7 @@ mod tests {
                 height: 1080,
             },
             lut_index: Some(0),
+            restore_token: None,
             #[cfg(debug_assertions)]
             back_buffer_id: 1,
         }
@@ -481,7 +502,7 @@ mod tests {
         }
     }
 
-    mod apply {
+    mod frame_processing {
         use super::*;
 
         #[test]
@@ -498,36 +519,53 @@ mod tests {
                 bottom: 64,
             }];
             let inputs = sample_inputs(dirty_rects.clone());
-            crate::render::set_fake_apply_result(Ok(sample_outcome(None, LutApplyStatus::Applied)));
+            crate::render::set_fake_frame_result(Ok(sample_outcome(None, FrameStatus::LutApplied)));
 
+            let outcome = process_frame(overlay_swap_chain, &test_profile(), &inputs)
+                .expect("renderer should return the configured frame outcome");
+            assert_eq!(outcome.present_dirty_rect, None);
+
+            let frame_call =
+                crate::render::fake_frame_call().expect("renderer should receive present inputs");
             assert_eq!(
-                apply_lut(overlay_swap_chain, &test_profile(), &inputs),
-                None
+                frame_call.operation,
+                crate::render::FakeFrameOperation::Process
             );
-
-            let apply_call = crate::render::fake_apply_lut_call()
-                .expect("renderer should receive present inputs");
-            assert_eq!(apply_call.overlay_swap_chain, overlay_swap_chain);
-            assert_eq!(apply_call.monitor_identity, test_monitor_identity());
-            assert_eq!(apply_call.dirty_rects, dirty_rects);
+            assert_eq!(frame_call.overlay_swap_chain, overlay_swap_chain);
+            assert_eq!(frame_call.monitor_identity, test_monitor_identity());
+            assert_eq!(frame_call.dirty_rects, dirty_rects);
         }
 
         #[test]
-        fn skips_lut_application_when_shutdown_starts_after_entry_check() {
+        fn routes_present_to_restore_processing_during_shutdown() {
             let _guard = HOOK_GLOBAL_TEST_LOCK
                 .lock()
                 .expect("test mutex should lock");
             initialize_test_state();
-            crate::render::set_fake_apply_result(Ok(sample_outcome(None, LutApplyStatus::Applied)));
+            crate::render::set_fake_frame_result(Ok(sample_outcome(
+                Some(DirtyRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                }),
+                FrameStatus::Restored,
+            )));
 
             let shutdown = match lifecycle::begin_shutdown() {
                 lifecycle::ShutdownStart::Started(transition) => transition,
                 other => panic!("unexpected shutdown start: {other:?}"),
             };
+            state::clear_assignments();
 
-            let _ = apply_lut(0x1234, &test_profile(), &sample_inputs(Vec::new()));
+            let _ = process_frame(0x1234, &test_profile(), &sample_inputs(Vec::new()));
 
-            assert!(crate::render::fake_apply_lut_call().is_none());
+            assert_eq!(
+                crate::render::fake_frame_call()
+                    .expect("renderer should receive restore inputs")
+                    .operation,
+                crate::render::FakeFrameOperation::Restore
+            );
             shutdown.finish_inactive();
             state::reset_state_for_tests();
         }
@@ -565,14 +603,14 @@ mod tests {
                 }],
                 true,
             );
-            crate::render::set_fake_apply_result(Ok(sample_outcome(
+            crate::render::set_fake_frame_result(Ok(sample_outcome(
                 Some(DirtyRect {
                     left: 0,
                     top: 0,
                     right: 1920,
                     bottom: 1080,
                 }),
-                LutApplyStatus::Applied,
+                FrameStatus::LutApplied,
             )));
 
             let original_rect_vec = fake.rect_vec_address();
@@ -589,8 +627,8 @@ mod tests {
 
             assert_eq!(status, 0x42);
             assert_eq!(forwarded_rect_vec, Some(original_rect_vec));
-            assert!(crate::render::fake_apply_lut_call().is_none());
-            crate::render::reset_fake_apply_result();
+            assert!(crate::render::fake_frame_call().is_none());
+            crate::render::reset_fake_frame_result();
         }
 
         #[test]
@@ -614,9 +652,9 @@ mod tests {
                 right: 1920,
                 bottom: 1080,
             };
-            crate::render::set_fake_apply_result(Ok(sample_outcome(
+            crate::render::set_fake_frame_result(Ok(sample_outcome(
                 Some(full_rect),
-                LutApplyStatus::Applied,
+                FrameStatus::LutApplied,
             )));
 
             let mut forwarded_rects = None;
@@ -632,7 +670,105 @@ mod tests {
 
             assert_eq!(status, 0x42);
             assert_eq!(forwarded_rects, Some(vec![full_rect]));
-            crate::render::reset_fake_apply_result();
+            crate::render::reset_fake_frame_result();
+        }
+
+        #[test]
+        fn commits_restore_only_after_original_present_succeeds() {
+            let _guard = HOOK_GLOBAL_TEST_LOCK
+                .lock()
+                .expect("test mutex should lock");
+            initialize_test_state();
+            let fake = FakePresentObjects::new(
+                vec![DirtyRect {
+                    left: 0,
+                    top: 0,
+                    right: 64,
+                    bottom: 64,
+                }],
+                false,
+            );
+            crate::render::set_fake_frame_result(Ok(sample_outcome(
+                Some(DirtyRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                }),
+                FrameStatus::Restored,
+            )));
+            crate::render::set_fake_restore_token(
+                test_monitor_identity(),
+                fake.overlay_swap_chain_address(),
+            );
+            let shutdown = match lifecycle::begin_shutdown() {
+                lifecycle::ShutdownStart::Started(transition) => transition,
+                other => panic!("unexpected shutdown start: {other:?}"),
+            };
+
+            assert_eq!(
+                present(
+                    0x1234,
+                    fake.overlay_swap_chain_address(),
+                    fake.rect_vec_address(),
+                    |_| 0,
+                ),
+                0
+            );
+            assert!(crate::render::fake_restore_commit().is_some());
+
+            shutdown.finish_inactive();
+            state::reset_state_for_tests();
+            crate::render::reset_fake_frame_result();
+        }
+
+        #[test]
+        fn does_not_commit_restore_when_original_present_fails() {
+            let _guard = HOOK_GLOBAL_TEST_LOCK
+                .lock()
+                .expect("test mutex should lock");
+            initialize_test_state();
+            let fake = FakePresentObjects::new(
+                vec![DirtyRect {
+                    left: 0,
+                    top: 0,
+                    right: 64,
+                    bottom: 64,
+                }],
+                false,
+            );
+            crate::render::set_fake_frame_result(Ok(sample_outcome(
+                Some(DirtyRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                }),
+                FrameStatus::Restored,
+            )));
+            crate::render::set_fake_restore_token(
+                test_monitor_identity(),
+                fake.overlay_swap_chain_address(),
+            );
+            let shutdown = match lifecycle::begin_shutdown() {
+                lifecycle::ShutdownStart::Started(transition) => transition,
+                other => panic!("unexpected shutdown start: {other:?}"),
+            };
+
+            assert_eq!(
+                present(
+                    0x1234,
+                    fake.overlay_swap_chain_address(),
+                    fake.rect_vec_address(),
+                    |_| -1,
+                ),
+                -1
+            );
+            assert!(crate::render::fake_restore_commit().is_none());
+
+            shutdown.finish_inactive();
+            state::reset_state_for_tests();
+            crate::render::reset_fake_frame_result();
         }
     }
 }

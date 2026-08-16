@@ -5,20 +5,20 @@ use dwm_lut_payload::MonitorIdentity;
 use crate::DirtyRect;
 use crate::present::PresentInputError;
 #[cfg(debug_assertions)]
-use crate::render::LutApplyStatus;
-use crate::render::{FrameAcquireError, LutApplyOutcome};
+use crate::render::FrameStatus;
+use crate::render::{FrameAcquireError, FrameOutcome};
 
 #[cfg(debug_assertions)]
 use super::SharedLimiter;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LutApplyUnavailableReason {
+pub(crate) enum FrameUnavailableReason {
     RendererBusy,
     AssignmentsUnavailable,
     Frame(FrameAcquireError),
 }
 
-impl From<FrameAcquireError> for LutApplyUnavailableReason {
+impl From<FrameAcquireError> for FrameUnavailableReason {
     fn from(value: FrameAcquireError) -> Self {
         Self::Frame(value)
     }
@@ -26,13 +26,13 @@ impl From<FrameAcquireError> for LutApplyUnavailableReason {
 
 #[cfg(debug_assertions)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct LutApplyLogKey {
+struct FrameLogKey {
     overlay_swap_chain: usize,
-    back_buffer: u128,
+    back_buffer: usize,
 }
 
 #[cfg(debug_assertions)]
-static LUT_APPLY_LIMITER: SharedLimiter<LutApplyLogKey> = SharedLimiter::new(300);
+static FRAME_LOG_LIMITER: SharedLimiter<FrameLogKey> = SharedLimiter::new(300);
 
 #[cfg(debug_assertions)]
 static SKIPPED_HARDWARE_PROTECTED_LIMITER: SharedLimiter<usize> = SharedLimiter::new(300);
@@ -70,44 +70,44 @@ pub(crate) fn skipped_hardware_protected(overlay_swap_chain: usize) {
     let _ = overlay_swap_chain;
 }
 
-pub(crate) fn lut_apply_unavailable(overlay_swap_chain: usize, reason: LutApplyUnavailableReason) {
+pub(crate) fn frame_unavailable(overlay_swap_chain: usize, reason: FrameUnavailableReason) {
     #[cfg(debug_assertions)]
     {
         super::write(format_args!(
-            "event=lut_apply_unavailable overlay_swap_chain=0x{overlay_swap_chain:x} reason={reason:?}"
+            "event=frame_unavailable overlay_swap_chain=0x{overlay_swap_chain:x} reason={reason:?}"
         ));
     }
     #[cfg(not(debug_assertions))]
     let _ = (overlay_swap_chain, reason);
 }
 
-pub(crate) fn lut_apply_frame(
+pub(crate) fn frame_processed(
     overlay_swap_chain: usize,
     monitor_identity: MonitorIdentity,
     dirty_rects: &[DirtyRect],
-    outcome: LutApplyOutcome,
+    outcome: FrameOutcome,
 ) {
     #[cfg(debug_assertions)]
     {
-        let is_err = matches!(outcome.status, LutApplyStatus::Failed(_));
+        let is_err = matches!(outcome.status, FrameStatus::Failed(_));
         if !is_err {
-            let key = LutApplyLogKey {
+            let key = FrameLogKey {
                 overlay_swap_chain,
                 back_buffer: outcome.back_buffer_id,
             };
-            if !LUT_APPLY_LIMITER.sample(key).should_log {
+            if !FRAME_LOG_LIMITER.sample(key).should_log {
                 return;
             }
         }
 
-        let lut_applied = matches!(outcome.status, LutApplyStatus::Applied);
+        let lut_applied = matches!(outcome.status, FrameStatus::LutApplied);
         let lut_active = outcome.lut_index.is_some();
         let monitor_identity = format!(
             "{}:{}",
             monitor_identity.adapter_luid, monitor_identity.target_id
         );
         super::write(format_args!(
-            "event=lut_apply_frame overlay_swap_chain=0x{:x} applied={} status={} lut_active={} dxgi_format={} width={} height={} lut_index={:?} back_buffer_id={} dirty_rects={:?} present_dirty_rect={:?} monitor_identity={}",
+            "event=frame_processed overlay_swap_chain=0x{:x} applied={} status={} lut_active={} dxgi_format={} width={} height={} lut_index={:?} back_buffer_id={} dirty_rects={:?} present_dirty_rect={:?} monitor_identity={}",
             overlay_swap_chain,
             u8::from(lut_applied),
             outcome.status.as_str(),

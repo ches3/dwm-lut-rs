@@ -70,11 +70,11 @@ pub(super) struct LutPassInput<'a> {
     pub(super) context: &'a ID3D11DeviceContext,
     pub(super) back_buffer: &'a ID3D11Texture2D,
     pub(super) render_target: &'a ID3D11RenderTargetView,
-    pub(super) source_texture: &'a ID3D11Texture2D,
-    pub(super) source_view: &'a ID3D11ShaderResourceView,
+    pub(super) clean_texture: &'a ID3D11Texture2D,
+    pub(super) clean_view: &'a ID3D11ShaderResourceView,
     pub(super) lut_view: &'a ID3D11ShaderResourceView,
     pub(super) assignment: &'a LutAssignment,
-    pub(super) source_update_rects: &'a [DirtyRect],
+    pub(super) clean_update_rects: &'a [DirtyRect],
     pub(super) plan: &'a FramePlan,
 }
 
@@ -95,14 +95,12 @@ impl LutRenderPass {
         let saved_state = ContextState::capture(input.context);
         clear_pipeline_bindings(input.context);
 
-        for rect in input.source_update_rects {
-            copy_source_rect(
-                input.context,
-                input.back_buffer,
-                input.source_texture,
-                *rect,
-            );
-        }
+        copy_back_buffer_regions_to_clean_frame(
+            input.context,
+            input.back_buffer,
+            input.clean_texture,
+            input.clean_update_rects,
+        );
 
         let constants =
             ShaderConstants::for_assignment(input.assignment, input.plan.lut().back_buffer_format);
@@ -123,7 +121,7 @@ impl LutRenderPass {
         self.bind(
             input.context,
             input.render_target,
-            input.source_view,
+            input.clean_view,
             input.lut_view,
             input.plan.size(),
         );
@@ -150,12 +148,12 @@ impl LutRenderPass {
         &self,
         context: &ID3D11DeviceContext,
         render_target: &ID3D11RenderTargetView,
-        source_view: &ID3D11ShaderResourceView,
+        clean_view: &ID3D11ShaderResourceView,
         lut_view: &ID3D11ShaderResourceView,
         size: FrameSize,
     ) {
         let vertex_buffers = [Some(self.vertex_buffer.clone())];
-        let shader_resources = [Some(source_view.clone()), Some(lut_view.clone())];
+        let shader_resources = [Some(clean_view.clone()), Some(lut_view.clone())];
         let samplers = [Some(self.sampler.clone())];
         let constant_buffers = [Some(self.constant_buffer.clone())];
         let mut render_targets: [Option<ID3D11RenderTargetView>; RENDER_TARGET_LIMIT] =
@@ -210,10 +208,64 @@ impl LutRenderPass {
     }
 }
 
-fn copy_source_rect(
+pub(super) fn restore_back_buffer_from_clean_frame(
     context: &ID3D11DeviceContext,
     back_buffer: &ID3D11Texture2D,
-    source_texture: &ID3D11Texture2D,
+    clean_texture: &ID3D11Texture2D,
+    source_dirty_rects: &[DirtyRect],
+) {
+    with_preserved_context(context, || {
+        copy_back_buffer_regions_to_clean_frame(
+            context,
+            back_buffer,
+            clean_texture,
+            source_dirty_rects,
+        );
+        unsafe {
+            context.CopyResource(back_buffer, clean_texture);
+        }
+    });
+}
+
+pub(super) fn update_clean_frame(
+    context: &ID3D11DeviceContext,
+    back_buffer: &ID3D11Texture2D,
+    clean_texture: &ID3D11Texture2D,
+    source_dirty_rects: &[DirtyRect],
+) {
+    with_preserved_context(context, || {
+        copy_back_buffer_regions_to_clean_frame(
+            context,
+            back_buffer,
+            clean_texture,
+            source_dirty_rects,
+        );
+    });
+}
+
+fn with_preserved_context(context: &ID3D11DeviceContext, operation: impl FnOnce()) {
+    let saved_state = ContextState::capture(context);
+    clear_pipeline_bindings(context);
+    operation();
+    clear_pipeline_bindings(context);
+    saved_state.restore(context);
+}
+
+fn copy_back_buffer_regions_to_clean_frame(
+    context: &ID3D11DeviceContext,
+    back_buffer: &ID3D11Texture2D,
+    clean_texture: &ID3D11Texture2D,
+    source_dirty_rects: &[DirtyRect],
+) {
+    for rect in source_dirty_rects {
+        copy_back_buffer_rect_to_clean(context, back_buffer, clean_texture, *rect);
+    }
+}
+
+fn copy_back_buffer_rect_to_clean(
+    context: &ID3D11DeviceContext,
+    back_buffer: &ID3D11Texture2D,
+    clean_texture: &ID3D11Texture2D,
     rect: DirtyRect,
 ) {
     let source_box = D3D11_BOX {
@@ -226,7 +278,7 @@ fn copy_source_rect(
     };
     unsafe {
         context.CopySubresourceRegion(
-            source_texture,
+            clean_texture,
             0,
             rect.left as u32,
             rect.top as u32,

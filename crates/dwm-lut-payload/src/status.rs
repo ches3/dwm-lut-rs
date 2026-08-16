@@ -291,6 +291,7 @@ pub enum ShutdownStatus {
     AlreadyInProgress = 2,
     AlreadyShutDown = 3,
     MinHookDisableAllFailed = 4,
+    BackBufferRestoreTimedOut = 5,
 }
 
 impl ShutdownStatus {
@@ -301,6 +302,7 @@ impl ShutdownStatus {
             2 => Self::AlreadyInProgress,
             3 => Self::AlreadyShutDown,
             4 => Self::MinHookDisableAllFailed,
+            5 => Self::BackBufferRestoreTimedOut,
             _ => return None,
         })
     }
@@ -317,6 +319,7 @@ impl fmt::Display for ShutdownStatus {
             ),
             Self::AlreadyShutDown => write!(f, "hook DLL is already shut down"),
             Self::MinHookDisableAllFailed => write!(f, "MinHook disable-all failed"),
+            Self::BackBufferRestoreTimedOut => write!(f, "back buffer restore timed out"),
         }
     }
 }
@@ -325,7 +328,7 @@ impl fmt::Display for ShutdownStatus {
 mod tests {
     use super::{
         HookStatus, HookTargetId, InitializeStatus, RESOLVE_CODE_BASE, ReplaceAssignmentsStatus,
-        ResolveFailureKind,
+        ResolveFailureKind, ShutdownStatus,
     };
 
     #[test]
@@ -358,6 +361,21 @@ mod tests {
         }
         assert_eq!(HookStatus::from_code(3), None);
         assert_eq!(HookStatus::from_code(u32::MAX), None);
+    }
+
+    #[test]
+    fn shutdown_status_codes_round_trip() {
+        for status in [
+            ShutdownStatus::Success,
+            ShutdownStatus::NotInitialized,
+            ShutdownStatus::AlreadyInProgress,
+            ShutdownStatus::AlreadyShutDown,
+            ShutdownStatus::MinHookDisableAllFailed,
+            ShutdownStatus::BackBufferRestoreTimedOut,
+        ] {
+            assert_eq!(ShutdownStatus::from_code(status as u32), Some(status));
+        }
+        assert_eq!(ShutdownStatus::from_code(6), None);
     }
 
     #[test]

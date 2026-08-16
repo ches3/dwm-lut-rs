@@ -2,7 +2,7 @@
 
 #[cfg(debug_assertions)]
 use dwm_lut_payload::ShutdownStatus;
-use dwm_lut_payload::{InitializeStatus, ReplaceAssignmentsStatus};
+use dwm_lut_payload::{InitializeStatus, MonitorIdentity, ReplaceAssignmentsStatus};
 
 use crate::minhook::RegisteredHook;
 use crate::resolver::SignatureResolutionReport;
@@ -17,6 +17,7 @@ pub(crate) enum ShutdownFinished {
     HookRuntimeMissing,
     Success,
     MinHookDisableAllFailed,
+    BackBufferRestoreTimedOut,
 }
 
 impl ShutdownFinished {
@@ -30,6 +31,7 @@ impl ShutdownFinished {
             Self::HookRuntimeMissing => "hook_runtime_missing",
             Self::Success => "success",
             Self::MinHookDisableAllFailed => "minhook_disable_all_failed",
+            Self::BackBufferRestoreTimedOut => "back_buffer_restore_timed_out",
         }
     }
 
@@ -42,6 +44,7 @@ impl ShutdownFinished {
             Self::AlreadyShutDown => ShutdownStatus::AlreadyShutDown,
             Self::HookRuntimeMissing | Self::Success => ShutdownStatus::Success,
             Self::MinHookDisableAllFailed => ShutdownStatus::MinHookDisableAllFailed,
+            Self::BackBufferRestoreTimedOut => ShutdownStatus::BackBufferRestoreTimedOut,
         }
     }
 }
@@ -103,6 +106,53 @@ pub(crate) fn shutdown_finished(finished: ShutdownFinished) {
     }
     #[cfg(not(debug_assertions))]
     let _ = finished;
+}
+
+pub(crate) fn shutdown_restore_started(pending_back_buffer_count: usize) {
+    #[cfg(debug_assertions)]
+    super::write(format_args!(
+        "event=shutdown_restore_started pending_back_buffers={pending_back_buffer_count}"
+    ));
+    #[cfg(not(debug_assertions))]
+    let _ = pending_back_buffer_count;
+}
+
+pub(crate) fn shutdown_active_monitors_query_failed(error: u32) {
+    #[cfg(debug_assertions)]
+    super::write(format_args!(
+        "event=shutdown_active_monitors_query_failed error={error}"
+    ));
+    #[cfg(not(debug_assertions))]
+    let _ = error;
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn shutdown_back_buffer_restored(
+    monitor: MonitorIdentity,
+    back_buffer: usize,
+    remaining_back_buffer_count: usize,
+) {
+    #[cfg(debug_assertions)]
+    super::write(format_args!(
+        "event=shutdown_back_buffer_restored monitor={}:{} back_buffer=0x{back_buffer:x} remaining_back_buffers={remaining_back_buffer_count}",
+        monitor.adapter_luid, monitor.target_id
+    ));
+    #[cfg(not(debug_assertions))]
+    let _ = (monitor, back_buffer, remaining_back_buffer_count);
+}
+
+pub(crate) fn shutdown_restore_completed() {
+    #[cfg(debug_assertions)]
+    super::write(format_args!("event=shutdown_restore_completed"));
+}
+
+pub(crate) fn shutdown_restore_timed_out(pending_back_buffer_count: usize) {
+    #[cfg(debug_assertions)]
+    super::write(format_args!(
+        "event=shutdown_restore_timed_out pending_back_buffers={pending_back_buffer_count}"
+    ));
+    #[cfg(not(debug_assertions))]
+    let _ = pending_back_buffer_count;
 }
 
 pub(crate) fn replace_assignments_start() {
