@@ -138,6 +138,7 @@ const fn to_hook_target_id(target: HookTarget) -> HookTargetId {
             HookTargetId::IsCandidateDirectFlipCompatible
         }
         HookTarget::IsCandidateOverlayCompatible => HookTargetId::IsCandidateOverlayCompatible,
+        HookTarget::CheckAndRecordOverlayCandidate => HookTargetId::CheckAndRecordOverlayCandidate,
     }
 }
 

@@ -53,6 +53,7 @@ pub enum HookTargetId {
     Present = 1,
     IsCandidateDirectFlipCompatible = 2,
     IsCandidateOverlayCompatible = 3,
+    CheckAndRecordOverlayCandidate = 4,
 }
 
 impl HookTargetId {
@@ -61,6 +62,7 @@ impl HookTargetId {
             1 => Some(Self::Present),
             2 => Some(Self::IsCandidateDirectFlipCompatible),
             3 => Some(Self::IsCandidateOverlayCompatible),
+            4 => Some(Self::CheckAndRecordOverlayCandidate),
             _ => None,
         }
     }
@@ -70,6 +72,7 @@ impl HookTargetId {
             Self::Present => "Present",
             Self::IsCandidateDirectFlipCompatible => "IsCandidateDirectFlipCompatible",
             Self::IsCandidateOverlayCompatible => "IsCandidateOverlayCompatible",
+            Self::CheckAndRecordOverlayCandidate => "CheckAndRecordOverlayCandidate",
         }
     }
 }

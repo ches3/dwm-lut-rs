@@ -6,6 +6,7 @@ pub enum HookTarget {
     Present,
     IsCandidateDirectFlipCompatible,
     IsCandidateOverlayCompatible,
+    CheckAndRecordOverlayCandidate,
 }
 
 impl HookTarget {
@@ -13,6 +14,7 @@ impl HookTarget {
         Self::Present,
         Self::IsCandidateDirectFlipCompatible,
         Self::IsCandidateOverlayCompatible,
+        Self::CheckAndRecordOverlayCandidate,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -20,6 +22,7 @@ impl HookTarget {
             Self::Present => "Present",
             Self::IsCandidateDirectFlipCompatible => "IsCandidateDirectFlipCompatible",
             Self::IsCandidateOverlayCompatible => "IsCandidateOverlayCompatible",
+            Self::CheckAndRecordOverlayCandidate => "CheckAndRecordOverlayCandidate",
         }
     }
 
@@ -30,7 +33,9 @@ impl HookTarget {
     pub const fn is_flip_gate(self) -> bool {
         match self {
             Self::Present => false,
-            Self::IsCandidateDirectFlipCompatible | Self::IsCandidateOverlayCompatible => true,
+            Self::IsCandidateDirectFlipCompatible
+            | Self::IsCandidateOverlayCompatible
+            | Self::CheckAndRecordOverlayCandidate => true,
         }
     }
 
@@ -60,6 +65,12 @@ impl HookTarget {
                     "IsCandidateOverlayCompatbile",
                 ],
                 return_type: AbiReturnType::CppBool,
+                required_argument_roles: &[],
+            },
+            Self::CheckAndRecordOverlayCandidate => HookExtractSpec {
+                class_name: "COverlayContext",
+                method_names: &["CheckAndRecordOverlayCandidate"],
+                return_type: AbiReturnType::HResult,
                 required_argument_roles: &[],
             },
         }
@@ -484,6 +495,7 @@ mod tests {
                 HookTarget::Present => seen |= 1 << 0,
                 HookTarget::IsCandidateDirectFlipCompatible => seen |= 1 << 1,
                 HookTarget::IsCandidateOverlayCompatible => seen |= 1 << 2,
+                HookTarget::CheckAndRecordOverlayCandidate => seen |= 1 << 3,
             }
         }
         assert_eq!(seen.count_ones() as usize, HookTarget::ALL.len());
